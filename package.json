@@ -1,0 +1,14 @@
+{
+  "name": "agentic-whiteboard-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.18.0",
+  "scripts": {
+    "dev": "pnpm dev:whiteboard",
+    "dev:all": "pnpm --parallel --filter @agentic-whiteboard/whiteboard --filter @agentic-whiteboard/mcp dev",
+    "dev:whiteboard": "pnpm --filter @agentic-whiteboard/whiteboard dev",
+    "dev:mcp": "pnpm --filter @agentic-whiteboard/mcp dev",
+    "build": "pnpm -r build",
+    "check": "pnpm -r check"
+  }
+}

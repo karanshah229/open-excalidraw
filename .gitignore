@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Build output and TypeScript state
+dist/
+coverage/
+*.tsbuildinfo
+
+# Environment and local configuration
+.env
+.env.*
+!.env.example
+
+# Logs and diagnostics
+*.log
+logs/
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local editor and operating-system files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local Excalidraw / whiteboard state exports
+*.excalidraw.json
+*.excalidraw-backup.json
