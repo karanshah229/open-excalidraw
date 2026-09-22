@@ -2,6 +2,7 @@
   "name": "agentic-whiteboard-workspace",
   "private": true,
   "version": "0.1.0",
+  "type": "module",
   "packageManager": "pnpm@10.18.0",
   "scripts": {
     "dev": "pnpm dev:whiteboard",
@@ -9,6 +10,18 @@
     "dev:whiteboard": "pnpm --filter @agentic-whiteboard/whiteboard dev",
     "dev:mcp": "pnpm --filter @agentic-whiteboard/mcp dev",
     "build": "pnpm -r build",
-    "check": "pnpm -r check"
+    "check": "pnpm -r check",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.11.0",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.9.8",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.70.1"
   }
 }

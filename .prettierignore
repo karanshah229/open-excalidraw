@@ -1,0 +1,8 @@
+node_modules
+dist
+build
+.system_generated
+.agents
+.claude
+coverage
+pnpm-lock.yaml
