@@ -158,7 +158,6 @@ export const workspaceApi = {
   },
   async saveBoard(document: BoardDocument) {
     await workspaceStore.saveBoard(document)
-    if (activeUserId) await updateSyncStatus(document.id, 'pending-sync')
     queueSync()
   },
   async activateCloudWorkspace(userId: string) {
