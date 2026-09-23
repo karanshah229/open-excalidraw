@@ -43,7 +43,7 @@ export interface WorkspaceStore {
   listBoards(projectId: string): Promise<Board[]>
   createBoard(projectId: string, name: string): Promise<BoardDocument>
   loadBoard(boardId: string): Promise<BoardDocument | null>
-  saveBoard(document: BoardDocument): Promise<void>
+  saveBoard(document: BoardDocument): Promise<BoardDocument>
   upsertProject(project: Project): Promise<void>
   upsertBoard(document: BoardDocument): Promise<void>
   updateBoardSyncStatus(boardId: string, syncStatus: BoardSyncStatus): Promise<void>
@@ -266,10 +266,18 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
     return document ? plain<BoardDocument>(document) : null
   }
 
-  async saveBoard(document: BoardDocument): Promise<void> {
+  async saveBoard(document: BoardDocument): Promise<BoardDocument> {
     const db = await database()
-    const existing = await (db.boards as any).findOne(document.id).exec()
-    const current = existing ? plain<BoardDocument>(existing) : normalizedBoard(document)
+    const existingDocument = await (db.boards as any).findOne(document.id).exec()
+    const current = existingDocument ? plain<BoardDocument>(existingDocument) : normalizedBoard(document)
+    if (existingDocument && document.revision !== current.revision) {
+      await existingDocument.incrementalPatch({
+        syncStatus: 'conflict',
+        nextSyncAt: null,
+        lastSyncError: 'This board changed in another tab or device. Your local copy was preserved.',
+      })
+      throw new Error('BOARD_REVISION_CONFLICT')
+    }
     const updated: BoardDocument = {
       ...document,
       updatedAt: now(),
@@ -282,8 +290,9 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
       nextSyncAt: null,
       lastSyncError: null,
     }
-    if (existing) await existing.incrementalPatch(updated)
+    if (existingDocument) await existingDocument.incrementalPatch(updated)
     else await (db.boards as any).insert(updated)
+    return updated
   }
 
   async upsertProject(project: Project): Promise<void> {

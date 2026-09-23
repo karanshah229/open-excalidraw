@@ -85,7 +85,8 @@ export function BoardEditor() {
       documentRef.current = { ...documentRef.current, name: trimmed }
     }
     try {
-      await workspaceApi.renameBoard(boardId, trimmed)
+      const saved = await workspaceApi.renameBoard(boardId, trimmed)
+      if (saved) documentRef.current = saved
       queryClient.invalidateQueries({ queryKey: ['workspace'] })
     } catch {
       setBoardMeta((prev) => (prev ? { ...prev, boardName: boardMeta.boardName } : prev))
@@ -227,8 +228,8 @@ export function BoardEditor() {
         const document = documentRef.current
         if (!document) return
         try {
-          await workspaceApi.saveBoard({ ...document, scene })
-          documentRef.current = { ...document, scene }
+          const saved = await workspaceApi.saveBoard({ ...document, scene })
+          documentRef.current = saved
           queryClient.invalidateQueries({ queryKey: ['workspace'] })
         } catch {
           setState('Local save failed')

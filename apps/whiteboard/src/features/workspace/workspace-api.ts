@@ -244,13 +244,19 @@ export const workspaceApi = {
       ...document,
       name: trimmed,
     }
-    await workspaceStore.saveBoard(updated)
-    queueSync()
-    return updated
+    return workspaceApi.saveBoard(updated)
   },
   async saveBoard(document: BoardDocument) {
-    await workspaceStore.saveBoard(document)
-    queueSync()
+    try {
+      const saved = await workspaceStore.saveBoard(document)
+      queueSync()
+      return saved
+    } catch (error) {
+      if (error instanceof Error && error.message === 'BOARD_REVISION_CONFLICT') {
+        window.dispatchEvent(new CustomEvent(`board-sync:${document.id}`, { detail: 'conflict' }))
+      }
+      throw error
+    }
   },
   async keepLocalConflict(boardId: string) {
     const db = getFirestoreDb()
