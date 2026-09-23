@@ -39,7 +39,7 @@ async function syncWorkspace(userId: string) {
         if (!boardListeners.has(board.id)) {
           boardListeners.set(
             board.id,
-            onSnapshot(ref, (snapshot) => {
+            onSnapshot(ref, { includeMetadataChanges: true }, (snapshot) => {
               if (!snapshot.exists()) return
               void updateSyncStatus(board.id, snapshot.metadata.hasPendingWrites ? 'pending-sync' : 'synced')
             }),
