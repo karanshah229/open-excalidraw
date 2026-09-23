@@ -8,7 +8,6 @@ export const workspaceStore = new RxDbWorkspaceStore()
 
 let activeUserId: string | null = null
 let syncTimer: number | undefined
-const boardListeners = new Map<string, () => void>()
 const projectListeners = new Map<string, () => void>()
 let projectsListener: (() => void) | undefined
 
@@ -42,28 +41,21 @@ async function syncWorkspace(userId: string) {
   const db = getFirestoreDb()
   if (!db) return
   const { projects, boards } = await workspaceApi.listWorkspace()
-  await Promise.all(boards.map((board) => updateSyncStatus(board.id, 'syncing')))
-  try {
-    await Promise.all([
-      ...projects.map((project) => setDoc(doc(db, 'users', userId, 'projects', project.id), project)),
-      ...boards.map((board) => {
+  const unsyncedBoards = boards.filter((board) => board.syncStatus === 'local-only')
+
+  await Promise.all(projects.map((project) => setDoc(doc(db, 'users', userId, 'projects', project.id), project)))
+  await Promise.all(
+    unsyncedBoards.map(async (board) => {
+      try {
         const { project: _project, ...document } = board
         const ref = doc(db, 'users', userId, 'projects', board.projectId, 'boards', board.id)
-        if (!boardListeners.has(board.id)) {
-          boardListeners.set(
-            board.id,
-            onSnapshot(ref, { includeMetadataChanges: true }, (snapshot) => {
-              if (!snapshot.exists()) return
-              void updateSyncStatus(board.id, snapshot.metadata.hasPendingWrites ? 'pending-sync' : 'synced')
-            }),
-          )
-        }
-        return setDoc(ref, firestoreValue({ ...document, syncStatus: 'synced' }))
-      }),
-    ])
-  } catch {
-    await Promise.all(boards.map((board) => updateSyncStatus(board.id, 'sync-failed')))
-  }
+        await setDoc(ref, firestoreValue({ ...document, syncStatus: 'synced' }))
+        await updateSyncStatus(board.id, 'synced')
+      } catch {
+        await updateSyncStatus(board.id, 'sync-failed')
+      }
+    }),
+  )
 }
 
 async function downloadWorkspace(userId: string) {
@@ -102,7 +94,7 @@ function subscribeToRemoteWorkspace(userId: string) {
             void (async () => {
               const local = await workspaceStore.loadBoard(remote.id)
               if (!local || remote.updatedAt > local.updatedAt) await workspaceStore.upsertBoard({ ...remote, syncStatus: 'synced' })
-              await updateSyncStatus(remote.id, boardDocument.metadata.hasPendingWrites ? 'pending-sync' : 'synced')
+              await updateSyncStatus(remote.id, 'synced')
             })()
           }
         }),
@@ -174,12 +166,11 @@ export const workspaceApi = {
     await workspaceStore.bootstrap()
     await downloadWorkspace(userId)
     subscribeToRemoteWorkspace(userId)
-    queueSync()
+    const { boards } = await workspaceApi.listWorkspace()
+    if (boards.some((board) => board.syncStatus === 'local-only')) queueSync()
   },
   deactivateCloudWorkspace() {
     activeUserId = null
-    for (const unsubscribe of boardListeners.values()) unsubscribe()
-    boardListeners.clear()
     for (const unsubscribe of projectListeners.values()) unsubscribe()
     projectListeners.clear()
     projectsListener?.()

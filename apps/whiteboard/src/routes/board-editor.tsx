@@ -16,11 +16,10 @@ const starterLibraries = [
   'https://libraries.excalidraw.com/libraries/childishgirl/aws-architecture-icons.excalidrawlib',
 ]
 
-type EditorStatus = 'Loading board' | 'Saving locally' | 'Local only' | 'Pending sync' | 'Syncing' | 'Synced' | 'Sync failed' | 'Local save failed'
+type EditorStatus = 'Loading board' | 'Saving locally' | 'Local only' | 'Synced' | 'Sync failed' | 'Local save failed'
 const statusLabel = (status: BoardSyncStatus): EditorStatus => {
   if (status === 'local-only') return 'Local only'
-  if (status === 'pending-sync') return 'Pending sync'
-  if (status === 'syncing') return 'Syncing'
+  if (status === 'pending-sync' || status === 'syncing') return 'Synced'
   if (status === 'synced') return 'Synced'
   return 'Sync failed'
 }
@@ -224,7 +223,6 @@ export function BoardEditor() {
           await workspaceApi.saveBoard({ ...document, scene })
           documentRef.current = { ...document, scene }
           queryClient.invalidateQueries({ queryKey: ['workspace'] })
-          setState('Pending sync')
         } catch {
           setState('Local save failed')
         }
