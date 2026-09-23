@@ -343,7 +343,7 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
     if (document) {
       const current = plain<BoardDocument>(document)
       await document.incrementalPatch({
-        syncStatus: 'local-only',
+        syncStatus: 'sync-failed',
         syncAttempts: current.syncAttempts + 1,
         nextSyncAt,
         lastSyncError: error,

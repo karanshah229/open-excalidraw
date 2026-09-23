@@ -76,7 +76,9 @@ async function syncWorkspace(userId: string) {
   if (!db) return
   const { projects, boards } = await workspaceApi.listWorkspace()
   const now = new Date().toISOString()
-  const unsyncedBoards = boards.filter((board) => board.syncStatus === 'local-only' && (!board.nextSyncAt || board.nextSyncAt <= now))
+  const unsyncedBoards = boards.filter(
+    (board) => (board.syncStatus === 'local-only' || board.syncStatus === 'sync-failed') && (!board.nextSyncAt || board.nextSyncAt <= now),
+  )
   const projectIds = new Set([...dirtyProjectIds, ...unsyncedBoards.map((board) => board.projectId)])
 
   for (const project of projects.filter((item) => projectIds.has(item.id))) {
@@ -95,7 +97,7 @@ async function syncWorkspace(userId: string) {
     try {
       await withSyncLock(async () => {
         const current = await workspaceStore.loadBoard(board.id)
-        if (!current || current.syncStatus !== 'local-only') return
+        if (!current || (current.syncStatus !== 'local-only' && current.syncStatus !== 'sync-failed')) return
         const ref = doc(db, 'users', userId, 'projects', current.projectId, 'boards', current.id)
         await runTransaction(db, async (transaction) => {
           const remoteSnapshot = await transaction.get(ref)
@@ -116,13 +118,13 @@ async function syncWorkspace(userId: string) {
         const current = await workspaceStore.loadBoard(board.id)
         const nextAttempt = (current?.syncAttempts ?? 0) + 1
         await workspaceStore.markBoardSyncFailed(board.id, errorMessage(error), retryAt(nextAttempt))
-        window.dispatchEvent(new CustomEvent(`board-sync:${board.id}`, { detail: 'local-only' }))
+        window.dispatchEvent(new CustomEvent(`board-sync:${board.id}`, { detail: 'sync-failed' }))
       }
     }
   }
 
   const pending = (await workspaceApi.listWorkspace()).boards
-    .filter((board) => board.syncStatus === 'local-only' && board.nextSyncAt)
+    .filter((board) => (board.syncStatus === 'local-only' || board.syncStatus === 'sync-failed') && board.nextSyncAt)
     .map((board) => new Date(board.nextSyncAt!).getTime())
   if (pending.length) {
     const earliest = Math.min(...pending)
@@ -143,7 +145,7 @@ async function downloadWorkspace(userId: string) {
         boardSnapshots.docs.map(async (boardSnapshot) => {
           const remote = cloudBoard(boardSnapshot.data() as BoardDocument)
           const local = await workspaceStore.loadBoard(remote.id)
-          if (local?.syncStatus === 'local-only') {
+          if (local?.syncStatus === 'local-only' || local?.syncStatus === 'sync-failed') {
             if (matchesCommittedVersion(local, remote)) {
               await workspaceStore.markBoardSynced(remote.id, remote.revision)
             } else if (remote.revision !== local.baseRevision) {
@@ -174,7 +176,7 @@ function subscribeToRemoteWorkspace(userId: string) {
             void (async () => {
               const local = await workspaceStore.loadBoard(remote.id)
               const normalized = cloudBoard(remote)
-              if (local?.syncStatus === 'local-only') {
+              if (local?.syncStatus === 'local-only' || local?.syncStatus === 'sync-failed') {
                 // Firestore can emit this tab's transaction before markBoardSynced runs.
                 // Keep that in-flight acknowledgement owned by syncWorkspace; only a truly
                 // newer remote revision is a conflict.
@@ -277,7 +279,7 @@ export const workspaceApi = {
     await downloadWorkspace(userId)
     subscribeToRemoteWorkspace(userId)
     const { boards } = await workspaceApi.listWorkspace()
-    if (boards.some((board) => board.syncStatus === 'local-only') || dirtyProjectIds.size) queueSync()
+    if (boards.some((board) => board.syncStatus === 'local-only' || board.syncStatus === 'sync-failed') || dirtyProjectIds.size) queueSync()
   },
   deactivateCloudWorkspace() {
     activeUserId = null
