@@ -2062,6 +2062,158 @@ button {
   color: #ffffff;
 }
 
+/* ==========================================================================
+   Excalidraw Right-Click Context Menu Styles
+   ========================================================================== */
+
+.excalidraw .context-menu {
+  position: relative;
+  border-radius: 8px !important;
+  box-shadow:
+    0 10px 25px -5px rgba(0, 0, 0, 0.15),
+    0 8px 10px -6px rgba(0, 0, 0, 0.1) !important;
+  padding: 5px !important;
+  list-style: none !important;
+  user-select: none !important;
+  margin: 0 !important;
+  background-color: var(--bg-surface) !important;
+  border: 1px solid var(--border-color) !important;
+  cursor: default !important;
+  min-width: 220px !important;
+  font-family: inherit !important;
+}
+
+[data-theme='dark'] .excalidraw .context-menu {
+  background-color: var(--bg-surface) !important;
+  border-color: var(--border-color) !important;
+  box-shadow:
+    0 12px 32px rgba(0, 0, 0, 0.55),
+    0 4px 12px rgba(0, 0, 0, 0.35) !important;
+}
+
+.excalidraw .context-menu li {
+  list-style: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+.excalidraw .context-menu-item {
+  position: relative !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  width: 100% !important;
+  min-width: 200px !important;
+  margin: 1px 0 !important;
+  padding: 7px 10px !important;
+  border-radius: 6px !important;
+  background-color: transparent !important;
+  border: none !important;
+  color: var(--text-primary) !important;
+  font-family: inherit !important;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  line-height: 1.4 !important;
+  text-align: start !important;
+  cursor: pointer !important;
+  box-sizing: border-box !important;
+  transition:
+    background-color 0.1s ease,
+    color 0.1s ease !important;
+}
+
+.excalidraw .context-menu-item:hover,
+.excalidraw .context-menu-item:focus {
+  background-color: var(--bg-surface-hover) !important;
+  color: var(--text-primary) !important;
+  outline: none !important;
+}
+
+.excalidraw .context-menu-item .context-menu-item__label {
+  color: inherit !important;
+  font-family: inherit !important;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  margin-inline-end: 16px !important;
+  white-space: nowrap !important;
+  flex: 1 !important;
+}
+
+.excalidraw .context-menu-item .context-menu-item__shortcut {
+  color: var(--text-muted) !important;
+  opacity: 1 !important;
+  font-family: inherit !important;
+  font-size: 11.5px !important;
+  font-weight: 500 !important;
+  letter-spacing: 0.02em !important;
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  white-space: nowrap !important;
+}
+
+.excalidraw .context-menu-item:hover .context-menu-item__shortcut {
+  color: var(--text-secondary) !important;
+}
+
+.excalidraw .context-menu-item.checkmark {
+  padding-left: 28px !important;
+}
+
+.excalidraw .context-menu-item.checkmark::before {
+  position: absolute !important;
+  left: 9px !important;
+  color: var(--accent) !important;
+  font-weight: 700 !important;
+  font-size: 13px !important;
+  content: '\2713' !important;
+}
+
+.excalidraw .context-menu-item-separator {
+  border: none !important;
+  height: 1px !important;
+  background: var(--border-subtle) !important;
+  margin: 4px 0 !important;
+  padding: 0 !important;
+}
+
+[data-theme='dark'] .excalidraw .context-menu-item-separator {
+  background: var(--border-color) !important;
+}
+
+/* Dangerous (Delete) action */
+.excalidraw .context-menu-item.dangerous .context-menu-item__label {
+  color: var(--danger) !important;
+}
+
+.excalidraw .context-menu-item.dangerous .context-menu-item__shortcut {
+  color: var(--danger) !important;
+  opacity: 0.8 !important;
+}
+
+.excalidraw .context-menu-item.dangerous:hover,
+.excalidraw .context-menu-item.dangerous:focus {
+  background-color: var(--danger-subtle) !important;
+  color: var(--danger-hover) !important;
+}
+
+.excalidraw .context-menu-item.dangerous:hover .context-menu-item__label,
+.excalidraw .context-menu-item.dangerous:hover .context-menu-item__shortcut {
+  color: var(--danger-hover) !important;
+}
+
+[data-theme='dark'] .excalidraw .context-menu-item.dangerous:hover,
+[data-theme='dark'] .excalidraw .context-menu-item.dangerous:focus {
+  background-color: rgba(239, 68, 68, 0.2) !important;
+  color: #ef4444 !important;
+}
+
+[data-theme='dark'] .excalidraw .context-menu-item.dangerous:hover .context-menu-item__label,
+[data-theme='dark'] .excalidraw .context-menu-item.dangerous:hover .context-menu-item__shortcut {
+  color: #ef4444 !important;
+}
+
 @media (max-width: 760px) {
   .settings-layout {
     grid-template-columns: 1fr;

@@ -8,7 +8,6 @@ import type { ExcalidrawImperativeAPI } from '@excalidraw/excalidraw/types'
 import type { BoardDocument, BoardScene } from '@agentic-whiteboard/storage'
 import { workspaceApi } from '../features/workspace/workspace-api'
 import { useTheme } from '../lib/theme-context'
-import '@excalidraw/excalidraw/index.css'
 
 const LIBRARY_STORAGE_KEY = 'agentic-whiteboard:library:v1'
 const starterLibraries = [
