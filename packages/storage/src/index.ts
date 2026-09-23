@@ -3,7 +3,7 @@ import { getRxStorageLocalstorage } from 'rxdb/plugins/storage-localstorage'
 import type { RxDatabase, RxJsonSchema } from 'rxdb'
 
 export type ProjectRole = 'owner' | 'editor' | 'viewer'
-export type BoardSyncStatus = 'not-synced' | 'syncing' | 'synced-locally' | 'synced'
+export type BoardSyncStatus = 'local-only' | 'pending-sync' | 'syncing' | 'synced' | 'sync-failed'
 export type ProjectMember = { principalId: string; role: ProjectRole }
 
 export type Project = {
@@ -36,6 +36,9 @@ export interface WorkspaceStore {
   createBoard(projectId: string, name: string): Promise<BoardDocument>
   loadBoard(boardId: string): Promise<BoardDocument | null>
   saveBoard(document: BoardDocument): Promise<void>
+  upsertProject(project: Project): Promise<void>
+  upsertBoard(document: BoardDocument): Promise<void>
+  updateBoardSyncStatus(boardId: string, syncStatus: BoardSyncStatus): Promise<void>
   deleteBoard(boardId: string): Promise<void>
 }
 
@@ -176,7 +179,7 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
       name: name.trim() || 'Untitled',
       createdAt: timestamp,
       updatedAt: timestamp,
-      syncStatus: 'synced-locally',
+      syncStatus: 'local-only',
       formatVersion: 1,
       scene: defaultScene(),
     }
@@ -194,14 +197,34 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
   async saveBoard(document: BoardDocument): Promise<void> {
     const db = await database()
     const existing = await (db.boards as any).findOne(document.id).exec()
-    const updated = { ...document, updatedAt: now(), syncStatus: 'synced-locally' as const }
+    const updated = { ...document, updatedAt: now(), syncStatus: 'local-only' as const }
     if (existing) await existing.incrementalPatch(updated)
     else await (db.boards as any).insert(updated)
+  }
+
+  async upsertProject(project: Project): Promise<void> {
+    const db = await database()
+    const existing = await (db.projects as any).findOne(project.id).exec()
+    if (existing) await existing.incrementalPatch(project)
+    else await (db.projects as any).insert(project)
+  }
+
+  async upsertBoard(document: BoardDocument): Promise<void> {
+    const db = await database()
+    const existing = await (db.boards as any).findOne(document.id).exec()
+    if (existing) await existing.incrementalPatch(document)
+    else await (db.boards as any).insert(document)
   }
 
   async deleteBoard(boardId: string): Promise<void> {
     const db = await database()
     const document = await (db.boards as any).findOne(boardId).exec()
     if (document) await document.remove()
+  }
+
+  async updateBoardSyncStatus(boardId: string, syncStatus: BoardSyncStatus): Promise<void> {
+    const db = await database()
+    const document = await (db.boards as any).findOne(boardId).exec()
+    if (document) await document.incrementalPatch({ syncStatus })
   }
 }

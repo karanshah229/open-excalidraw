@@ -1364,6 +1364,33 @@ button {
   color: #666a76;
   font-size: 14px;
 }
+
+.sign-in-shell {
+  min-height: calc(100vh - 60px);
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: radial-gradient(circle at top, rgba(117, 103, 255, 0.14), transparent 42%);
+}
+
+.sign-in-card {
+  width: min(100%, 430px);
+  padding: 42px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--surface);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.12);
+}
+
+.sign-in-eyebrow { margin: 0 0 12px; color: var(--muted-foreground); font-size: 12px; font-weight: 700; letter-spacing: 0.12em; }
+.sign-in-card h1 { margin: 0; font-size: 32px; letter-spacing: -0.04em; }
+.sign-in-card > p:not(.sign-in-eyebrow):not(.sign-in-hint):not(.sign-in-error) { margin: 12px 0 28px; color: var(--muted-foreground); line-height: 1.5; }
+.sign-in-button { width: 100%; display: inline-flex; align-items: center; justify-content: center; gap: 10px; min-height: 44px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); color: var(--foreground); font: inherit; font-weight: 600; cursor: pointer; }
+.sign-in-button:hover:not(:disabled) { background: var(--muted); }
+.sign-in-button:disabled { cursor: not-allowed; opacity: 0.55; }
+.sign-in-hint, .sign-in-error { margin: 14px 0 0; font-size: 13px; line-height: 1.45; }
+.sign-in-hint { color: var(--muted-foreground); }
+.sign-in-error { color: var(--destructive); }
 .editor-shell {
   width: 100vw;
   height: calc(100vh - 51px);

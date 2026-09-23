@@ -1,4 +1,5 @@
-import React, { createContext, useContext, useState } from 'react'
+import React, { createContext, useContext, useEffect, useState } from 'react'
+import { useAuth } from './auth-context'
 
 export interface UserProfile {
   firstName: string
@@ -48,6 +49,17 @@ const UserContext = createContext<UserContextValue | null>(null)
 
 export function UserProvider({ children }: { children: React.ReactNode }) {
   const [user, setUserState] = useState<UserProfile>(getInitialUser)
+  const { user: authenticatedUser, signOutUser } = useAuth()
+
+  useEffect(() => {
+    if (!authenticatedUser) return
+    const [firstName = '', ...rest] = (authenticatedUser.displayName ?? '').trim().split(/\s+/)
+    setUserState({
+      firstName: firstName || 'User',
+      lastName: rest.join(' '),
+      email: authenticatedUser.email ?? '',
+    })
+  }, [authenticatedUser])
 
   const updateUser = (profile: Partial<UserProfile>) => {
     setUserState((prev) => {
@@ -61,16 +73,7 @@ export function UserProvider({ children }: { children: React.ReactNode }) {
     })
   }
 
-  const logout = () => {
-    // Reset to defaults or clear session state
-    try {
-      localStorage.removeItem(USER_STORAGE_KEY)
-    } catch {
-      /* storage unavailable */
-    }
-    setUserState(DEFAULT_USER)
-    window.location.href = '/'
-  }
+  const logout = () => void signOutUser()
 
   const initials = getInitials(user.firstName, user.lastName)
   const fullName = `${user.firstName} ${user.lastName}`.trim()

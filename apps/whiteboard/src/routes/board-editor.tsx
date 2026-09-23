@@ -5,7 +5,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { AlertCircle, Check, Loader2, Pencil } from 'lucide-react'
 import { convertToExcalidrawElements, Excalidraw, MainMenu } from '@excalidraw/excalidraw'
 import type { ExcalidrawImperativeAPI } from '@excalidraw/excalidraw/types'
-import type { BoardDocument, BoardScene } from '@agentic-whiteboard/storage'
+import type { BoardDocument, BoardScene, BoardSyncStatus } from '@agentic-whiteboard/storage'
 import { workspaceApi } from '../features/workspace/workspace-api'
 import { useTheme } from '../lib/theme-context'
 
@@ -15,6 +15,15 @@ const starterLibraries = [
   'https://libraries.excalidraw.com/libraries/rohanp/system-design.excalidrawlib',
   'https://libraries.excalidraw.com/libraries/childishgirl/aws-architecture-icons.excalidrawlib',
 ]
+
+type EditorStatus = 'Loading board' | 'Saving locally' | 'Local only' | 'Pending sync' | 'Syncing' | 'Synced' | 'Sync failed' | 'Local save failed'
+const statusLabel = (status: BoardSyncStatus): EditorStatus => {
+  if (status === 'local-only') return 'Local only'
+  if (status === 'pending-sync') return 'Pending sync'
+  if (status === 'syncing') return 'Syncing'
+  if (status === 'synced') return 'Synced'
+  return 'Sync failed'
+}
 
 async function loadLibraryItems() {
   try {
@@ -49,9 +58,7 @@ export function BoardEditor() {
   const operationRef = useRef<string | null>(null)
   const saveTimer = useRef<number>()
   const savedSignature = useRef<string>()
-  const [state, setState] = useState<'Loading board' | 'Saving locally' | 'Saved locally' | 'Local save failed'>(
-    'Loading board',
-  )
+  const [state, setState] = useState<EditorStatus>('Loading board')
   const [boardMeta, setBoardMeta] = useState<{ boardName: string; projectId: string; projectName: string } | null>(null)
   const [isEditingName, setIsEditingName] = useState(false)
   const [tempName, setTempName] = useState('')
@@ -141,7 +148,7 @@ export function BoardEditor() {
           },
           libraryItems: Promise.resolve(libraryItems),
         })
-        setState('Saved locally')
+        setState(statusLabel(document.syncStatus))
       })
       .catch(() => active && setState('Local save failed'))
     return () => {
@@ -149,6 +156,8 @@ export function BoardEditor() {
       if (saveTimer.current) window.clearTimeout(saveTimer.current)
     }
   }, [boardId])
+
+  useEffect(() => workspaceApi.subscribeToBoardSyncStatus(boardId, (status) => setState(statusLabel(status))), [boardId])
 
   const sendScene = useCallback((elements = elementsRef.current, operationId?: string) => {
     if (socketRef.current?.readyState !== WebSocket.OPEN) return
@@ -215,7 +224,7 @@ export function BoardEditor() {
           await workspaceApi.saveBoard({ ...document, scene })
           documentRef.current = { ...document, scene }
           queryClient.invalidateQueries({ queryKey: ['workspace'] })
-          setState('Saved locally')
+          setState('Pending sync')
         } catch {
           setState('Local save failed')
         }
@@ -327,12 +336,12 @@ export function BoardEditor() {
         createPortal(
           <div
             className={`sync-status-pill sync-status-pill--${
-              state === 'Saved locally' ? 'saved' : state === 'Local save failed' ? 'error' : 'saving'
+              state === 'Synced' ? 'saved' : state === 'Sync failed' || state === 'Local save failed' ? 'error' : 'saving'
             }`}
           >
-            {state === 'Saved locally' ? (
+            {state === 'Synced' ? (
               <Check size={13} className="sync-status-icon sync-status-icon--saved" />
-            ) : state === 'Local save failed' ? (
+            ) : state === 'Sync failed' || state === 'Local save failed' ? (
               <AlertCircle size={13} className="sync-status-icon sync-status-icon--error" />
             ) : (
               <Loader2 size={13} className="sync-status-icon sync-status-icon--saving" />
