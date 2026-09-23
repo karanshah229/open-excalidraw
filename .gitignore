@@ -29,3 +29,6 @@ yarn-error.log*
 # Local Excalidraw / whiteboard state exports
 *.excalidraw.json
 *.excalidraw-backup.json
+
+# Firebase CLI local cache
+.firebase/

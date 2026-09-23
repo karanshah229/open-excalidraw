@@ -12,6 +12,19 @@ const boardListeners = new Map<string, () => void>()
 const projectListeners = new Map<string, () => void>()
 let projectsListener: (() => void) | undefined
 
+/** Firestore rejects undefined at any depth; Excalidraw deliberately uses it for optional fields. */
+function firestoreValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.filter((item) => item !== undefined).map(firestoreValue)
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([, item]) => item !== undefined)
+        .map(([key, item]) => [key, firestoreValue(item)]),
+    )
+  }
+  return value
+}
+
 async function updateSyncStatus(boardId: string, syncStatus: Board['syncStatus']) {
   await workspaceStore.updateBoardSyncStatus(boardId, syncStatus)
   window.dispatchEvent(new CustomEvent(`board-sync:${boardId}`, { detail: syncStatus }))
@@ -45,7 +58,7 @@ async function syncWorkspace(userId: string) {
             }),
           )
         }
-        return setDoc(ref, { ...document, syncStatus: 'synced' })
+        return setDoc(ref, firestoreValue({ ...document, syncStatus: 'synced' }))
       }),
     ])
   } catch {
