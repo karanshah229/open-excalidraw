@@ -1,9 +1,10 @@
 import { createRxDatabase } from 'rxdb'
 import { getRxStorageLocalstorage } from 'rxdb/plugins/storage-localstorage'
+import { getRxStorageDexie } from 'rxdb/plugins/storage-dexie'
 import type { RxDatabase, RxJsonSchema } from 'rxdb'
 
 export type ProjectRole = 'owner' | 'editor' | 'viewer'
-export type BoardSyncStatus = 'local-only' | 'pending-sync' | 'syncing' | 'synced' | 'sync-failed'
+export type BoardSyncStatus = 'local-only' | 'synced' | 'sync-failed' | 'conflict'
 export type ProjectMember = { principalId: string; role: ProjectRole }
 
 export type Project = {
@@ -21,6 +22,13 @@ export type Board = {
   createdAt: string
   updatedAt: string
   syncStatus: BoardSyncStatus
+  /** Monotonic local revision used to detect concurrent full-scene writes. */
+  revision: number
+  /** Cloud revision from which this local edit was made. */
+  baseRevision: number
+  syncAttempts: number
+  nextSyncAt: string | null
+  lastSyncError: string | null
   scene?: BoardScene
 }
 export type BoardScene = { elements: Record<string, unknown>[]; appState: Record<string, unknown> }
@@ -39,12 +47,17 @@ export interface WorkspaceStore {
   upsertProject(project: Project): Promise<void>
   upsertBoard(document: BoardDocument): Promise<void>
   updateBoardSyncStatus(boardId: string, syncStatus: BoardSyncStatus): Promise<void>
+  markBoardSynced(boardId: string, revision: number): Promise<void>
+  markBoardSyncFailed(boardId: string, error: string, nextSyncAt: string): Promise<void>
+  markBoardConflict(boardId: string, error: string): Promise<void>
+  requeueConflictedBoard(boardId: string, remoteRevision: number): Promise<void>
   deleteBoard(boardId: string): Promise<void>
 }
 
 type RxCollections = { projects: unknown; boards: unknown }
 const LOCAL_PRINCIPAL_ID = 'local-user'
-const DATABASE_NAME = 'agentic-whiteboard-v1'
+const DATABASE_NAME = 'agentic-whiteboard-v2'
+const LEGACY_DATABASE_NAME = 'agentic-whiteboard-v1'
 const now = () => new Date().toISOString()
 const newId = () => crypto.randomUUID()
 const defaultScene = (): BoardScene => ({ elements: [], appState: { viewBackgroundColor: 'transparent' } })
@@ -77,10 +90,29 @@ const boardSchema: RxJsonSchema<BoardDocument> = {
     createdAt: { type: 'string' },
     updatedAt: { type: 'string' },
     syncStatus: { type: 'string' },
+    revision: { type: 'number', minimum: 0 },
+    baseRevision: { type: 'number', minimum: 0 },
+    syncAttempts: { type: 'number', minimum: 0 },
+    nextSyncAt: { type: ['string', 'null'] },
+    lastSyncError: { type: ['string', 'null'] },
     formatVersion: { type: 'number' },
     scene: { type: 'object', additionalProperties: true },
   },
-  required: ['id', 'projectId', 'name', 'createdAt', 'updatedAt', 'syncStatus', 'formatVersion', 'scene'],
+  required: [
+    'id',
+    'projectId',
+    'name',
+    'createdAt',
+    'updatedAt',
+    'syncStatus',
+    'revision',
+    'baseRevision',
+    'syncAttempts',
+    'nextSyncAt',
+    'lastSyncError',
+    'formatVersion',
+    'scene',
+  ],
 }
 
 let databasePromise: Promise<RxDatabase<RxCollections>> | undefined
@@ -88,13 +120,14 @@ let databasePromise: Promise<RxDatabase<RxCollections>> | undefined
 const database = () => {
   databasePromise ??= createRxDatabase<RxCollections>({
     name: DATABASE_NAME,
-    storage: getRxStorageLocalstorage(),
+    storage: getRxStorageDexie(),
     multiInstance: true,
     // Closes a stale instance left behind by Vite hot reload without weakening
     // RxDB's production duplicate-database safety checks.
     closeDuplicates: true,
   }).then(async (instance) => {
     await instance.addCollections({ projects: { schema: projectSchema }, boards: { schema: boardSchema } })
+    await migrateLegacyLocalStorage(instance)
     return instance
   })
   return databasePromise
@@ -104,6 +137,40 @@ const plain = <T>(document: { toJSON: () => T }) => document.toJSON()
 const toBoard = (document: BoardDocument): Board => {
   const { formatVersion: _formatVersion, ...board } = document
   return board
+}
+
+const normalizedBoard = (document: Omit<BoardDocument, 'revision' | 'baseRevision' | 'syncAttempts' | 'nextSyncAt' | 'lastSyncError'> & Partial<BoardDocument>): BoardDocument => ({
+  ...document,
+  syncStatus: document.syncStatus === 'synced' ? 'synced' : 'local-only',
+  revision: document.revision ?? 0,
+  baseRevision: document.baseRevision ?? document.revision ?? 0,
+  syncAttempts: document.syncAttempts ?? 0,
+  nextSyncAt: document.nextSyncAt ?? null,
+  lastSyncError: document.lastSyncError ?? null,
+})
+
+/** One-time, non-destructive import of the previous RxDB localStorage store. */
+async function migrateLegacyLocalStorage(instance: RxDatabase<RxCollections>) {
+  const existing = await (instance.boards as any).findOne().exec()
+  if (existing) return
+  const legacy = await createRxDatabase<RxCollections>({
+    name: LEGACY_DATABASE_NAME,
+    storage: getRxStorageLocalstorage(),
+    multiInstance: false,
+  })
+  try {
+    await legacy.addCollections({ projects: { schema: projectSchema }, boards: { schema: { ...boardSchema, required: ['id', 'projectId', 'name', 'createdAt', 'updatedAt', 'syncStatus', 'formatVersion', 'scene'] } } })
+    const [projects, boards] = await Promise.all([
+      (legacy.projects as any).find().exec(),
+      (legacy.boards as any).find().exec(),
+    ])
+    await Promise.all(projects.map((project: any) => (instance.projects as any).insert(plain<Project>(project))))
+    await Promise.all(boards.map((board: any) => (instance.boards as any).insert(normalizedBoard(plain<any>(board)))))
+  } catch {
+    // A missing or incompatible legacy store must not block a new workspace.
+  } finally {
+    await legacy.close()
+  }
 }
 
 export class RxDbWorkspaceStore implements WorkspaceStore {
@@ -180,6 +247,11 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
       createdAt: timestamp,
       updatedAt: timestamp,
       syncStatus: 'local-only',
+      revision: 0,
+      baseRevision: 0,
+      syncAttempts: 0,
+      nextSyncAt: null,
+      lastSyncError: null,
       formatVersion: 1,
       scene: defaultScene(),
     }
@@ -197,7 +269,19 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
   async saveBoard(document: BoardDocument): Promise<void> {
     const db = await database()
     const existing = await (db.boards as any).findOne(document.id).exec()
-    const updated = { ...document, updatedAt: now(), syncStatus: 'local-only' as const }
+    const current = existing ? plain<BoardDocument>(existing) : normalizedBoard(document)
+    const updated: BoardDocument = {
+      ...document,
+      updatedAt: now(),
+      syncStatus: 'local-only',
+      // React can still hold the pre-ACK document. Allocate the next revision
+      // from IndexedDB so a completed sync can never be followed by a stale save.
+      revision: current.revision + 1,
+      baseRevision: current.baseRevision,
+      syncAttempts: 0,
+      nextSyncAt: null,
+      lastSyncError: null,
+    }
     if (existing) await existing.incrementalPatch(updated)
     else await (db.boards as any).insert(updated)
   }
@@ -212,8 +296,9 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
   async upsertBoard(document: BoardDocument): Promise<void> {
     const db = await database()
     const existing = await (db.boards as any).findOne(document.id).exec()
-    if (existing) await existing.incrementalPatch(document)
-    else await (db.boards as any).insert(document)
+    const normalized = normalizedBoard(document)
+    if (existing) await existing.incrementalPatch(normalized)
+    else await (db.boards as any).insert(normalized)
   }
 
   async deleteBoard(boardId: string): Promise<void> {
@@ -226,5 +311,56 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
     const db = await database()
     const document = await (db.boards as any).findOne(boardId).exec()
     if (document) await document.incrementalPatch({ syncStatus })
+  }
+
+  async markBoardSynced(boardId: string, revision: number): Promise<void> {
+    const db = await database()
+    const document = await (db.boards as any).findOne(boardId).exec()
+    if (document) {
+      await document.incrementalPatch({
+        syncStatus: 'synced',
+        baseRevision: revision,
+        revision,
+        syncAttempts: 0,
+        nextSyncAt: null,
+        lastSyncError: null,
+      })
+    }
+  }
+
+  async markBoardSyncFailed(boardId: string, error: string, nextSyncAt: string): Promise<void> {
+    const db = await database()
+    const document = await (db.boards as any).findOne(boardId).exec()
+    if (document) {
+      const current = plain<BoardDocument>(document)
+      await document.incrementalPatch({
+        syncStatus: 'local-only',
+        syncAttempts: current.syncAttempts + 1,
+        nextSyncAt,
+        lastSyncError: error,
+      })
+    }
+  }
+
+  async markBoardConflict(boardId: string, error: string): Promise<void> {
+    const db = await database()
+    const document = await (db.boards as any).findOne(boardId).exec()
+    if (document) await document.incrementalPatch({ syncStatus: 'conflict', lastSyncError: error, nextSyncAt: null })
+  }
+
+  async requeueConflictedBoard(boardId: string, remoteRevision: number): Promise<void> {
+    const db = await database()
+    const document = await (db.boards as any).findOne(boardId).exec()
+    if (!document) return
+    const current = plain<BoardDocument>(document)
+    await document.incrementalPatch({
+      syncStatus: 'local-only',
+      baseRevision: remoteRevision,
+      revision: Math.max(current.revision, remoteRevision) + 1,
+      syncAttempts: 0,
+      nextSyncAt: null,
+      lastSyncError: null,
+      updatedAt: now(),
+    })
   }
 }

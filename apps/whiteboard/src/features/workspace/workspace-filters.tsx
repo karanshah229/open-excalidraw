@@ -11,6 +11,7 @@ const statuses: Array<{ value: BoardSyncStatus; label: string }> = [
   { value: 'local-only', label: 'Local only' },
   { value: 'synced', label: 'Synced' },
   { value: 'sync-failed', label: 'Sync failed' },
+  { value: 'conflict', label: 'Conflict' },
 ]
 const sortOptions: Array<{ value: SortOrder; label: string }> = [
   { value: 'latest', label: 'Latest first' },

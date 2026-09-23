@@ -16,11 +16,11 @@ const starterLibraries = [
   'https://libraries.excalidraw.com/libraries/childishgirl/aws-architecture-icons.excalidrawlib',
 ]
 
-type EditorStatus = 'Loading board' | 'Saving locally' | 'Local only' | 'Synced' | 'Sync failed' | 'Local save failed'
+type EditorStatus = 'Loading board' | 'Saving locally' | 'Local only' | 'Synced' | 'Sync failed' | 'Conflict' | 'Local save failed'
 const statusLabel = (status: BoardSyncStatus): EditorStatus => {
   if (status === 'local-only') return 'Local only'
-  if (status === 'pending-sync' || status === 'syncing') return 'Synced'
   if (status === 'synced') return 'Synced'
+  if (status === 'conflict') return 'Conflict'
   return 'Sync failed'
 }
 
@@ -57,6 +57,7 @@ export function BoardEditor() {
   const operationRef = useRef<string | null>(null)
   const saveTimer = useRef<number>()
   const savedSignature = useRef<string>()
+  const awaitingInitialSceneRef = useRef(true)
   const [state, setState] = useState<EditorStatus>('Loading board')
   const [boardMeta, setBoardMeta] = useState<{ boardName: string; projectId: string; projectName: string } | null>(null)
   const [isEditingName, setIsEditingName] = useState(false)
@@ -99,6 +100,11 @@ export function BoardEditor() {
     if (boardMeta) setTempName(boardMeta.boardName)
   }, [boardMeta])
 
+  const keepLocalConflict = useCallback(async () => {
+    await workspaceApi.keepLocalConflict(boardId)
+    queryClient.invalidateQueries({ queryKey: ['workspace'] })
+  }, [boardId, queryClient])
+
   const [navSlot, setNavSlot] = useState<HTMLElement | null>(null)
   const [statusSlot, setStatusSlot] = useState<HTMLElement | null>(null)
 
@@ -133,6 +139,7 @@ export function BoardEditor() {
         elementsRef.current = document.scene.elements
         appStateRef.current = document.scene.appState
         savedSignature.current = JSON.stringify(document.scene)
+        awaitingInitialSceneRef.current = true
         setBoardMeta({
           boardName: document.name,
           projectId: project.id,
@@ -245,6 +252,13 @@ export function BoardEditor() {
         },
       }
       const signature = JSON.stringify(scene)
+      // Excalidraw emits an onChange while applying initialData. It is not a
+      // user edit and must not enter the durable outbox on every reload.
+      if (awaitingInitialSceneRef.current) {
+        awaitingInitialSceneRef.current = false
+        savedSignature.current = signature
+        return
+      }
       if (signature === savedSignature.current) return
       savedSignature.current = signature
       scheduleSave(scene)
@@ -332,20 +346,24 @@ export function BoardEditor() {
         )}
       {statusSlot &&
         createPortal(
-          <div
+          <button
+            type="button"
             className={`sync-status-pill sync-status-pill--${
-              state === 'Synced' ? 'saved' : state === 'Sync failed' || state === 'Local save failed' ? 'error' : 'saving'
+              state === 'Synced' ? 'saved' : state === 'Sync failed' || state === 'Local save failed' || state === 'Conflict' ? 'error' : 'saving'
             }`}
+            onClick={state === 'Conflict' ? keepLocalConflict : undefined}
+            title={state === 'Conflict' ? 'Keep this local version and overwrite the newer cloud version' : undefined}
+            disabled={state !== 'Conflict'}
           >
             {state === 'Synced' ? (
               <Check size={13} className="sync-status-icon sync-status-icon--saved" />
-            ) : state === 'Sync failed' || state === 'Local save failed' ? (
+            ) : state === 'Sync failed' || state === 'Local save failed' || state === 'Conflict' ? (
               <AlertCircle size={13} className="sync-status-icon sync-status-icon--error" />
             ) : (
               <Loader2 size={13} className="sync-status-icon sync-status-icon--saving" />
             )}
             <span>{state}</span>
-          </div>,
+          </button>,
           statusSlot,
         )}
       <Excalidraw

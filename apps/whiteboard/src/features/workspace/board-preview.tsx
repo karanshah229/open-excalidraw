@@ -8,9 +8,8 @@ import type { WorkspaceBoard } from './workspace-api'
 const statusCopy = {
   synced: 'Synced',
   'local-only': 'Local only',
-  'pending-sync': 'Synced',
-  syncing: 'Synced',
   'sync-failed': 'Sync failed',
+  conflict: 'Conflict',
 } as const
 
 const PREVIEW_CACHE_VERSION = 'v4'
