@@ -334,6 +334,8 @@ export const workspaceApi = {
     await workspaceStore.bootstrap()
     await migrateLegacyBoardActivity(userId)
     await downloadWorkspace(userId)
+    const claimedProjectIds = await workspaceStore.claimLocalProjects(userId)
+    claimedProjectIds.forEach((projectId) => dirtyProjectIds.add(projectId))
     subscribeToRemoteWorkspace(userId)
     const { boards } = await workspaceApi.listWorkspace()
     if (boards.some((board) => board.syncStatus === 'local-only' || board.syncStatus === 'sync-failed') || dirtyProjectIds.size) queueSync()

@@ -4,15 +4,9 @@ import * as Popover from '@radix-ui/react-popover'
 import { Check, ChevronDown, Filter, Search, SlidersHorizontal, X } from 'lucide-react'
 import { Button } from '../../components/ui/button'
 import { Input } from '../../components/ui/input'
-import type { BoardSyncStatus, Project } from '@agentic-whiteboard/storage'
+import type { Project } from '@agentic-whiteboard/storage'
 
 export type SortOrder = 'latest' | 'oldest' | 'name-asc' | 'name-desc'
-const statuses: Array<{ value: BoardSyncStatus; label: string }> = [
-  { value: 'local-only', label: 'Synced locally' },
-  { value: 'synced', label: 'Synced' },
-  { value: 'sync-failed', label: 'Sync failed' },
-  { value: 'conflict', label: 'Conflict' },
-]
 const sortOptions: Array<{ value: SortOrder; label: string }> = [
   { value: 'latest', label: 'Latest first' },
   { value: 'oldest', label: 'Oldest first' },
@@ -25,9 +19,7 @@ type FilterProps = {
   query: string
   onQueryChange: (value: string) => void
   selectedProjectIds: Set<string>
-  selectedStatuses: Set<BoardSyncStatus>
   onToggleProject: (id: string) => void
-  onToggleStatus: (status: BoardSyncStatus) => void
   onClearFilters?: () => void
   sortOrder: SortOrder
   onSort: (sort: SortOrder) => void
@@ -40,9 +32,7 @@ export function WorkspaceFilters(props: FilterProps) {
     const query = projectSearch.trim().toLocaleLowerCase()
     return query ? props.projects.filter((project) => project.name.toLocaleLowerCase().includes(query)) : props.projects
   }, [projectSearch, props.projects])
-  const activeFilterCount =
-    (props.selectedProjectIds.size > 0 ? 1 : 0) +
-    (props.selectedStatuses.size > 0 ? 1 : 0)
+  const activeFilterCount = props.selectedProjectIds.size > 0 ? 1 : 0
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -157,23 +147,6 @@ export function WorkspaceFilters(props: FilterProps) {
                 ) : (
                   <span className="filter-empty-hint">No projects found</span>
                 )}
-              </div>
-              <hr className="filter-divider" />
-              <div className="filter-header-row">
-                <span className="filter-section-title">Board status</span>
-                {props.selectedStatuses.size > 0 && (
-                  <span className="filter-section-count">{props.selectedStatuses.size}</span>
-                )}
-              </div>
-              <div className="filter-options">
-                {statuses.map((status) => (
-                  <FilterCheck
-                    key={status.value}
-                    checked={props.selectedStatuses.has(status.value)}
-                    onCheckedChange={() => props.onToggleStatus(status.value)}
-                    label={status.label}
-                  />
-                ))}
               </div>
             </div>
             <div className="filter-bottom-bar">

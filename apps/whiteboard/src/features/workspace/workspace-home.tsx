@@ -3,7 +3,6 @@ import { createPortal } from 'react-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams, useSearch } from '@tanstack/react-router'
 import { Plus } from 'lucide-react'
-import type { BoardSyncStatus } from '@agentic-whiteboard/storage'
 import { Button } from '../../components/ui/button'
 import { BoardPreview } from './board-preview'
 import { CreateBoardModal } from './create-board-modal'
@@ -51,7 +50,6 @@ export function WorkspaceHome() {
     setProjectIds(queryProjectId ? new Set([queryProjectId]) : new Set())
   }, [queryProjectId])
 
-  const [statuses, setStatuses] = useState<Set<BoardSyncStatus>>(() => new Set())
   const [sortOrder, setSortOrder] = useState<SortOrder>('latest')
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false)
   const [boardToDelete, setBoardToDelete] = useState<WorkspaceBoard | null>(null)
@@ -109,8 +107,8 @@ export function WorkspaceHome() {
   )
 
   const boards = useMemo(
-    () => filterBoards(workspace.data?.boards ?? [], deferredSearch, projectIds, statuses, sortOrder),
-    [workspace.data?.boards, deferredSearch, projectIds, statuses, sortOrder],
+    () => filterBoards(workspace.data?.boards ?? [], deferredSearch, projectIds, sortOrder),
+    [workspace.data?.boards, deferredSearch, projectIds, sortOrder],
   )
   const recentBoards = useMemo(
     () => boards.filter((board) => Date.now() - new Date(board.updatedAt).getTime() < 7 * 86_400_000),
@@ -192,7 +190,6 @@ export function WorkspaceHome() {
         query={search}
         onQueryChange={setSearch}
         selectedProjectIds={projectIds}
-        selectedStatuses={statuses}
         onToggleProject={(id) => {
           if (isProjectPage && id === queryProjectId && projectIds.has(id) && projectIds.size === 1) {
             navigate({ to: '/' })
@@ -200,10 +197,8 @@ export function WorkspaceHome() {
           }
           setProjectIds((current) => toggleSet(current, id))
         }}
-        onToggleStatus={(status) => setStatuses((current) => toggleSet(current, status))}
         onClearFilters={() => {
           setProjectIds(new Set())
-          setStatuses(new Set())
           if (isProjectPage) {
             navigate({ to: '/' })
           }
@@ -251,7 +246,7 @@ export function WorkspaceHome() {
       })}
       {byProject.length === 0 && (
         <div className="empty-boards">
-          {search || statuses.size > 0
+          {search || projectIds.size > 0
             ? 'No boards match these filters.'
             : isProjectPage
               ? 'No boards in this project yet.'
@@ -318,19 +313,17 @@ function BoardGrid({
   )
 }
 
-function filterBoards<T extends { name: string; projectId: string; syncStatus: BoardSyncStatus; updatedAt: string }>(
+function filterBoards<T extends { name: string; projectId: string; updatedAt: string }>(
   boards: T[],
   search: string,
   projectIds: Set<string>,
-  statuses: Set<BoardSyncStatus>,
   order: SortOrder,
 ) {
   const normalized = search.trim().toLocaleLowerCase()
   const filtered = boards.filter(
     (board) =>
       (!normalized || board.name.toLocaleLowerCase().includes(normalized)) &&
-      (projectIds.size === 0 || projectIds.has(board.projectId)) &&
-      (statuses.size === 0 || statuses.has(board.syncStatus)),
+      (projectIds.size === 0 || projectIds.has(board.projectId)),
   )
   return filtered.toSorted((left, right) => {
     if (order === 'latest') return right.updatedAt.localeCompare(left.updatedAt)

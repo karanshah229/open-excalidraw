@@ -41,6 +41,7 @@ export type WorkspaceBootstrap = { project: Project; board: BoardDocument | null
 export interface WorkspaceStore {
   bootstrap(): Promise<WorkspaceBootstrap>
   listProjects(): Promise<Project[]>
+  claimLocalProjects(ownerId: string): Promise<string[]>
   createProject(name: string, ownerId: string): Promise<Project>
   listBoards(projectId: string): Promise<Board[]>
   createBoard(projectId: string, name: string): Promise<BoardDocument>
@@ -237,6 +238,27 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
     return documents
       .map(plain<Project>)
       .toSorted((left: Project, right: Project) => right.updatedAt.localeCompare(left.updatedAt))
+  }
+
+  /** Assign offline bootstrap projects to the signed-in user before cloud sync. */
+  async claimLocalProjects(ownerId: string): Promise<string[]> {
+    const db = await database()
+    const documents = await (db.projects as any).find({ selector: { ownerId: LOCAL_PRINCIPAL_ID } }).exec()
+
+    await Promise.all(
+      documents.map(async (document: any) => {
+        const project = plain<Project>(document)
+        const members = project.members.map((member) =>
+          member.principalId === LOCAL_PRINCIPAL_ID ? { ...member, principalId: ownerId } : member,
+        )
+        if (!members.some((member) => member.principalId === ownerId && member.role === 'owner')) {
+          members.unshift({ principalId: ownerId, role: 'owner' })
+        }
+        await document.incrementalPatch({ ownerId, members, updatedAt: now() })
+      }),
+    )
+
+    return documents.map((document: any) => plain<Project>(document).id)
   }
 
   async createProject(name: string, ownerId: string): Promise<Project> {
