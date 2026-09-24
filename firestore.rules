@@ -9,5 +9,25 @@ service cloud.firestore {
         allow read, write: if request.auth != null && request.auth.uid == userId;
       }
     }
+
+    match /boardShares/{boardId} {
+      allow read: if resource.data.generalAccess == 'anyone_with_link'
+        || (request.auth != null && (
+             request.auth.uid == resource.data.ownerId ||
+             resource.data.ownerId == 'local-user' ||
+             (resource.data.invitedEmails != null && request.auth.token.email != null && request.auth.token.email in resource.data.invitedEmails)
+           ));
+
+      allow create: if request.auth != null && (
+        request.resource.data.ownerId == request.auth.uid ||
+        request.resource.data.ownerId == 'local-user'
+      );
+
+      allow update: if (request.auth != null && (resource.data.ownerId == request.auth.uid || resource.data.ownerId == 'local-user'))
+        || (resource.data.generalAccess == 'anyone_with_link' && resource.data.generalRole == 'editor')
+        || (request.auth != null && resource.data.collaborators != null && request.auth.token.email != null && resource.data.collaborators[request.auth.token.email].role == 'editor');
+
+      allow delete: if request.auth != null && (resource.data.ownerId == request.auth.uid || resource.data.ownerId == 'local-user');
+    }
   }
 }

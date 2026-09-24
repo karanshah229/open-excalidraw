@@ -1,6 +1,7 @@
-import { createRxDatabase } from 'rxdb'
+import { addRxPlugin, createRxDatabase } from 'rxdb'
 import { getRxStorageLocalstorage } from 'rxdb/plugins/storage-localstorage'
 import { getRxStorageDexie } from 'rxdb/plugins/storage-dexie'
+import { RxDBMigrationSchemaPlugin } from 'rxdb/plugins/migration-schema'
 import type { RxDatabase, RxJsonSchema } from 'rxdb'
 
 export type ProjectRole = 'owner' | 'editor' | 'viewer'
@@ -19,6 +20,7 @@ export type Board = {
   id: string
   projectId: string
   name: string
+  active: boolean
   createdAt: string
   updatedAt: string
   syncStatus: BoardSyncStatus
@@ -33,7 +35,7 @@ export type Board = {
 }
 export type BoardScene = { elements: Record<string, unknown>[]; appState: Record<string, unknown> }
 export type BoardDocument = Board & { scene: BoardScene; formatVersion: 1 }
-export type WorkspaceBootstrap = { project: Project; board: BoardDocument }
+export type WorkspaceBootstrap = { project: Project; board: BoardDocument | null }
 
 /** Product-level boundary for local, desktop, and cloud persistence adapters. */
 export interface WorkspaceStore {
@@ -51,6 +53,7 @@ export interface WorkspaceStore {
   markBoardSyncFailed(boardId: string, error: string, nextSyncAt: string): Promise<void>
   markBoardConflict(boardId: string, error: string): Promise<void>
   requeueConflictedBoard(boardId: string, remoteRevision: number): Promise<void>
+  listBoardsForSync(): Promise<Board[]>
   deleteBoard(boardId: string): Promise<void>
 }
 
@@ -61,6 +64,8 @@ const LEGACY_DATABASE_NAME = 'agentic-whiteboard-v1'
 const now = () => new Date().toISOString()
 const newId = () => crypto.randomUUID()
 const defaultScene = (): BoardScene => ({ elements: [], appState: { viewBackgroundColor: 'transparent' } })
+
+addRxPlugin(RxDBMigrationSchemaPlugin)
 
 const projectSchema: RxJsonSchema<Project> = {
   title: 'project schema',
@@ -80,13 +85,14 @@ const projectSchema: RxJsonSchema<Project> = {
 
 const boardSchema: RxJsonSchema<BoardDocument> = {
   title: 'board schema',
-  version: 0,
+  version: 1,
   primaryKey: 'id',
   type: 'object',
   properties: {
     id: { type: 'string', maxLength: 100 },
     projectId: { type: 'string' },
     name: { type: 'string' },
+    active: { type: 'boolean' },
     createdAt: { type: 'string' },
     updatedAt: { type: 'string' },
     syncStatus: { type: 'string' },
@@ -102,6 +108,7 @@ const boardSchema: RxJsonSchema<BoardDocument> = {
     'id',
     'projectId',
     'name',
+    'active',
     'createdAt',
     'updatedAt',
     'syncStatus',
@@ -126,7 +133,15 @@ const database = () => {
     // RxDB's production duplicate-database safety checks.
     closeDuplicates: true,
   }).then(async (instance) => {
-    await instance.addCollections({ projects: { schema: projectSchema }, boards: { schema: boardSchema } })
+    await instance.addCollections({
+      projects: { schema: projectSchema },
+      boards: {
+        schema: boardSchema,
+        migrationStrategies: {
+          1: (document: BoardDocument) => ({ ...document, active: document.active ?? true }),
+        },
+      },
+    })
     await migrateLegacyLocalStorage(instance)
     return instance
   })
@@ -141,6 +156,7 @@ const toBoard = (document: BoardDocument): Board => {
 
 const normalizedBoard = (document: Omit<BoardDocument, 'revision' | 'baseRevision' | 'syncAttempts' | 'nextSyncAt' | 'lastSyncError'> & Partial<BoardDocument>): BoardDocument => ({
   ...document,
+  active: document.active ?? true,
   syncStatus: document.syncStatus === 'synced' ? 'synced' : 'local-only',
   revision: document.revision ?? 0,
   baseRevision: document.baseRevision ?? document.revision ?? 0,
@@ -159,7 +175,18 @@ async function migrateLegacyLocalStorage(instance: RxDatabase<RxCollections>) {
     multiInstance: false,
   })
   try {
-    await legacy.addCollections({ projects: { schema: projectSchema }, boards: { schema: { ...boardSchema, required: ['id', 'projectId', 'name', 'createdAt', 'updatedAt', 'syncStatus', 'formatVersion', 'scene'] } } })
+    const { active: _active, ...legacyProperties } = boardSchema.properties
+    await legacy.addCollections({
+      projects: { schema: projectSchema },
+      boards: {
+        schema: {
+          ...boardSchema,
+          version: 0,
+          properties: legacyProperties,
+          required: ['id', 'projectId', 'name', 'createdAt', 'updatedAt', 'syncStatus', 'formatVersion', 'scene'],
+        },
+      },
+    })
     const [projects, boards] = await Promise.all([
       (legacy.projects as any).find().exec(),
       (legacy.boards as any).find().exec(),
@@ -186,10 +213,7 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
     if (projects.length > 0) {
       const project = projects[0]
       const boards = await this.listBoards(project.id)
-      const board = boards[0]
-        ? await this.loadBoard(boards[0].id)
-        : await this.createBoard(project.id, 'Untitled diagram')
-      if (!board) throw new Error('The initial board could not be loaded.')
+      const board = boards[0] ? await this.loadBoard(boards[0].id) : null
       return { project, board }
     }
 
@@ -232,7 +256,7 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
 
   async listBoards(projectId: string): Promise<Board[]> {
     const db = await database()
-    const documents = await (db.boards as any).find({ selector: { projectId } }).exec()
+    const documents = await (db.boards as any).find({ selector: { projectId, active: true } }).exec()
     return documents
       .map((document: any) => toBoard(plain<BoardDocument>(document)))
       .toSorted((left: Board, right: Board) => right.updatedAt.localeCompare(left.updatedAt))
@@ -244,6 +268,7 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
       id: newId(),
       projectId,
       name: name.trim() || 'Untitled',
+      active: true,
       createdAt: timestamp,
       updatedAt: timestamp,
       syncStatus: 'local-only',
@@ -280,6 +305,7 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
     }
     const updated: BoardDocument = {
       ...document,
+      active: document.active ?? current.active ?? true,
       updatedAt: now(),
       syncStatus: 'local-only',
       // React can still hold the pre-ACK document. Allocate the next revision
@@ -310,10 +336,26 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
     else await (db.boards as any).insert(normalized)
   }
 
+  async listBoardsForSync(): Promise<Board[]> {
+    const db = await database()
+    const documents = await (db.boards as any).find().exec()
+    return documents.map((document: any) => toBoard(plain<BoardDocument>(document)))
+  }
+
   async deleteBoard(boardId: string): Promise<void> {
     const db = await database()
     const document = await (db.boards as any).findOne(boardId).exec()
-    if (document) await document.remove()
+    if (!document) return
+    const current = plain<BoardDocument>(document)
+    await document.incrementalPatch({
+      active: false,
+      updatedAt: now(),
+      syncStatus: 'local-only',
+      revision: current.revision + 1,
+      syncAttempts: 0,
+      nextSyncAt: null,
+      lastSyncError: null,
+    })
   }
 
   async updateBoardSyncStatus(boardId: string, syncStatus: BoardSyncStatus): Promise<void> {

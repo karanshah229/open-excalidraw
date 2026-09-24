@@ -1,12 +1,12 @@
-import { useState } from 'react'
+import { useNavigate, useSearch } from '@tanstack/react-router'
 import {
-  Check,
   Cpu,
   Laptop,
   Loader2,
   Moon,
   Play,
   RefreshCw,
+  ShieldAlert,
   SlidersHorizontal,
   Square,
   Sun,
@@ -18,23 +18,20 @@ import { useMcpStatus } from './use-mcp-status'
 
 type SettingsTab = 'preferences' | 'mcp' | 'account'
 
+function isSettingsTab(tab: string | undefined): tab is SettingsTab {
+  return tab === 'preferences' || tab === 'mcp' || tab === 'account'
+}
+
 export function SettingsPage() {
-  const [activeTab, setActiveTab] = useState<SettingsTab>('preferences')
+  const navigate = useNavigate()
+  const search = useSearch({ strict: false }) as { tab?: string }
+  const activeTab = isSettingsTab(search.tab) ? search.tab : 'preferences'
   const { mode, setMode } = useTheme()
-  const { user, initials, fullName, updateUser } = useUser()
+  const { user, initials, fullName } = useUser()
   const mcp = useMcpStatus()
 
-  // Form state for account
-  const [firstName, setFirstName] = useState(user.firstName)
-  const [lastName, setLastName] = useState(user.lastName)
-  const [email, setEmail] = useState(user.email)
-  const [savedSuccess, setSavedSuccess] = useState(false)
-
-  const handleSaveAccount = (e: React.FormEvent) => {
-    e.preventDefault()
-    updateUser({ firstName, lastName, email })
-    setSavedSuccess(true)
-    setTimeout(() => setSavedSuccess(false), 2500)
+  const selectTab = (tab: SettingsTab) => {
+    navigate({ to: '/settings', search: { tab } })
   }
 
   return (
@@ -51,7 +48,7 @@ export function SettingsPage() {
             <button
               type="button"
               className={`settings-nav-btn ${activeTab === 'preferences' ? 'active' : ''}`}
-              onClick={() => setActiveTab('preferences')}
+              onClick={() => selectTab('preferences')}
             >
               <SlidersHorizontal size={16} />
               <span>Preferences</span>
@@ -60,7 +57,7 @@ export function SettingsPage() {
             <button
               type="button"
               className={`settings-nav-btn ${activeTab === 'mcp' ? 'active' : ''}`}
-              onClick={() => setActiveTab('mcp')}
+              onClick={() => selectTab('mcp')}
             >
               <Cpu size={16} />
               <span>MCP Server</span>
@@ -70,7 +67,9 @@ export function SettingsPage() {
                     ? 'settings-nav-dot--online'
                     : mcp.status === 'checking'
                       ? 'settings-nav-dot--checking'
-                      : 'settings-nav-dot--offline'
+                      : mcp.status === 'blocked'
+                        ? 'settings-nav-dot--blocked'
+                        : 'settings-nav-dot--offline'
                 }`}
                 title={`Status: ${mcp.status}`}
               />
@@ -79,7 +78,7 @@ export function SettingsPage() {
             <button
               type="button"
               className={`settings-nav-btn ${activeTab === 'account' ? 'active' : ''}`}
-              onClick={() => setActiveTab('account')}
+              onClick={() => selectTab('account')}
             >
               <UserIcon size={16} />
               <span>Account</span>
@@ -163,7 +162,9 @@ export function SettingsPage() {
                               ? 'running'
                               : mcp.status === 'checking'
                                 ? 'checking'
-                                : 'offline'
+                                : mcp.status === 'blocked'
+                                  ? 'blocked'
+                                  : 'offline'
                           }`}
                         >
                           <span className="mcp-badge-dot" />
@@ -172,16 +173,38 @@ export function SettingsPage() {
                               ? 'Running'
                               : mcp.status === 'checking'
                                 ? 'Checking…'
-                                : 'Not running'}
+                                : mcp.status === 'blocked'
+                                  ? 'Permission Blocked'
+                                  : 'Not running'}
                           </span>
                         </div>
 
-                        {mcp.status !== 'running' ? (
+                        {mcp.status === 'blocked' ? (
+                          <button
+                            type="button"
+                            className="ui-button ui-button--default mcp-action-btn"
+                            onClick={mcp.retriggerPermission}
+                            disabled={mcp.isChecking || mcp.isRetriggering}
+                            title="Re-check device access permission"
+                          >
+                            {mcp.isRetriggering || mcp.isChecking ? (
+                              <>
+                                <Loader2 size={13} className="sync-status-icon--saving" />
+                                <span>Checking…</span>
+                              </>
+                            ) : (
+                              <>
+                                <RefreshCw size={13} />
+                                <span>Re-check Permission</span>
+                              </>
+                            )}
+                          </button>
+                        ) : mcp.status !== 'running' ? (
                           <button
                             type="button"
                             className="ui-button ui-button--default mcp-action-btn"
                             onClick={mcp.startServer}
-                            disabled={mcp.isStarting || mcp.status === 'checking'}
+                            disabled={mcp.isStarting || mcp.isChecking}
                             title="Start local MCP server"
                           >
                             {mcp.isStarting ? (
@@ -218,19 +241,21 @@ export function SettingsPage() {
                           </button>
                         )}
 
-                        <button
-                          type="button"
-                          className="ui-button ui-button--outline mcp-refresh-btn"
-                          onClick={mcp.checkStatus}
-                          disabled={mcp.status === 'checking' || mcp.isStarting}
-                          title="Re-check MCP bridge connection"
-                        >
-                          <RefreshCw
-                            size={13}
-                            className={mcp.status === 'checking' ? 'sync-status-icon--saving' : ''}
-                          />
-                          <span>Check status</span>
-                        </button>
+                        {!mcp.isPermissionBlocked && (
+                          <button
+                            type="button"
+                            className="ui-button ui-button--outline mcp-refresh-btn"
+                            onClick={mcp.checkStatus}
+                            disabled={mcp.isChecking || mcp.isStarting}
+                            title="Re-check MCP bridge connection"
+                          >
+                            <RefreshCw
+                              size={13}
+                              className={mcp.isChecking ? 'sync-status-icon--saving' : ''}
+                            />
+                            <span>Check status</span>
+                          </button>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -249,16 +274,28 @@ export function SettingsPage() {
                     </div>
                   </div>
 
+                  {mcp.isPermissionBlocked && (
+                    <div className="mcp-notice mcp-notice--blocked">
+                      <div className="mcp-blocked-header">
+                        <ShieldAlert size={20} className="mcp-blocked-icon" />
+                        <div>
+                          <h3 className="mcp-blocked-title">Browser access blocked</h3>
+                          <p className="mcp-blocked-subtitle">
+                            Chrome can&apos;t reach your local MCP bridge, so its status and controls are unavailable.
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="mcp-blocked-steps">
+                        <strong>To reconnect:</strong> Open Site settings → Apps on device → Allow, then re-check above.
+                      </div>
+                    </div>
+                  )}
+
                   {mcp.status === 'offline' && (
-                    <div className="mcp-notice mcp-notice--offline">
-                      <p>
-                        The MCP server bridge is not responding. To start it locally, run:
-                      </p>
-                      <pre>
-                        <code>pnpm dev:mcp</code>
-                      </pre>
-                      <p className="mcp-notice-hint">
-                        Or start all services concurrently with <code>pnpm dev:all</code>.
+                    <div className="mcp-offline-help">
+                      <p className="mcp-offline-text">
+                        The MCP server bridge is offline.
                       </p>
                     </div>
                   )}
@@ -280,8 +317,7 @@ export function SettingsPage() {
                 <div className="settings-section-header">
                   <h2>User Profile</h2>
                   <p>
-                    Your user information determines the avatar initials and name shown across
-                    the workspace.
+                    Your user profile details are synced from your Google account and are read-only.
                   </p>
                 </div>
 
@@ -294,7 +330,7 @@ export function SettingsPage() {
                     </div>
                   </div>
 
-                  <form onSubmit={handleSaveAccount} className="account-form">
+                  <div className="account-form">
                     <div className="account-form-grid">
                       <div className="modal-field">
                         <label htmlFor="settings-first-name">
@@ -304,9 +340,8 @@ export function SettingsPage() {
                           id="settings-first-name"
                           type="text"
                           className="ui-input"
-                          value={firstName}
-                          onChange={(e) => setFirstName(e.target.value)}
-                          required
+                          value={user.firstName}
+                          readOnly
                         />
                       </div>
 
@@ -318,9 +353,8 @@ export function SettingsPage() {
                           id="settings-last-name"
                           type="text"
                           className="ui-input"
-                          value={lastName}
-                          onChange={(e) => setLastName(e.target.value)}
-                          required
+                          value={user.lastName}
+                          readOnly
                         />
                       </div>
                     </div>
@@ -333,23 +367,11 @@ export function SettingsPage() {
                         id="settings-email"
                         type="email"
                         className="ui-input"
-                        value={email}
-                        onChange={(e) => setEmail(e.target.value)}
+                        value={user.email}
+                        readOnly
                       />
                     </div>
-
-                    <div className="account-form-actions">
-                      {savedSuccess && (
-                        <span className="account-saved-pill">
-                          <Check size={13} />
-                          Profile saved!
-                        </span>
-                      )}
-                      <button type="submit" className="ui-button ui-button--default">
-                        Save changes
-                      </button>
-                    </div>
-                  </form>
+                  </div>
                 </div>
               </section>
             )}

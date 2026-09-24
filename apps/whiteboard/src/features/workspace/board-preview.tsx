@@ -1,13 +1,13 @@
 import { memo, useEffect, useState } from 'react'
 import { Link } from '@tanstack/react-router'
 import { exportToSvg } from '@excalidraw/excalidraw'
-import { Trash2 } from 'lucide-react'
+import { Share2, Trash2 } from 'lucide-react'
 import { useTheme } from '../../lib/theme-context'
 import type { WorkspaceBoard } from './workspace-api'
 
 const statusCopy = {
   synced: 'Synced',
-  'local-only': 'Local only',
+  'local-only': 'Synced locally',
   'sync-failed': 'Sync failed',
   conflict: 'Conflict',
 } as const
@@ -34,10 +34,12 @@ function isColorDark(hexColor: string | undefined): boolean {
 export const BoardPreview = memo(function BoardPreview({
   board,
   onDelete,
+  onShare,
 }: {
   board: WorkspaceBoard
   index?: number
   onDelete?: (board: WorkspaceBoard) => void
+  onShare?: (board: WorkspaceBoard) => void
 }) {
   const { resolvedTheme } = useTheme()
   const isDark = resolvedTheme === 'dark'
@@ -171,6 +173,21 @@ export const BoardPreview = memo(function BoardPreview({
             <span className="board-preview-empty__label">Empty board</span>
           </div>
         )}
+        {onShare ? (
+          <button
+            type="button"
+            className="board-card-share-btn"
+            onClick={(e) => {
+              e.preventDefault()
+              e.stopPropagation()
+              onShare(board)
+            }}
+            title="Share board"
+            aria-label="Share board"
+          >
+            <Share2 size={14} />
+          </button>
+        ) : null}
         {onDelete ? (
           <button
             type="button"

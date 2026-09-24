@@ -10,18 +10,20 @@ import { workspaceApi } from './features/workspace/workspace-api'
 
 export function AppShell() {
   return (
-    <AuthProvider>
-      <AuthenticatedApp />
-    </AuthProvider>
+    <ThemeProvider>
+      <AuthProvider>
+        <AuthenticatedApp />
+      </AuthProvider>
+    </ThemeProvider>
   )
 }
 
 function AuthenticatedApp() {
-  const { user, isLoading } = useAuth()
+  const { user, isLoading, signInWithGoogle } = useAuth()
   const location = useLocation()
-  const isWorkspace = location.pathname === '/' || location.pathname.startsWith('/projects')
-  const isSettings = location.pathname.startsWith('/settings')
-  const showBrandName = isWorkspace || isSettings
+  const isProject = location.pathname.startsWith('/projects')
+  const isBoard = location.pathname.startsWith('/boards')
+  const showBrandName = !isBoard && !isProject
 
   useEffect(() => {
     if (!user) {
@@ -31,12 +33,11 @@ function AuthenticatedApp() {
     void workspaceApi.activateCloudWorkspace(user.uid)
   }, [user])
 
-  if (isLoading) return <main className="workspace-loading">Checking your account…</main>
-  if (!user) return <SignInScreen />
+  if (isLoading) return <main className="workspace-loading workspace-loading--full">Checking your account…</main>
+  if (!user && !isBoard) return <SignInScreen />
 
   return (
-    <ThemeProvider>
-      <UserProvider>
+    <UserProvider>
         <header className="app-header">
           <div className="app-header-left">
             <Link to="/" className="brand-logo" title="OpenExcalidraw" aria-label="OpenExcalidraw">
@@ -49,11 +50,21 @@ function AuthenticatedApp() {
           </div>
           <div className="app-header-right">
             <div id="header-status-slot" />
-            <UserDropdown />
+            {user ? (
+              <UserDropdown />
+            ) : (
+              <button
+                type="button"
+                className="header-share-btn"
+                onClick={signInWithGoogle}
+                title="Sign in with Google"
+              >
+                Sign in
+              </button>
+            )}
           </div>
         </header>
         <Outlet />
       </UserProvider>
-    </ThemeProvider>
   )
 }

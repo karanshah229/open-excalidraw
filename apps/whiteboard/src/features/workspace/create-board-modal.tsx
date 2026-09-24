@@ -8,10 +8,17 @@ interface CreateBoardModalProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   projects: Project[]
+  defaultProjectId?: string
   onCreateBoard: (params: { boardName: string; projectId?: string; newProjectName?: string }) => Promise<void>
 }
 
-export function CreateBoardModal({ open, onOpenChange, projects, onCreateBoard }: CreateBoardModalProps) {
+export function CreateBoardModal({
+  open,
+  onOpenChange,
+  projects,
+  defaultProjectId,
+  onCreateBoard,
+}: CreateBoardModalProps) {
   const [boardName, setBoardName] = useState('')
   const [selectedProjectId, setSelectedProjectId] = useState<string>('')
   const [isCreatingProject, setIsCreatingProject] = useState(false)
@@ -24,14 +31,14 @@ export function CreateBoardModal({ open, onOpenChange, projects, onCreateBoard }
   useEffect(() => {
     if (open) {
       setBoardName('')
-      setSelectedProjectId(projects[0]?.id ?? '')
+      setSelectedProjectId(defaultProjectId || (projects[0]?.id ?? ''))
       setIsCreatingProject(false)
       setNewProjectName('')
       setIsSubmitting(false)
       setIsDropdownOpen(false)
       setSearchQuery('')
     }
-  }, [open, projects])
+  }, [open, projects, defaultProjectId])
 
   const selectedProject = projects.find((p) => p.id === selectedProjectId)
   const selectedLabel = isCreatingProject

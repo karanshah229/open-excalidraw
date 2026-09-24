@@ -1,6 +1,6 @@
 import { RxDbWorkspaceStore } from '@agentic-whiteboard/storage'
 import type { Board, BoardDocument, Project } from '@agentic-whiteboard/storage'
-import { collection, doc, getDoc, getDocs, onSnapshot, runTransaction, setDoc } from 'firebase/firestore'
+import { collection, doc, getDoc, getDocs, onSnapshot, query, runTransaction, setDoc, where } from 'firebase/firestore'
 import { getFirestoreDb } from '../../lib/firebase'
 
 export type WorkspaceBoard = Board & { project: Project }
@@ -15,18 +15,45 @@ let projectsListener: (() => void) | undefined
 const SYNC_DEBOUNCE_MS = 150
 const MIN_WRITE_INTERVAL_MS = 1_000
 const MAX_RETRY_DELAY_MS = 60_000
+const ACTIVE_FLAG_MIGRATION_KEY = 'agentic-whiteboard:active-boards-v1'
 
 class SyncConflictError extends Error {}
 
-/** Firestore rejects undefined at any depth; Excalidraw deliberately uses it for optional fields. */
-function firestoreValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.filter((item) => item !== undefined).map(firestoreValue)
+const NESTED_ARRAY_KEY = '_agenticWhiteboardNestedArray'
+
+/**
+ * Firestore rejects undefined at any depth and arrays nested inside other
+ * arrays. Excalidraw uses nested point arrays for arrows and lines, so encode
+ * only those inner arrays as maps and restore them when reading the cloud copy.
+ */
+export function firestoreValue(value: unknown, insideArray = false): unknown {
+  if (Array.isArray(value)) {
+    const normalized = value.filter((item) => item !== undefined).map((item) => firestoreValue(item, true))
+    return insideArray ? { [NESTED_ARRAY_KEY]: normalized } : normalized
+  }
   if (value && typeof value === 'object') {
     return Object.fromEntries(
       Object.entries(value)
         .filter(([, item]) => item !== undefined)
-        .map(([key, item]) => [key, firestoreValue(item)]),
+        // Reset insideArray to false because Firestore permits arrays directly inside maps.
+        .map(([key, item]) => [key, firestoreValue(item, false)]),
     )
+  }
+  return value
+}
+
+export function workspaceValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(workspaceValue)
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value)
+    if (
+      entries.length === 1 &&
+      (entries[0][0] === NESTED_ARRAY_KEY || entries[0][0] === '__agentic_whiteboard_nested_array__') &&
+      Array.isArray(entries[0][1])
+    ) {
+      return entries[0][1].map(workspaceValue)
+    }
+    return Object.fromEntries(entries.map(([key, item]) => [key, workspaceValue(item)]))
   }
   return value
 }
@@ -74,7 +101,7 @@ const matchesCommittedVersion = (local: BoardDocument, remote: BoardDocument) =>
 async function syncWorkspace(userId: string) {
   const db = getFirestoreDb()
   if (!db) return
-  const { projects, boards } = await workspaceApi.listWorkspace()
+  const [projects, boards] = await Promise.all([workspaceStore.listProjects(), workspaceStore.listBoardsForSync()])
   const now = new Date().toISOString()
   const unsyncedBoards = boards.filter(
     (board) => (board.syncStatus === 'local-only' || board.syncStatus === 'sync-failed') && (!board.nextSyncAt || board.nextSyncAt <= now),
@@ -123,7 +150,7 @@ async function syncWorkspace(userId: string) {
     }
   }
 
-  const pending = (await workspaceApi.listWorkspace()).boards
+  const pending = (await workspaceStore.listBoardsForSync())
     .filter((board) => (board.syncStatus === 'local-only' || board.syncStatus === 'sync-failed') && board.nextSyncAt)
     .map((board) => new Date(board.nextSyncAt!).getTime())
   if (pending.length) {
@@ -140,10 +167,12 @@ async function downloadWorkspace(userId: string) {
     projectSnapshots.docs.map(async (projectSnapshot) => {
       const project = projectSnapshot.data() as Project
       await workspaceStore.upsertProject(project)
-      const boardSnapshots = await getDocs(collection(db, 'users', userId, 'projects', project.id, 'boards'))
+      const boardSnapshots = await getDocs(
+        query(collection(db, 'users', userId, 'projects', project.id, 'boards'), where('active', '==', true)),
+      )
       await Promise.all(
         boardSnapshots.docs.map(async (boardSnapshot) => {
-          const remote = cloudBoard(boardSnapshot.data() as BoardDocument)
+          const remote = cloudBoard(workspaceValue(boardSnapshot.data()) as BoardDocument)
           const local = await workspaceStore.loadBoard(remote.id)
           if (local?.syncStatus === 'local-only' || local?.syncStatus === 'sync-failed') {
             if (matchesCommittedVersion(local, remote)) {
@@ -160,6 +189,26 @@ async function downloadWorkspace(userId: string) {
   )
 }
 
+/** Add the activity flag to pre-existing cloud boards before active-only reads begin. */
+async function migrateLegacyBoardActivity(userId: string) {
+  const db = getFirestoreDb()
+  const migrationKey = `${ACTIVE_FLAG_MIGRATION_KEY}:${userId}`
+  if (!db || localStorage.getItem(migrationKey)) return
+
+  const projects = await getDocs(collection(db, 'users', userId, 'projects'))
+  await Promise.all(
+    projects.docs.map(async (project) => {
+      const boards = await getDocs(collection(db, 'users', userId, 'projects', project.id, 'boards'))
+      await Promise.all(
+        boards.docs
+          .filter((board) => board.data().active === undefined)
+          .map((board) => setDoc(board.ref, { active: true }, { merge: true })),
+      )
+    }),
+  )
+  localStorage.setItem(migrationKey, 'complete')
+}
+
 function subscribeToRemoteWorkspace(userId: string) {
   const db = getFirestoreDb()
   if (!db || projectsListener) return
@@ -170,9 +219,13 @@ function subscribeToRemoteWorkspace(userId: string) {
       if (projectListeners.has(project.id)) continue
       projectListeners.set(
         project.id,
-        onSnapshot(collection(db, 'users', userId, 'projects', project.id, 'boards'), (boardSnapshot) => {
-          for (const boardDocument of boardSnapshot.docs) {
-            const remote = boardDocument.data() as BoardDocument
+        onSnapshot(query(collection(db, 'users', userId, 'projects', project.id, 'boards'), where('active', '==', true)), (boardSnapshot) => {
+          for (const change of boardSnapshot.docChanges()) {
+            const boardDocument = change.doc
+            const remote = {
+              ...(workspaceValue(boardDocument.data()) as BoardDocument),
+              active: change.type === 'removed' ? false : true,
+            }
             void (async () => {
               const local = await workspaceStore.loadBoard(remote.id)
               const normalized = cloudBoard(remote)
@@ -221,11 +274,14 @@ export const workspaceApi = {
     await workspaceStore.deleteBoard(boardId)
     queueSync()
   },
-  loadBoard: (boardId: string): Promise<BoardDocument | null> => workspaceStore.loadBoard(boardId),
+  async loadBoard(boardId: string): Promise<BoardDocument | null> {
+    const document = await workspaceStore.loadBoard(boardId)
+    return document?.active ? document : null
+  },
   async loadBoardWithProject(boardId: string): Promise<{ document: BoardDocument; project: Project } | null> {
     await workspaceStore.bootstrap()
     const document = await workspaceStore.loadBoard(boardId)
-    if (!document) return null
+    if (!document?.active) return null
     const projects = await workspaceStore.listProjects()
     const project = projects.find((p) => p.id === document.projectId) || {
       id: document.projectId,
@@ -240,7 +296,7 @@ export const workspaceApi = {
   async renameBoard(boardId: string, name: string): Promise<BoardDocument | null> {
     await workspaceStore.bootstrap()
     const document = await workspaceStore.loadBoard(boardId)
-    if (!document) return null
+    if (!document?.active) return null
     const trimmed = name.trim() || 'Untitled'
     const updated: BoardDocument = {
       ...document,
@@ -267,7 +323,7 @@ export const workspaceApi = {
     let remoteRevision = local.baseRevision
     if (db && activeUserId) {
       const remote = await getDoc(doc(db, 'users', activeUserId, 'projects', local.projectId, 'boards', boardId))
-      if (remote.exists()) remoteRevision = Number(remote.data().revision ?? 0)
+      if (remote.exists() && remote.data().active === true) remoteRevision = Number(remote.data().revision ?? 0)
     }
     await workspaceStore.requeueConflictedBoard(boardId, remoteRevision)
     window.dispatchEvent(new CustomEvent(`board-sync:${boardId}`, { detail: 'local-only' }))
@@ -276,6 +332,7 @@ export const workspaceApi = {
   async activateCloudWorkspace(userId: string) {
     activeUserId = userId
     await workspaceStore.bootstrap()
+    await migrateLegacyBoardActivity(userId)
     await downloadWorkspace(userId)
     subscribeToRemoteWorkspace(userId)
     const { boards } = await workspaceApi.listWorkspace()

@@ -8,7 +8,7 @@ import type { BoardSyncStatus, Project } from '@agentic-whiteboard/storage'
 
 export type SortOrder = 'latest' | 'oldest' | 'name-asc' | 'name-desc'
 const statuses: Array<{ value: BoardSyncStatus; label: string }> = [
-  { value: 'local-only', label: 'Local only' },
+  { value: 'local-only', label: 'Synced locally' },
   { value: 'synced', label: 'Synced' },
   { value: 'sync-failed', label: 'Sync failed' },
   { value: 'conflict', label: 'Conflict' },
