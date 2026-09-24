@@ -368,6 +368,19 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
     const db = await database()
     const document = await (db.boards as any).findOne(boardId).exec()
     if (document) {
+      const current = plain<BoardDocument>(document)
+      // Sync runs asynchronously. A newer local edit may have been saved while
+      // the cloud acknowledgement for `revision` was in flight. In that case
+      // acknowledge the committed base without replacing the newer local
+      // revision; otherwise the editor's next optimistic write sees a stale
+      // revision and fails with BOARD_REVISION_CONFLICT.
+      if (current.revision > revision) {
+        await document.incrementalPatch({
+          baseRevision: Math.max(current.baseRevision, revision),
+          syncStatus: current.syncStatus === 'sync-failed' ? 'sync-failed' : 'local-only',
+        })
+        return
+      }
       await document.incrementalPatch({
         syncStatus: 'synced',
         baseRevision: revision,

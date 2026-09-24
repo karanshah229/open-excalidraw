@@ -79,11 +79,23 @@ function getStatusConfig(state: EditorStatus): StatusConfig {
         colorTheme: 'conflict',
       }
     case 'Sync failed':
+      return {
+        title: 'Cloud sync paused',
+        description: 'Saved on this device. Retrying cloud sync.',
+        icon: AlertCircle,
+        colorTheme: 'error',
+      }
     case 'Local save failed':
+      return {
+        title: 'Local save failed',
+        description: 'Could not save on this device. Your latest edits may be unsaved.',
+        icon: AlertCircle,
+        colorTheme: 'error',
+      }
     default:
       return {
-        title: 'Sync paused',
-        description: 'Saved on device. Retrying cloud sync.',
+        title: 'Sync status unavailable',
+        description: 'Unable to determine whether the latest edits were saved.',
         icon: AlertCircle,
         colorTheme: 'error',
       }

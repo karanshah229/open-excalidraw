@@ -108,6 +108,7 @@ export function BoardEditor() {
   const socketRef = useRef<WebSocket | null>(null)
   const operationRef = useRef<string | null>(null)
   const saveTimer = useRef<number>()
+  const saveChainRef = useRef<Promise<void>>(Promise.resolve())
   const savedSignature = useRef<string>()
   const pendingSceneRef = useRef<BoardScene | null>(null)
   const awaitingInitialSceneRef = useRef(true)
@@ -458,6 +459,41 @@ export function BoardEditor() {
     }
   }, [isReadOnly, sendScene])
 
+  /**
+   * Saves use optimistic revisions, so concurrent writes with the same stale
+   * revision are treated as conflicts by the store. Queue them and read the
+   * document ref inside the queued task, after the preceding save has updated it.
+   */
+  const enqueueSceneSave = useCallback(
+    (scene: BoardScene) => {
+      const task = saveChainRef.current.then(async () => {
+        const document = documentRef.current
+        if (document) {
+          const saved = await workspaceApi.saveBoard({ ...document, scene })
+          documentRef.current = saved
+          setBoardMeta((prev) => (prev ? { ...prev, updatedAt: saved.updatedAt } : prev))
+          void sharingService.syncBoardSceneToShare(boardId, scene, saved.name)
+          queryClient.invalidateQueries({ queryKey: ['workspace'] })
+          return
+        }
+
+        await sharingService.updateSharedScene(boardId, scene)
+        setState('Synced')
+      })
+
+      // Keep the queue live after an error while preserving that error for the caller.
+      saveChainRef.current = task.catch(() => {})
+      return task
+    },
+    [boardId, queryClient],
+  )
+
+  const handleSaveFailure = useCallback((scene: BoardScene, error: unknown) => {
+    pendingSceneRef.current ??= scene
+    if (!documentRef.current) console.error('Failed to sync shared scene:', error)
+    setState(documentRef.current ? 'Local save failed' : 'Sync failed')
+  }, [])
+
   const flushSave = useCallback(async () => {
     if (isReadOnly) return
     if (saveTimer.current) {
@@ -468,27 +504,12 @@ export function BoardEditor() {
     if (!scene) return
     pendingSceneRef.current = null
 
-    const document = documentRef.current
-    if (document) {
-      try {
-        const saved = await workspaceApi.saveBoard({ ...document, scene })
-        documentRef.current = saved
-        setBoardMeta((prev) => (prev ? { ...prev, updatedAt: saved.updatedAt } : prev))
-        void sharingService.syncBoardSceneToShare(boardId, scene, saved.name)
-        queryClient.invalidateQueries({ queryKey: ['workspace'] })
-      } catch {
-        setState('Local save failed')
-      }
-    } else {
-      try {
-        await sharingService.updateSharedScene(boardId, scene)
-        setState('Synced')
-      } catch (err) {
-        console.error('Failed to sync shared scene:', err)
-        setState('Sync failed')
-      }
+    try {
+      await enqueueSceneSave(scene)
+    } catch (error) {
+      handleSaveFailure(scene, error)
     }
-  }, [boardId, isReadOnly, queryClient])
+  }, [enqueueSceneSave, handleSaveFailure, isReadOnly])
 
   const scheduleSave = useCallback(
     (scene: BoardScene) => {
@@ -499,29 +520,14 @@ export function BoardEditor() {
       saveTimer.current = window.setTimeout(async () => {
         saveTimer.current = undefined
         pendingSceneRef.current = null
-        const document = documentRef.current
-        if (document) {
-          try {
-            const saved = await workspaceApi.saveBoard({ ...document, scene })
-            documentRef.current = saved
-            setBoardMeta((prev) => (prev ? { ...prev, updatedAt: saved.updatedAt } : prev))
-            void sharingService.syncBoardSceneToShare(boardId, scene, saved.name)
-            queryClient.invalidateQueries({ queryKey: ['workspace'] })
-          } catch {
-            setState('Local save failed')
-          }
-        } else {
-          try {
-            await sharingService.updateSharedScene(boardId, scene)
-            setState('Synced')
-          } catch (err) {
-            console.error('Failed to sync shared scene:', err)
-            setState('Sync failed')
-          }
+        try {
+          await enqueueSceneSave(scene)
+        } catch (error) {
+          handleSaveFailure(scene, error)
         }
       }, 450)
     },
-    [boardId, isReadOnly, queryClient],
+    [enqueueSceneSave, handleSaveFailure, isReadOnly],
   )
 
   const getSceneSize = useCallback(() => {
