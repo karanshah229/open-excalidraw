@@ -21,13 +21,7 @@ import { useUser } from '../lib/user-context'
 import { useAuth } from '../lib/auth-context'
 
 export type EditorStatus =
-  | 'Loading board'
-  | 'Saving'
-  | 'Synced locally'
-  | 'Synced'
-  | 'Sync failed'
-  | 'Conflict'
-  | 'Local save failed'
+  'Loading board' | 'Saving' | 'Synced locally' | 'Synced' | 'Sync failed' | 'Conflict' | 'Local save failed'
 
 export interface SyncStatusDropdownProps {
   state: EditorStatus
@@ -173,16 +167,11 @@ export function SyncStatusDropdown({
     return trimmed.toLowerCase().endsWith('.excalidraw') ? trimmed : `${trimmed}.excalidraw`
   }, [boardName])
 
-  const isCurrentOwner =
-    !projectOwnerId ||
-    projectOwnerId === 'local-user' ||
-    projectOwnerId === authUser?.uid
+  const isCurrentOwner = !projectOwnerId || projectOwnerId === 'local-user' || projectOwnerId === authUser?.uid
 
-  const ownerName = isCurrentOwner
-    ? `${fullName || authUser?.displayName || 'User'} (You)`
-    : projectOwnerId
+  const ownerName = isCurrentOwner ? `${fullName || authUser?.displayName || 'User'} (You)` : projectOwnerId
 
-  const ownerEmail = isCurrentOwner ? (user?.email || authUser?.email) : undefined
+  const ownerEmail = isCurrentOwner ? user?.email || authUser?.email : undefined
   const updatedTime = useMemo(() => formatTimestamp(updatedAt), [updatedAt])
   const createdTime = useMemo(() => formatTimestamp(createdAt), [createdAt])
 
@@ -232,18 +221,11 @@ export function SyncStatusDropdown({
       </Popover.Trigger>
 
       <Popover.Portal>
-        <Popover.Content
-          className="sync-status-popover animate-fade-in"
-          align="end"
-          sideOffset={8}
-        >
+        <Popover.Content className="sync-status-popover animate-fade-in" align="end" sideOffset={8}>
           {/* 1. Sync Status Section */}
           <div className="sync-simple-row">
             <div className={`sync-simple-icon-wrap sync-simple-icon-wrap--${config.colorTheme}`}>
-              <StatusIcon
-                size={15}
-                className={`sync-simple-icon ${state === 'Saving' ? 'animate-spin' : ''}`}
-              />
+              <StatusIcon size={15} className={`sync-simple-icon ${state === 'Saving' ? 'animate-spin' : ''}`} />
             </div>
             <div className="sync-simple-text">
               <span className="sync-simple-title">{config.title}</span>
@@ -342,11 +324,7 @@ export function SyncStatusDropdown({
                 <span className="board-info-item-value" title={updatedTime.formatted}>
                   {updatedTime.formatted}
                 </span>
-                {updatedTime.relative && (
-                  <span className="board-info-item-subtext">
-                    ({updatedTime.relative})
-                  </span>
-                )}
+                {updatedTime.relative && <span className="board-info-item-subtext">({updatedTime.relative})</span>}
               </div>
             </div>
 
@@ -370,9 +348,7 @@ export function SyncStatusDropdown({
                 <span>File size</span>
               </div>
               <div className="board-info-item-value-wrap board-info-item-value-wrap--stacked">
-                <span className="board-info-item-value">
-                  {formatBytes(sceneData.bytes)}
-                </span>
+                <span className="board-info-item-value">{formatBytes(sceneData.bytes)}</span>
                 <span className="board-info-item-subtext">
                   {sceneData.elementsCount} element{sceneData.elementsCount === 1 ? '' : 's'}
                 </span>

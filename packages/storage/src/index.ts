@@ -35,7 +35,7 @@ export type Board = {
 }
 export type BoardScene = { elements: Record<string, unknown>[]; appState: Record<string, unknown> }
 export type BoardDocument = Board & { scene: BoardScene; formatVersion: 1 }
-export type WorkspaceBootstrap = { project: Project; board: BoardDocument | null }
+export type WorkspaceBootstrap = { project: Project | null; board: BoardDocument | null }
 
 /** Product-level boundary for local, desktop, and cloud persistence adapters. */
 export interface WorkspaceStore {
@@ -155,7 +155,10 @@ const toBoard = (document: BoardDocument): Board => {
   return board
 }
 
-const normalizedBoard = (document: Omit<BoardDocument, 'revision' | 'baseRevision' | 'syncAttempts' | 'nextSyncAt' | 'lastSyncError'> & Partial<BoardDocument>): BoardDocument => ({
+const normalizedBoard = (
+  document: Omit<BoardDocument, 'revision' | 'baseRevision' | 'syncAttempts' | 'nextSyncAt' | 'lastSyncError'> &
+    Partial<BoardDocument>,
+): BoardDocument => ({
   ...document,
   active: document.active ?? true,
   syncStatus: document.syncStatus === 'synced' ? 'synced' : 'local-only',
@@ -218,18 +221,7 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
       return { project, board }
     }
 
-    const [product, research, personal] = await Promise.all([
-      this.createProject('Product design', LOCAL_PRINCIPAL_ID),
-      this.createProject('Research', LOCAL_PRINCIPAL_ID),
-      this.createProject('Personal', LOCAL_PRINCIPAL_ID),
-    ])
-    const [firstBoard] = await Promise.all([
-      this.createBoard(product.id, 'Q3 Planning'),
-      this.createBoard(product.id, 'Mobile flows'),
-      this.createBoard(research.id, 'Research synthesis'),
-      this.createBoard(personal.id, 'Untitled'),
-    ])
-    return { project: product, board: firstBoard }
+    return { project: null, board: null }
   }
 
   async listProjects(): Promise<Project[]> {
@@ -240,13 +232,26 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
       .toSorted((left: Project, right: Project) => right.updatedAt.localeCompare(left.updatedAt))
   }
 
-  /** Assign offline bootstrap projects to the signed-in user before cloud sync. */
+  /** Assign offline user-created projects to the signed-in user before cloud sync. */
   async claimLocalProjects(ownerId: string): Promise<string[]> {
     const db = await database()
     const documents = await (db.projects as any).find({ selector: { ownerId: LOCAL_PRINCIPAL_ID } }).exec()
 
+    const legitimateDocs: any[] = []
+    for (const document of documents) {
+      const project = plain<Project>(document)
+      // Clean up any stale legacy bootstrap placeholder projects from previous sessions
+      if (['Product design', 'Research', 'Personal'].includes(project.name)) {
+        await document.remove()
+        const relatedBoards = await (db.boards as any).find({ selector: { projectId: project.id } }).exec()
+        await Promise.all(relatedBoards.map((b: any) => b.remove()))
+      } else {
+        legitimateDocs.push(document)
+      }
+    }
+
     await Promise.all(
-      documents.map(async (document: any) => {
+      legitimateDocs.map(async (document: any) => {
         const project = plain<Project>(document)
         const members = project.members.map((member) =>
           member.principalId === LOCAL_PRINCIPAL_ID ? { ...member, principalId: ownerId } : member,
@@ -258,7 +263,7 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
       }),
     )
 
-    return documents.map((document: any) => plain<Project>(document).id)
+    return legitimateDocs.map((document: any) => plain<Project>(document).id)
   }
 
   async createProject(name: string, ownerId: string): Promise<Project> {

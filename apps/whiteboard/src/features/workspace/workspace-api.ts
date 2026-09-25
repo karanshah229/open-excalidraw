@@ -72,7 +72,8 @@ function queueSync() {
   }, delay)
 }
 
-const retryAt = (attempt: number) => new Date(Date.now() + Math.min(1_000 * 2 ** attempt, MAX_RETRY_DELAY_MS)).toISOString()
+const retryAt = (attempt: number) =>
+  new Date(Date.now() + Math.min(1_000 * 2 ** attempt, MAX_RETRY_DELAY_MS)).toISOString()
 const errorMessage = (error: unknown) => (error instanceof Error ? error.message : 'Cloud sync failed')
 
 async function withSyncLock<T>(work: () => Promise<T>) {
@@ -104,7 +105,9 @@ async function syncWorkspace(userId: string) {
   const [projects, boards] = await Promise.all([workspaceStore.listProjects(), workspaceStore.listBoardsForSync()])
   const now = new Date().toISOString()
   const unsyncedBoards = boards.filter(
-    (board) => (board.syncStatus === 'local-only' || board.syncStatus === 'sync-failed') && (!board.nextSyncAt || board.nextSyncAt <= now),
+    (board) =>
+      (board.syncStatus === 'local-only' || board.syncStatus === 'sync-failed') &&
+      (!board.nextSyncAt || board.nextSyncAt <= now),
   )
   const projectIds = new Set([...dirtyProjectIds, ...unsyncedBoards.map((board) => board.projectId)])
 
@@ -178,7 +181,10 @@ async function downloadWorkspace(userId: string) {
             if (matchesCommittedVersion(local, remote)) {
               await workspaceStore.markBoardSynced(remote.id, remote.revision)
             } else if (remote.revision !== local.baseRevision) {
-              await workspaceStore.markBoardConflict(remote.id, 'This board changed remotely while local work was pending.')
+              await workspaceStore.markBoardConflict(
+                remote.id,
+                'This board changed remotely while local work was pending.',
+              )
             }
           } else if (!local || remote.revision >= local.revision) {
             await workspaceStore.upsertBoard(remote)
@@ -219,31 +225,37 @@ function subscribeToRemoteWorkspace(userId: string) {
       if (projectListeners.has(project.id)) continue
       projectListeners.set(
         project.id,
-        onSnapshot(query(collection(db, 'users', userId, 'projects', project.id, 'boards'), where('active', '==', true)), (boardSnapshot) => {
-          for (const change of boardSnapshot.docChanges()) {
-            const boardDocument = change.doc
-            const remote = {
-              ...(workspaceValue(boardDocument.data()) as BoardDocument),
-              active: change.type === 'removed' ? false : true,
-            }
-            void (async () => {
-              const local = await workspaceStore.loadBoard(remote.id)
-              const normalized = cloudBoard(remote)
-              if (local?.syncStatus === 'local-only' || local?.syncStatus === 'sync-failed') {
-                // Firestore can emit this tab's transaction before markBoardSynced runs.
-                // Keep that in-flight acknowledgement owned by syncWorkspace; only a truly
-                // newer remote revision is a conflict.
-                if (normalized.revision !== local.baseRevision && normalized.revision !== local.revision) {
-                  await workspaceStore.markBoardConflict(remote.id, 'This board changed remotely while local work was pending.')
-                  await updateSyncStatus(remote.id, 'conflict')
-                }
-              } else if (!local || normalized.revision >= local.revision) {
-                await workspaceStore.upsertBoard(normalized)
-                await updateSyncStatus(remote.id, 'synced')
+        onSnapshot(
+          query(collection(db, 'users', userId, 'projects', project.id, 'boards'), where('active', '==', true)),
+          (boardSnapshot) => {
+            for (const change of boardSnapshot.docChanges()) {
+              const boardDocument = change.doc
+              const remote = {
+                ...(workspaceValue(boardDocument.data()) as BoardDocument),
+                active: change.type === 'removed' ? false : true,
               }
-            })()
-          }
-        }),
+              void (async () => {
+                const local = await workspaceStore.loadBoard(remote.id)
+                const normalized = cloudBoard(remote)
+                if (local?.syncStatus === 'local-only' || local?.syncStatus === 'sync-failed') {
+                  // Firestore can emit this tab's transaction before markBoardSynced runs.
+                  // Keep that in-flight acknowledgement owned by syncWorkspace; only a truly
+                  // newer remote revision is a conflict.
+                  if (normalized.revision !== local.baseRevision && normalized.revision !== local.revision) {
+                    await workspaceStore.markBoardConflict(
+                      remote.id,
+                      'This board changed remotely while local work was pending.',
+                    )
+                    await updateSyncStatus(remote.id, 'conflict')
+                  }
+                } else if (!local || normalized.revision >= local.revision) {
+                  await workspaceStore.upsertBoard(normalized)
+                  await updateSyncStatus(remote.id, 'synced')
+                }
+              })()
+            }
+          },
+        ),
       )
     }
   })
@@ -338,7 +350,11 @@ export const workspaceApi = {
     claimedProjectIds.forEach((projectId) => dirtyProjectIds.add(projectId))
     subscribeToRemoteWorkspace(userId)
     const { boards } = await workspaceApi.listWorkspace()
-    if (boards.some((board) => board.syncStatus === 'local-only' || board.syncStatus === 'sync-failed') || dirtyProjectIds.size) queueSync()
+    if (
+      boards.some((board) => board.syncStatus === 'local-only' || board.syncStatus === 'sync-failed') ||
+      dirtyProjectIds.size
+    )
+      queueSync()
   },
   deactivateCloudWorkspace() {
     activeUserId = null

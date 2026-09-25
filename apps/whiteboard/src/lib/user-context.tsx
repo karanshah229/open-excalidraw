@@ -38,7 +38,12 @@ function getInitialUser(): UserProfile {
   if (typeof window === 'undefined') return DEFAULT_USER
   try {
     const saved = localStorage.getItem(USER_STORAGE_KEY)
-    if (saved) return JSON.parse(saved)
+    if (saved) {
+      const parsed = JSON.parse(saved)
+      if (parsed && (parsed.email || (parsed.firstName && parsed.firstName !== 'User'))) {
+        return parsed
+      }
+    }
   } catch {
     /* storage unavailable */
   }
@@ -52,13 +57,19 @@ export function UserProvider({ children }: { children: React.ReactNode }) {
   const { user: authenticatedUser, signOutUser } = useAuth()
 
   useEffect(() => {
-    if (!authenticatedUser) return
+    if (!authenticatedUser || authenticatedUser.isAnonymous) return
     const [firstName = '', ...rest] = (authenticatedUser.displayName ?? '').trim().split(/\s+/)
-    setUserState({
+    const profile: UserProfile = {
       firstName: firstName || 'User',
       lastName: rest.join(' '),
       email: authenticatedUser.email ?? '',
-    })
+    }
+    setUserState(profile)
+    try {
+      localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(profile))
+    } catch {
+      /* storage unavailable */
+    }
   }, [authenticatedUser])
 
   const updateUser = (profile: Partial<UserProfile>) => {
@@ -73,15 +84,21 @@ export function UserProvider({ children }: { children: React.ReactNode }) {
     })
   }
 
-  const logout = () => void signOutUser()
+  const logout = () => {
+    try {
+      localStorage.removeItem(USER_STORAGE_KEY)
+    } catch {
+      /* storage unavailable */
+    }
+    setUserState(DEFAULT_USER)
+    void signOutUser()
+  }
 
   const initials = getInitials(user.firstName, user.lastName)
   const fullName = `${user.firstName} ${user.lastName}`.trim()
 
   return (
-    <UserContext.Provider value={{ user, initials, fullName, updateUser, logout }}>
-      {children}
-    </UserContext.Provider>
+    <UserContext.Provider value={{ user, initials, fullName, updateUser, logout }}>{children}</UserContext.Provider>
   )
 }
 

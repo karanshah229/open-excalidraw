@@ -22,10 +22,10 @@ The current browser adapter is local-only. This document defines the cloud featu
 
 ## Access model
 
-| Scope | Owner | Editor | Viewer |
-| --- | --- | --- | --- |
-| Project | Manage members and all project boards | Create, edit, and share boards | View all project boards |
-| Board-only | Not applicable | Edit the shared board | View the shared board |
+| Scope      | Owner                                 | Editor                         | Viewer                  |
+| ---------- | ------------------------------------- | ------------------------------ | ----------------------- |
+| Project    | Manage members and all project boards | Create, edit, and share boards | View all project boards |
+| Board-only | Not applicable                        | Edit the shared board          | View the shared board   |
 
 Rules:
 

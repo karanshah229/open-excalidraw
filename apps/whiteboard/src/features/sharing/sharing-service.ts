@@ -47,7 +47,18 @@ function setLocalShare(config: BoardShareConfig) {
   }
 }
 
+async function getDocWithTimeout<T>(docRef: any, timeoutMs = 2500): Promise<T> {
+  return Promise.race([
+    getDoc(docRef) as Promise<T>,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Firestore getDoc timeout')), timeoutMs)),
+  ])
+}
+
 export const sharingService = {
+  hasLocalAccess(boardId: string): boolean {
+    const cached = getLocalShare(boardId)
+    return Boolean(cached && cached.generalAccess === 'anyone_with_link')
+  },
   async getShareConfig(
     boardId: string,
     fallback?: {
@@ -62,7 +73,7 @@ export const sharingService = {
     const db = getFirestoreDb()
     if (db) {
       try {
-        const snap = await getDoc(doc(db, 'boardShares', boardId))
+        const snap = await getDocWithTimeout<any>(doc(db, 'boardShares', boardId))
         if (snap.exists()) {
           const data = workspaceValue(snap.data()) as BoardShareConfig
           setLocalShare(data)
@@ -208,13 +219,16 @@ export const sharingService = {
 
     if (db) {
       try {
-        const snap = await getDoc(doc(db, 'boardShares', boardId))
+        const snap = await getDocWithTimeout<any>(doc(db, 'boardShares', boardId))
         if (snap.exists()) {
           remoteData = workspaceValue(snap.data()) as BoardShareConfig
           setLocalShare(remoteData)
         }
       } catch (err: any) {
-        // If firestore threw permission-denied, it means the document exists but rules rejected access
+        const localCached = getLocalShare(boardId)
+        if (localCached && localCached.generalAccess === 'anyone_with_link') {
+          return { status: 'allowed', config: localCached }
+        }
         if (err?.code === 'permission-denied') {
           return { status: 'restricted' }
         }

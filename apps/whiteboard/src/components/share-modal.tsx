@@ -2,22 +2,8 @@ import { useEffect, useState, useMemo, useRef } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import * as Popover from '@radix-ui/react-popover'
-import {
-  Check,
-  ChevronDown,
-  Globe,
-  HelpCircle,
-  Link2,
-  Lock,
-  Plus,
-  Trash2,
-  User as UserIcon,
-} from 'lucide-react'
-import {
-  sharingService,
-  type BoardShareConfig,
-  type ShareAccessLevel,
-} from '../features/sharing/sharing-service'
+import { Check, ChevronDown, Globe, HelpCircle, Link2, Lock, Plus, Trash2, User as UserIcon } from 'lucide-react'
+import { sharingService, type BoardShareConfig, type ShareAccessLevel } from '../features/sharing/sharing-service'
 import { useAuth } from '../lib/auth-context'
 import { useUser } from '../lib/user-context'
 import type { BoardScene } from '@agentic-whiteboard/storage'
@@ -51,8 +37,7 @@ export function ShareModal({
   const { fullName, user: localUser } = useUser()
 
   const resolvedOwnerId = authUser?.uid || (ownerId && ownerId !== 'local-user' ? ownerId : 'local-user')
-  const resolvedOwnerName =
-    ownerName || fullName || authUser?.displayName || 'User'
+  const resolvedOwnerName = ownerName || fullName || authUser?.displayName || 'User'
   const resolvedOwnerEmail = ownerEmail || authUser?.email || localUser?.email || ''
   const resolvedOwnerPhoto = ownerPhotoURL || authUser?.photoURL || undefined
 
@@ -88,16 +73,7 @@ export function ShareModal({
       active = false
       if (copyTimeoutRef.current) window.clearTimeout(copyTimeoutRef.current)
     }
-  }, [
-    open,
-    boardId,
-    boardName,
-    resolvedOwnerId,
-    resolvedOwnerName,
-    resolvedOwnerEmail,
-    resolvedOwnerPhoto,
-    scene,
-  ])
+  }, [open, boardId, boardName, resolvedOwnerId, resolvedOwnerName, resolvedOwnerEmail, resolvedOwnerPhoto, scene])
 
   const effectiveConfig = useMemo<BoardShareConfig>(() => {
     if (shareConfig) {
@@ -202,10 +178,7 @@ export function ShareModal({
     }
     setEmailError(null)
 
-    if (
-      trimmed === resolvedOwnerEmail.toLowerCase() ||
-      effectiveConfig.invitedEmails.includes(trimmed)
-    ) {
+    if (trimmed === resolvedOwnerEmail.toLowerCase() || effectiveConfig.invitedEmails.includes(trimmed)) {
       setEmailInput('')
       return
     }
@@ -219,9 +192,7 @@ export function ShareModal({
       },
     }
 
-    const updatedInvited = Array.from(
-      new Set([...effectiveConfig.invitedEmails, trimmed]),
-    )
+    const updatedInvited = Array.from(new Set([...effectiveConfig.invitedEmails, trimmed]))
 
     const updated: BoardShareConfig = {
       ...effectiveConfig,
@@ -245,9 +216,7 @@ export function ShareModal({
     const nextCollaborators = { ...effectiveConfig.collaborators }
     delete nextCollaborators[normalized]
 
-    const nextInvited = effectiveConfig.invitedEmails.filter(
-      (e) => e.toLowerCase() !== normalized,
-    )
+    const nextInvited = effectiveConfig.invitedEmails.filter((e) => e.toLowerCase() !== normalized)
 
     const updated: BoardShareConfig = {
       ...effectiveConfig,
@@ -298,15 +267,10 @@ export function ShareModal({
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay animate-fade-in" />
-        <Dialog.Content
-          className="dialog-content google-share-dialog animate-scale-in"
-        >
+        <Dialog.Content className="dialog-content google-share-dialog animate-scale-in">
           {/* Header */}
           <div className="google-share-header">
-            <Dialog.Title
-              className="google-share-title"
-              title={`Share '${boardName}'`}
-            >
+            <Dialog.Title className="google-share-title" title={`Share '${boardName}'`}>
               Share '{boardName}'
             </Dialog.Title>
 
@@ -324,11 +288,7 @@ export function ShareModal({
                   </button>
                 </Popover.Trigger>
                 <Popover.Portal>
-                  <Popover.Content
-                    className="google-share-popover-info"
-                    sideOffset={6}
-                    align="end"
-                  >
+                  <Popover.Content className="google-share-popover-info" sideOffset={6} align="end">
                     <p className="google-share-popover-title">Sharing options</p>
                     <div className="google-share-faq-item">
                       <strong>Restricted</strong>
@@ -340,7 +300,10 @@ export function ShareModal({
                     </div>
                     <div className="google-share-faq-item">
                       <strong>Viewer vs Editor</strong>
-                      <p>Viewers have read-only access (select with Cmd+A and copy with Cmd+C). Editors can edit directly.</p>
+                      <p>
+                        Viewers have read-only access (select with Cmd+A and copy with Cmd+C). Editors can edit
+                        directly.
+                      </p>
                     </div>
                   </Popover.Content>
                 </Popover.Portal>
@@ -370,20 +333,14 @@ export function ShareModal({
                   }}
                 />
                 {emailInput.trim() && (
-                  <button
-                    type="button"
-                    className="google-share-add-btn"
-                    onClick={handleAddEmail}
-                  >
+                  <button type="button" className="google-share-add-btn" onClick={handleAddEmail}>
                     <Plus size={15} />
                     <span>Add</span>
                   </button>
                 )}
               </div>
             </div>
-            {emailError && (
-              <p className="google-share-error-message">{emailError}</p>
-            )}
+            {emailError && <p className="google-share-error-message">{emailError}</p>}
           </div>
 
           {/* People with access */}
@@ -404,9 +361,7 @@ export function ShareModal({
                     />
                   ) : (
                     <div className="google-share-avatar-placeholder">
-                      {resolvedOwnerName.charAt(0).toUpperCase() || (
-                        <UserIcon size={16} />
-                      )}
+                      {resolvedOwnerName.charAt(0).toUpperCase() || <UserIcon size={16} />}
                     </div>
                   )}
                 </div>
@@ -415,11 +370,7 @@ export function ShareModal({
                   <div className="google-share-user-name">
                     {resolvedOwnerName} <span className="google-share-you-tag">(you)</span>
                   </div>
-                  {resolvedOwnerEmail && (
-                    <div className="google-share-user-email">
-                      {resolvedOwnerEmail}
-                    </div>
-                  )}
+                  {resolvedOwnerEmail && <div className="google-share-user-email">{resolvedOwnerEmail}</div>}
                 </div>
 
                 <div className="google-share-role-col">
@@ -443,25 +394,15 @@ export function ShareModal({
                   <div className="google-share-role-col">
                     <DropdownMenu.Root>
                       <DropdownMenu.Trigger asChild>
-                        <button
-                          type="button"
-                          className="google-share-role-trigger"
-                          aria-label="Change permission"
-                        >
+                        <button type="button" className="google-share-role-trigger" aria-label="Change permission">
                           <span>{collab.role === 'editor' ? 'Editor' : 'Viewer'}</span>
                           <ChevronDown size={14} />
                         </button>
                       </DropdownMenu.Trigger>
                       <DropdownMenu.Portal>
-                        <DropdownMenu.Content
-                          className="google-share-dropdown-menu"
-                          sideOffset={4}
-                          align="end"
-                        >
+                        <DropdownMenu.Content className="google-share-dropdown-menu" sideOffset={4} align="end">
                           <DropdownMenu.Item
-                            className={`google-share-dropdown-item ${
-                              collab.role === 'viewer' ? 'selected' : ''
-                            }`}
+                            className={`google-share-dropdown-item ${collab.role === 'viewer' ? 'selected' : ''}`}
                             onSelect={() => handleCollaboratorRoleChange(collab.email, 'viewer')}
                           >
                             {collab.role === 'viewer' ? (
@@ -472,9 +413,7 @@ export function ShareModal({
                             <span>Viewer</span>
                           </DropdownMenu.Item>
                           <DropdownMenu.Item
-                            className={`google-share-dropdown-item ${
-                              collab.role === 'editor' ? 'selected' : ''
-                            }`}
+                            className={`google-share-dropdown-item ${collab.role === 'editor' ? 'selected' : ''}`}
                             onSelect={() => handleCollaboratorRoleChange(collab.email, 'editor')}
                           >
                             {collab.role === 'editor' ? (
@@ -508,16 +447,10 @@ export function ShareModal({
             <div className="google-share-general-row">
               <div
                 className={`google-share-access-icon-badge ${
-                  effectiveConfig.generalAccess === 'anyone_with_link'
-                    ? 'anyone-link'
-                    : 'restricted'
+                  effectiveConfig.generalAccess === 'anyone_with_link' ? 'anyone-link' : 'restricted'
                 }`}
               >
-                {effectiveConfig.generalAccess === 'anyone_with_link' ? (
-                  <Globe size={18} />
-                ) : (
-                  <Lock size={18} />
-                )}
+                {effectiveConfig.generalAccess === 'anyone_with_link' ? <Globe size={18} /> : <Lock size={18} />}
               </div>
 
               <div className="google-share-general-info">
@@ -529,25 +462,17 @@ export function ShareModal({
                       aria-label="General access setting"
                     >
                       <span>
-                        {effectiveConfig.generalAccess === 'anyone_with_link'
-                          ? 'Anyone with the link'
-                          : 'Restricted'}
+                        {effectiveConfig.generalAccess === 'anyone_with_link' ? 'Anyone with the link' : 'Restricted'}
                       </span>
                       <ChevronDown size={14} className="google-share-select-chevron" />
                     </button>
                   </DropdownMenu.Trigger>
 
                   <DropdownMenu.Portal>
-                    <DropdownMenu.Content
-                      className="google-share-dropdown-menu"
-                      sideOffset={4}
-                      align="start"
-                    >
+                    <DropdownMenu.Content className="google-share-dropdown-menu" sideOffset={4} align="start">
                       <DropdownMenu.Item
                         className={`google-share-dropdown-item ${
-                          effectiveConfig.generalAccess === 'restricted'
-                            ? 'selected'
-                            : ''
+                          effectiveConfig.generalAccess === 'restricted' ? 'selected' : ''
                         }`}
                         onSelect={() => handleGeneralAccessChange('restricted')}
                       >
@@ -561,13 +486,9 @@ export function ShareModal({
 
                       <DropdownMenu.Item
                         className={`google-share-dropdown-item ${
-                          effectiveConfig.generalAccess === 'anyone_with_link'
-                            ? 'selected'
-                            : ''
+                          effectiveConfig.generalAccess === 'anyone_with_link' ? 'selected' : ''
                         }`}
-                        onSelect={() =>
-                          handleGeneralAccessChange('anyone_with_link')
-                        }
+                        onSelect={() => handleGeneralAccessChange('anyone_with_link')}
                       >
                         {effectiveConfig.generalAccess === 'anyone_with_link' ? (
                           <Check size={16} className="google-share-check-icon" />
@@ -593,21 +514,13 @@ export function ShareModal({
                 <div className="google-share-general-role-col">
                   <DropdownMenu.Root>
                     <DropdownMenu.Trigger asChild>
-                      <button
-                        type="button"
-                        className="google-share-role-trigger"
-                        aria-label="General access role"
-                      >
+                      <button type="button" className="google-share-role-trigger" aria-label="General access role">
                         <span>{effectiveConfig.generalRole === 'editor' ? 'Editor' : 'Viewer'}</span>
                         <ChevronDown size={14} />
                       </button>
                     </DropdownMenu.Trigger>
                     <DropdownMenu.Portal>
-                      <DropdownMenu.Content
-                        className="google-share-dropdown-menu"
-                        sideOffset={4}
-                        align="end"
-                      >
+                      <DropdownMenu.Content className="google-share-dropdown-menu" sideOffset={4} align="end">
                         <DropdownMenu.Item
                           className={`google-share-dropdown-item ${
                             effectiveConfig.generalRole === 'viewer' ? 'selected' : ''
@@ -653,12 +566,7 @@ export function ShareModal({
               <span>{copied ? 'Link copied' : 'Copy link'}</span>
             </button>
 
-            <button
-              type="button"
-              className="google-share-done-btn"
-              onClick={handleDone}
-              disabled={isSaving}
-            >
+            <button type="button" className="google-share-done-btn" onClick={handleDone} disabled={isSaving}>
               Done
             </button>
           </div>

@@ -25,7 +25,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return
     }
     return onAuthStateChanged(auth, (nextUser) => {
-      setUser(nextUser)
+      if (nextUser && !nextUser.isAnonymous) {
+        setUser(nextUser)
+      } else {
+        setUser(null)
+      }
       setIsLoading(false)
     })
   }, [])
@@ -47,10 +51,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signOutUser = async () => {
     const auth = getFirebaseAuth()
-    if (auth) await signOut(auth)
+    if (auth) {
+      await signOut(auth)
+    }
+    setUser(null)
   }
 
-  return <AuthContext.Provider value={{ user, isLoading, error, signInWithGoogle, signOutUser, isConfigured: isFirebaseConfigured }}>{children}</AuthContext.Provider>
+  return (
+    <AuthContext.Provider
+      value={{ user, isLoading, error, signInWithGoogle, signOutUser, isConfigured: isFirebaseConfigured }}
+    >
+      {children}
+    </AuthContext.Provider>
+  )
 }
 
 export function useAuth() {

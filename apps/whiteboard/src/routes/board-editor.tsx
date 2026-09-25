@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Link, useNavigate, useParams, useBlocker } from '@tanstack/react-router'
 import { useQueryClient } from '@tanstack/react-query'
-import { Check, Copy, Eye, Lock, Pencil, Share2 } from 'lucide-react'
+import { Check, Copy, Eye, Loader2, Lock, Pencil, Share2 } from 'lucide-react'
 import { convertToExcalidrawElements, Excalidraw, MainMenu } from '@excalidraw/excalidraw'
 import type { ExcalidrawImperativeAPI } from '@excalidraw/excalidraw/types'
 import type { BoardDocument, BoardScene, BoardSyncStatus } from '@agentic-whiteboard/storage'
@@ -13,6 +13,8 @@ import { BoardInfoDropdown } from '../components/board-info-dropdown'
 import { SyncStatusDropdown } from '../components/sync-status-dropdown'
 import { ShareModal } from '../components/share-modal'
 import { sharingService } from '../features/sharing/sharing-service'
+import { useCollaboration, CollaboratorBar } from '../features/collaboration'
+import { isFirebaseConfigured } from '../lib/firebase'
 
 const LIBRARY_STORAGE_KEY = 'agentic-whiteboard:library:v1'
 const starterLibraries = [
@@ -21,7 +23,8 @@ const starterLibraries = [
   'https://libraries.excalidraw.com/libraries/childishgirl/aws-architecture-icons.excalidrawlib',
 ]
 
-type EditorStatus = 'Loading board' | 'Saving' | 'Synced locally' | 'Synced' | 'Sync failed' | 'Conflict' | 'Local save failed'
+type EditorStatus =
+  'Loading board' | 'Saving' | 'Synced locally' | 'Synced' | 'Sync failed' | 'Conflict' | 'Local save failed'
 const statusLabel = (status: BoardSyncStatus): EditorStatus => {
   if (status === 'local-only') return 'Synced locally'
   if (status === 'synced') return 'Synced'
@@ -95,12 +98,29 @@ async function copyToClipboard(text: string): Promise<boolean> {
   }
 }
 
+function getSceneSignature(scene?: { elements?: readonly any[]; appState?: any } | null): string {
+  if (!scene) return ''
+  const normalizedAppState = {
+    theme: scene.appState?.theme,
+    viewBackgroundColor: scene.appState?.viewBackgroundColor,
+    gridModeEnabled: scene.appState?.gridModeEnabled,
+    objectsSnapModeEnabled: scene.appState?.objectsSnapModeEnabled,
+  }
+  return JSON.stringify(
+    {
+      elements: scene.elements || [],
+      appState: normalizedAppState,
+    },
+    (key, value) => (key === 'updated' || key === 'versionNonce' ? undefined : value),
+  )
+}
+
 export function BoardEditor() {
   const { boardId } = useParams({ from: '/boards/$boardId' })
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const { resolvedTheme } = useTheme()
-  const { user: authUser, signInWithGoogle, signOutUser } = useAuth()
+  const { user: authUser, isLoading: isAuthLoading, signInWithGoogle, signOutUser } = useAuth()
   const apiRef = useRef<ExcalidrawImperativeAPI | null>(null)
   const documentRef = useRef<BoardDocument | null>(null)
   const elementsRef = useRef<any[]>([])
@@ -113,7 +133,28 @@ export function BoardEditor() {
   const pendingSceneRef = useRef<BoardScene | null>(null)
   const awaitingInitialSceneRef = useRef(true)
   const hasAutoZoomedRef = useRef(false)
+  const userHasInteractedRef = useRef(false)
   const [state, setState] = useState<EditorStatus>('Loading board')
+
+  useEffect(() => {
+    userHasInteractedRef.current = false
+  }, [boardId])
+
+  useEffect(() => {
+    const handleUserInteraction = () => {
+      userHasInteractedRef.current = true
+    }
+    window.addEventListener('pointerdown', handleUserInteraction, { capture: true })
+    window.addEventListener('keydown', handleUserInteraction, { capture: true })
+    window.addEventListener('drop', handleUserInteraction, { capture: true })
+    window.addEventListener('paste', handleUserInteraction, { capture: true })
+    return () => {
+      window.removeEventListener('pointerdown', handleUserInteraction, { capture: true })
+      window.removeEventListener('keydown', handleUserInteraction, { capture: true })
+      window.removeEventListener('drop', handleUserInteraction, { capture: true })
+      window.removeEventListener('paste', handleUserInteraction, { capture: true })
+    }
+  }, [boardId])
 
   const zoomToContentWithPadding = useCallback(
     (api: ExcalidrawImperativeAPI, elements?: readonly any[], animate = false) => {
@@ -134,6 +175,45 @@ export function BoardEditor() {
   const [isSharedBoard, setIsSharedBoard] = useState(false)
   const [accessDenied, setAccessDenied] = useState(false)
   const [boardNotFound, setBoardNotFound] = useState(false)
+  const { activeCollaborators, onPointerUpdate, broadcastChanges } = useCollaboration({
+    boardId,
+    enabled: Boolean(isFirebaseConfigured && boardId && !accessDenied && !boardNotFound),
+    authUser,
+    isAuthLoading,
+    isReadOnly,
+    apiRef,
+    elementsRef,
+    appStateRef,
+  })
+  const [isSwitchingAccount, setIsSwitchingAccount] = useState(false)
+  const [isSigningIn, setIsSigningIn] = useState(false)
+  const lastUserEmailRef = useRef<string | null>(null)
+  if (authUser?.email) {
+    lastUserEmailRef.current = authUser.email
+  }
+
+  const handleSwitchAccount = useCallback(async () => {
+    if (isSwitchingAccount) return
+    setIsSwitchingAccount(true)
+    try {
+      await signOutUser()
+      await navigate({ to: '/' })
+    } catch (err) {
+      console.error('Failed to switch account:', err)
+      setIsSwitchingAccount(false)
+    }
+  }, [isSwitchingAccount, signOutUser, navigate])
+
+  const handleSignIn = useCallback(async () => {
+    if (isSigningIn) return
+    setIsSigningIn(true)
+    try {
+      await signInWithGoogle()
+    } finally {
+      setIsSigningIn(false)
+    }
+  }, [isSigningIn, signInWithGoogle])
+
   const [isShareModalOpen, setIsShareModalOpen] = useState(false)
   const [isCopyingBoard, setIsCopyingBoard] = useState(false)
   const [boardMeta, setBoardMeta] = useState<{
@@ -209,13 +289,14 @@ export function BoardEditor() {
     queryClient.invalidateQueries({ queryKey: ['workspace'] })
   }, [boardId, queryClient])
 
-  const [navSlot, setNavSlot] = useState<HTMLElement | null>(null)
-  const [statusSlot, setStatusSlot] = useState<HTMLElement | null>(null)
-
+  const [, setSlotTick] = useState(0)
   useEffect(() => {
-    setNavSlot(document.getElementById('header-nav-slot'))
-    setStatusSlot(document.getElementById('header-status-slot'))
-  }, [])
+    // Trigger re-render to connect portals once header slots mount or re-mount on auth change
+    setSlotTick((t) => t + 1)
+  }, [authUser])
+
+  const currentNavSlot = typeof document !== 'undefined' ? document.getElementById('header-nav-slot') : null
+  const currentStatusSlot = typeof document !== 'undefined' ? document.getElementById('header-status-slot') : null
 
   useEffect(() => {
     if (apiRef.current) {
@@ -244,7 +325,7 @@ export function BoardEditor() {
           documentRef.current = document
           elementsRef.current = document.scene.elements
           appStateRef.current = document.scene.appState
-          savedSignature.current = JSON.stringify(document.scene)
+          savedSignature.current = getSceneSignature(document.scene)
           awaitingInitialSceneRef.current = true
           setIsReadOnly(false)
           setBoardMeta({
@@ -287,20 +368,16 @@ export function BoardEditor() {
             setIsSharedBoard(true)
 
             const isOwner = Boolean(
-              (authUser?.uid && config.ownerId === authUser.uid) ||
-              (config.ownerId === 'local-user' && !authUser)
+              (authUser?.uid && config.ownerId === authUser.uid) || (config.ownerId === 'local-user' && !authUser),
             )
-            const isGeneralEditor =
-              config.generalAccess === 'anyone_with_link' && config.generalRole === 'editor'
+            const isGeneralEditor = config.generalAccess === 'anyone_with_link' && config.generalRole === 'editor'
             const userEmail = authUser?.email?.trim().toLowerCase()
-            const isCollabEditor = Boolean(
-              userEmail && config.collaborators?.[userEmail]?.role === 'editor',
-            )
+            const isCollabEditor = Boolean(userEmail && config.collaborators?.[userEmail]?.role === 'editor')
             const canEdit = isOwner || isGeneralEditor || isCollabEditor
 
             setIsReadOnly(!canEdit)
             awaitingInitialSceneRef.current = true
-            savedSignature.current = JSON.stringify(sharedScene)
+            savedSignature.current = getSceneSignature(sharedScene)
             elementsRef.current = sharedScene.elements
             appStateRef.current = sharedScene.appState
             setBoardMeta({
@@ -341,8 +418,7 @@ export function BoardEditor() {
         const stillAllowed =
           updatedConfig.generalAccess === 'anyone_with_link' ||
           (userUid && updatedConfig.ownerId === userUid) ||
-          (userEmail &&
-            updatedConfig.invitedEmails?.map((e) => e.toLowerCase()).includes(userEmail))
+          (userEmail && updatedConfig.invitedEmails?.map((e) => e.toLowerCase()).includes(userEmail))
 
         if (!stillAllowed) {
           setAccessDenied(true)
@@ -352,9 +428,7 @@ export function BoardEditor() {
         const isOwner = Boolean(userUid && updatedConfig.ownerId === userUid)
         const isGeneralEditor =
           updatedConfig.generalAccess === 'anyone_with_link' && updatedConfig.generalRole === 'editor'
-        const isCollabEditor = Boolean(
-          userEmail && updatedConfig.collaborators?.[userEmail]?.role === 'editor',
-        )
+        const isCollabEditor = Boolean(userEmail && updatedConfig.collaborators?.[userEmail]?.role === 'editor')
         const canEdit = isOwner || isGeneralEditor || isCollabEditor
         setIsReadOnly(!canEdit)
 
@@ -369,7 +443,7 @@ export function BoardEditor() {
         )
 
         if (updatedConfig.scene && !pendingSceneRef.current) {
-          const newSignature = JSON.stringify(updatedConfig.scene)
+          const newSignature = getSceneSignature(updatedConfig.scene)
           if (newSignature !== savedSignature.current) {
             savedSignature.current = newSignature
             elementsRef.current = updatedConfig.scene.elements
@@ -382,7 +456,9 @@ export function BoardEditor() {
       },
       (error) => {
         if (error?.code === 'permission-denied') {
-          setAccessDenied(true)
+          if (!sharingService.hasLocalAccess(boardId)) {
+            setAccessDenied(true)
+          }
         }
       },
     )
@@ -421,6 +497,7 @@ export function BoardEditor() {
       socket.onmessage = ({ data }) => {
         const message = JSON.parse(data) as { type?: string; operation?: any }
         if (message.type !== 'operation' || !apiRef.current) return
+        userHasInteractedRef.current = true
         const operation = message.operation
         operationRef.current = operation.id
         const wasEmpty = elementsRef.current.length === 0
@@ -557,9 +634,8 @@ export function BoardEditor() {
           objectsSnapModeEnabled: appState.objectsSnapModeEnabled,
         },
       }
-      const signature = JSON.stringify(scene)
-      // Excalidraw emits an onChange while applying initialData. It is not a
-      // user edit and must not enter the durable outbox on every reload.
+      const signature = getSceneSignature(scene)
+      // 1. Initial scene mount absorption & auto-zoom
       if (awaitingInitialSceneRef.current) {
         awaitingInitialSceneRef.current = false
         savedSignature.current = signature
@@ -569,19 +645,27 @@ export function BoardEditor() {
         }
         return
       }
+
+      // 2. If the user has not interacted with the canvas/keyboard yet,
+      // any onChange is purely internal Excalidraw normalization, font loading,
+      // or layout stabilization. Absorb it and update savedSignature without triggering a save.
+      if (!userHasInteractedRef.current) {
+        savedSignature.current = signature
+        return
+      }
+
+      // 3. If there are no real changes from the last saved signature, skip
       if (signature === savedSignature.current) return
       savedSignature.current = signature
+      broadcastChanges(elements)
       scheduleSave(scene)
       if (!operationRef.current) sendScene([...elements])
     },
-    [scheduleSave, sendScene],
+    [scheduleSave, sendScene, broadcastChanges],
   )
 
   const hasUnsavedChanges =
-    state === 'Saving' ||
-    state === 'Local save failed' ||
-    state === 'Conflict' ||
-    pendingSceneRef.current !== null
+    state === 'Saving' || state === 'Local save failed' || state === 'Conflict' || pendingSceneRef.current !== null
 
   const hasUnsavedChangesRef = useRef(hasUnsavedChanges)
   hasUnsavedChangesRef.current = hasUnsavedChanges
@@ -632,8 +716,11 @@ export function BoardEditor() {
     setIsCopyingBoard(true)
     try {
       const { projects } = await workspaceApi.listWorkspace()
-      const targetProjectId = projects[0]?.id
-      if (!targetProjectId) return
+      let targetProjectId = projects[0]?.id
+      if (!targetProjectId) {
+        const newProj = await workspaceApi.createProject('General')
+        targetProjectId = newProj.id
+      }
       const copyName = `Copy of ${boardMeta?.boardName || 'Untitled'}`
       const newBoard = await workspaceApi.createBoard(targetProjectId, copyName)
       await workspaceApi.saveBoard({
@@ -656,17 +743,18 @@ export function BoardEditor() {
     shouldBlockFn: async () => {
       await flushSave()
       if (hasUnsavedChangesRef.current) {
-        return !window.confirm(
-          'You have changes that are still saving or in conflict.\n\nLeave anyway?',
-        )
+        return !window.confirm('You have changes that are still saving or in conflict.\n\nLeave anyway?')
       }
       return false
     },
     enableBeforeUnload: false,
-    disabled: isReadOnly || !hasUnsavedChanges,
+    disabled: isReadOnly || !hasUnsavedChanges || accessDenied,
   })
 
   if (accessDenied) {
+    const isUserSignedIn = Boolean((authUser && !authUser.isAnonymous) || isSwitchingAccount)
+    const displayEmail = isSwitchingAccount ? (lastUserEmailRef.current ?? authUser?.email) : authUser?.email
+
     return (
       <div className="access-denied-container">
         <div className="access-denied-card animate-scale-in">
@@ -674,33 +762,40 @@ export function BoardEditor() {
             <Lock size={26} />
           </div>
           <h2 className="access-denied-title">You need access</h2>
-          <p className="access-denied-desc">
-            Ask for access, or switch to an account with access to this board.
-          </p>
+          <p className="access-denied-desc">Ask for access, or switch to an account with access to this board.</p>
           <div className="access-denied-user-info">
-            {authUser?.email ? `Signed in as ${authUser.email}` : 'You are not signed in'}
+            {displayEmail ? `Signed in as ${displayEmail}` : 'You are not signed in'}
           </div>
           <div className="access-denied-actions">
-            {authUser ? (
+            {isUserSignedIn ? (
               <>
                 <button
                   type="button"
                   className="google-share-copy-btn"
-                  onClick={signOutUser}
+                  onClick={handleSwitchAccount}
+                  disabled={isSwitchingAccount}
                 >
-                  Switch account
+                  {isSwitchingAccount && <Loader2 size={14} className="animate-spin" />}
+                  <span>Switch account</span>
                 </button>
-                <Link to="/" className="google-share-done-btn" style={{ textDecoration: 'none' }}>
+                <button
+                  type="button"
+                  className="google-share-done-btn"
+                  onClick={() => navigate({ to: '/' })}
+                  disabled={isSwitchingAccount}
+                >
                   Go to workspace
-                </Link>
+                </button>
               </>
             ) : (
               <button
                 type="button"
                 className="google-share-done-btn"
-                onClick={signInWithGoogle}
+                onClick={handleSignIn}
+                disabled={isSigningIn || isSwitchingAccount}
               >
-                Sign in with Google
+                {isSigningIn && <Loader2 size={14} className="animate-spin" />}
+                <span>Sign in with Google</span>
               </button>
             )}
           </div>
@@ -714,9 +809,7 @@ export function BoardEditor() {
       <div className="access-denied-container">
         <div className="access-denied-card animate-scale-in">
           <h2 className="access-denied-title">Board not found</h2>
-          <p className="access-denied-desc">
-            The board you are looking for does not exist or may have been deleted.
-          </p>
+          <p className="access-denied-desc">The board you are looking for does not exist or may have been deleted.</p>
           <Link to="/" className="google-share-done-btn" style={{ textDecoration: 'none' }}>
             Go to workspace
           </Link>
@@ -728,7 +821,7 @@ export function BoardEditor() {
   if (!initialData) return <div className="workspace-loading">{state}…</div>
   return (
     <main className="editor-shell">
-      {navSlot &&
+      {currentNavSlot &&
         createPortal(
           <nav className="header-breadcrumb" aria-label="Breadcrumb">
             <Link to="/" className="breadcrumb-item breadcrumb-link" title="Workspace">
@@ -750,11 +843,7 @@ export function BoardEditor() {
                     title={copiedFilename ? 'Copied!' : 'Copy file name'}
                     aria-label="Copy file name"
                   >
-                    {copiedFilename ? (
-                      <Check size={12} className="breadcrumb-copy-check" />
-                    ) : (
-                      <Copy size={12} />
-                    )}
+                    {copiedFilename ? <Check size={12} className="breadcrumb-copy-check" /> : <Copy size={12} />}
                   </button>
                 </div>
               ) : (
@@ -820,11 +909,7 @@ export function BoardEditor() {
                         title={copiedFilename ? 'Copied!' : 'Copy file name'}
                         aria-label="Copy file name"
                       >
-                        {copiedFilename ? (
-                          <Check size={12} className="breadcrumb-copy-check" />
-                        ) : (
-                          <Copy size={12} />
-                        )}
+                        {copiedFilename ? <Check size={12} className="breadcrumb-copy-check" /> : <Copy size={12} />}
                       </button>
                     </div>
                   )}
@@ -834,9 +919,9 @@ export function BoardEditor() {
               <span className="breadcrumb-item breadcrumb-current">Loading…</span>
             )}
           </nav>,
-          navSlot,
+          currentNavSlot,
         )}
-      {statusSlot &&
+      {currentStatusSlot &&
         createPortal(
           <div className="header-status-group">
             {isReadOnly ? (
@@ -892,13 +977,16 @@ export function BoardEditor() {
                 )}
               </>
             )}
+
+            <CollaboratorBar collaborators={activeCollaborators} />
           </div>,
-          statusSlot,
+          currentStatusSlot,
         )}
       <Excalidraw
         theme={resolvedTheme}
         initialData={initialData}
         onChange={onChange}
+        onPointerUpdate={onPointerUpdate}
         viewModeEnabled={isReadOnly}
         detectScroll
         handleKeyboardGlobally
@@ -925,6 +1013,12 @@ export function BoardEditor() {
         }}
         excalidrawAPI={(api) => {
           apiRef.current = api
+          if (import.meta.env.DEV) {
+            ;(window as any).__excalidrawAPI = api
+            ;(window as any).__setUserInteracted = () => {
+              userHasInteractedRef.current = true
+            }
+          }
           sendScene()
           requestAnimationFrame(() => {
             if (!hasAutoZoomedRef.current) {

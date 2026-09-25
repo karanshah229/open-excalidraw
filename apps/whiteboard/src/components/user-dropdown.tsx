@@ -21,11 +21,7 @@ export function UserDropdown() {
       </DropdownMenu.Trigger>
 
       <DropdownMenu.Portal>
-        <DropdownMenu.Content
-          className="user-dropdown-content animate-fade-in"
-          align="end"
-          sideOffset={8}
-        >
+        <DropdownMenu.Content className="user-dropdown-content animate-fade-in" align="end" sideOffset={8}>
           <div className="user-dropdown-header">
             <div className="user-dropdown-avatar">{initials}</div>
             <div className="user-dropdown-info">
@@ -36,20 +32,14 @@ export function UserDropdown() {
 
           <DropdownMenu.Separator className="user-dropdown-divider" />
 
-          <DropdownMenu.Item
-            className="user-dropdown-item"
-            onSelect={() => navigate({ to: '/settings' })}
-          >
+          <DropdownMenu.Item className="user-dropdown-item" onSelect={() => navigate({ to: '/settings' })}>
             <SlidersHorizontal size={14} className="user-dropdown-item-icon" />
             <span>Preferences</span>
           </DropdownMenu.Item>
 
           <DropdownMenu.Separator className="user-dropdown-divider" />
 
-          <DropdownMenu.Item
-            className="user-dropdown-item user-dropdown-item--danger"
-            onSelect={() => logout()}
-          >
+          <DropdownMenu.Item className="user-dropdown-item user-dropdown-item--danger" onSelect={() => logout()}>
             <LogOut size={14} className="user-dropdown-item-icon" />
             <span>Logout</span>
           </DropdownMenu.Item>

@@ -14,7 +14,9 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "test:collab": "pnpm dlx tsx tests/collab-edge-cases.test.ts",
+    "test:e2e:collab": "node tests/e2e-collab-suite.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

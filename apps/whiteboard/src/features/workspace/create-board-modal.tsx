@@ -9,6 +9,7 @@ interface CreateBoardModalProps {
   onOpenChange: (open: boolean) => void
   projects: Project[]
   defaultProjectId?: string
+  initialBoardName?: string
   onCreateBoard: (params: { boardName: string; projectId?: string; newProjectName?: string }) => Promise<void>
 }
 
@@ -17,6 +18,7 @@ export function CreateBoardModal({
   onOpenChange,
   projects,
   defaultProjectId,
+  initialBoardName,
   onCreateBoard,
 }: CreateBoardModalProps) {
   const [boardName, setBoardName] = useState('')
@@ -30,15 +32,15 @@ export function CreateBoardModal({
   // Reset form whenever modal opens
   useEffect(() => {
     if (open) {
-      setBoardName('')
+      setBoardName(initialBoardName || '')
       setSelectedProjectId(defaultProjectId || (projects[0]?.id ?? ''))
-      setIsCreatingProject(false)
+      setIsCreatingProject(projects.length === 0)
       setNewProjectName('')
       setIsSubmitting(false)
       setIsDropdownOpen(false)
       setSearchQuery('')
     }
-  }, [open, projects, defaultProjectId])
+  }, [open, projects, defaultProjectId, initialBoardName])
 
   const selectedProject = projects.find((p) => p.id === selectedProjectId)
   const selectedLabel = isCreatingProject
@@ -87,10 +89,11 @@ export function CreateBoardModal({
 
     setIsSubmitting(true)
     try {
+      const creatingProj = isCreatingProject || projects.length === 0
       await onCreateBoard({
         boardName: boardName.trim() || 'Untitled board',
-        projectId: isCreatingProject ? undefined : selectedProjectId || projects[0]?.id,
-        newProjectName: isCreatingProject ? newProjectName.trim() || 'Untitled project' : undefined,
+        projectId: creatingProj ? undefined : selectedProjectId || projects[0]?.id,
+        newProjectName: creatingProj ? newProjectName.trim() || 'General' : undefined,
       })
       onOpenChange(false)
     } catch (error) {

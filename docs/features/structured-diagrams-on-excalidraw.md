@@ -33,12 +33,12 @@ If a user deletes a generated element or makes an unsupported structural edit, t
 
 ## Diagram definitions
 
-| Type | Managed items | First-release conventions |
-| --- | --- | --- |
-| Swim lane | pool, lane, activity, decision, event, flow | Horizontal or vertical lanes; activities and decisions live in exactly one lane; flows may cross lanes. |
-| ER | entity, attribute, relationship | Entity cards list attributes; attributes may be PK/FK/required; relationship ends have cardinality and optionality labels. |
-| Sequence | participant, activation, message, note | Participants run left-to-right; lifelines are vertical dashed lines; messages have a direction and ordering. |
-| Object model | class/object, field, association, inheritance, composition | Class cards contain fields and optional methods; associations label ends and distinguish inheritance/composition. |
+| Type         | Managed items                                              | First-release conventions                                                                                                  |
+| ------------ | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| Swim lane    | pool, lane, activity, decision, event, flow                | Horizontal or vertical lanes; activities and decisions live in exactly one lane; flows may cross lanes.                    |
+| ER           | entity, attribute, relationship                            | Entity cards list attributes; attributes may be PK/FK/required; relationship ends have cardinality and optionality labels. |
+| Sequence     | participant, activation, message, note                     | Participants run left-to-right; lifelines are vertical dashed lines; messages have a direction and ordering.               |
+| Object model | class/object, field, association, inheritance, composition | Class cards contain fields and optional methods; associations label ends and distinguish inheritance/composition.          |
 
 Each type has a narrow typed schema. Use a common `DiagramNode`/`DiagramEdge` foundation only for identity, geometry, labels, and style; do not flatten type-specific concepts into arbitrary string metadata.
 

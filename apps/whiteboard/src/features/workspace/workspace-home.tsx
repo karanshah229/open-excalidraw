@@ -2,7 +2,7 @@ import { useEffect, useDeferredValue, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams, useSearch } from '@tanstack/react-router'
-import { Plus } from 'lucide-react'
+import { Plus, RotateCcw, Search as SearchIcon } from 'lucide-react'
 import { Button } from '../../components/ui/button'
 import { BoardPreview } from './board-preview'
 import { CreateBoardModal } from './create-board-modal'
@@ -10,6 +10,7 @@ import { DeleteBoardModal } from './delete-board-modal'
 import { ShareModal } from '../../components/share-modal'
 import { GroupHeader, type SortOrder, WorkspaceFilters } from './workspace-filters'
 import { workspaceApi, type WorkspaceBoard } from './workspace-api'
+import { WorkspaceEmptyState } from './workspace-empty-state'
 
 const workspaceQueryKey = ['workspace'] as const
 
@@ -52,9 +53,15 @@ export function WorkspaceHome() {
 
   const [sortOrder, setSortOrder] = useState<SortOrder>('latest')
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false)
+  const [initialBoardName, setInitialBoardName] = useState<string | undefined>(undefined)
   const [boardToDelete, setBoardToDelete] = useState<WorkspaceBoard | null>(null)
   const [boardToShare, setBoardToShare] = useState<WorkspaceBoard | null>(null)
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set())
+
+  const openCreateModal = (suggestedName?: string) => {
+    setInitialBoardName(suggestedName)
+    setIsCreateModalOpen(true)
+  }
 
   const toggleGroup = (groupId: string) => {
     setCollapsedGroups((prev) => {
@@ -85,9 +92,9 @@ export function WorkspaceHome() {
       targetProjectId = newProject.id
     }
     if (!targetProjectId) {
-      targetProjectId = workspace.data?.projects[0]?.id
+      const defaultProject = await workspaceApi.createProject('General')
+      targetProjectId = defaultProject.id
     }
-    if (!targetProjectId) throw new Error('No project is available.')
 
     const newBoard = await workspaceApi.createBoard(targetProjectId, boardName)
     await queryClient.invalidateQueries({ queryKey: workspaceQueryKey })
@@ -125,7 +132,8 @@ export function WorkspaceHome() {
   if (workspace.isPending)
     return (
       <main className="workspace-shell">
-        {navSlot && isProjectPage &&
+        {navSlot &&
+          isProjectPage &&
           createPortal(
             <nav className="header-breadcrumb" aria-label="Breadcrumb">
               <Link to="/" className="breadcrumb-item breadcrumb-link" title="Workspace">
@@ -152,7 +160,8 @@ export function WorkspaceHome() {
 
   return (
     <main className="workspace-shell">
-      {navSlot && isProjectPage &&
+      {navSlot &&
+        isProjectPage &&
         createPortal(
           <nav className="header-breadcrumb" aria-label="Breadcrumb">
             <Link to="/" className="breadcrumb-item breadcrumb-link" title="Workspace">
@@ -179,79 +188,104 @@ export function WorkspaceHome() {
               <span>Create and organize boards by project. Every change is saved to your workspace automatically.</span>
             )}
           </div>
-          <Button onClick={() => setIsCreateModalOpen(true)}>
+          <Button onClick={() => openCreateModal()}>
             <Plus size={16} />
             New board
           </Button>
         </div>
       </section>
-      <WorkspaceFilters
-        projects={workspace.data.projects}
-        query={search}
-        onQueryChange={setSearch}
-        selectedProjectIds={projectIds}
-        onToggleProject={(id) => {
-          if (isProjectPage && id === queryProjectId && projectIds.has(id) && projectIds.size === 1) {
-            navigate({ to: '/' })
-            return
-          }
-          setProjectIds((current) => toggleSet(current, id))
-        }}
-        onClearFilters={() => {
-          setProjectIds(new Set())
-          if (isProjectPage) {
-            navigate({ to: '/' })
-          }
-        }}
-        sortOrder={sortOrder}
-        onSort={setSortOrder}
-      />
-      {projectIds.size === 0 && recentBoards.length > 0 && (
-        <section className="board-group">
-          <GroupHeader
-            name="Last 7 days"
-            count={recentBoards.length}
-            isOpen={!collapsedGroups.has('recent')}
-            onToggle={() => toggleGroup('recent')}
+
+      {!isProjectPage && (workspace.data.boards?.length ?? 0) === 0 ? (
+        <WorkspaceEmptyState onCreateBoard={openCreateModal} />
+      ) : (
+        <>
+          <WorkspaceFilters
+            projects={workspace.data.projects}
+            query={search}
+            onQueryChange={setSearch}
+            selectedProjectIds={projectIds}
+            onToggleProject={(id) => {
+              if (isProjectPage && id === queryProjectId && projectIds.has(id) && projectIds.size === 1) {
+                navigate({ to: '/' })
+                return
+              }
+              setProjectIds((current) => toggleSet(current, id))
+            }}
+            onClearFilters={() => {
+              setProjectIds(new Set())
+              if (isProjectPage) {
+                navigate({ to: '/' })
+              }
+            }}
+            sortOrder={sortOrder}
+            onSort={setSortOrder}
           />
-          {!collapsedGroups.has('recent') && (
-            <BoardGrid
-              boards={recentBoards}
-              onDelete={(board) => setBoardToDelete(board)}
-              onShare={(board) => setBoardToShare(board)}
-            />
-          )}
-        </section>
-      )}
-      {byProject.map(({ project, boards: groupBoards }) => {
-        const isGroupOpen = !collapsedGroups.has(project.id)
-        return (
-          <section className="board-group" key={project.id}>
-            <GroupHeader
-              name={project.name}
-              count={groupBoards.length}
-              newest={groupBoards[0] ? editedLabel(groupBoards[0].updatedAt) : undefined}
-              isOpen={isGroupOpen}
-              onToggle={() => toggleGroup(project.id)}
-            />
-            {isGroupOpen && (
-              <BoardGrid
-                boards={groupBoards}
-                onDelete={(board) => setBoardToDelete(board)}
-                onShare={(board) => setBoardToShare(board)}
+          {projectIds.size === 0 && recentBoards.length > 0 && (
+            <section className="board-group">
+              <GroupHeader
+                name="Last 7 days"
+                count={recentBoards.length}
+                isOpen={!collapsedGroups.has('recent')}
+                onToggle={() => toggleGroup('recent')}
               />
-            )}
-          </section>
-        )
-      })}
-      {byProject.length === 0 && (
-        <div className="empty-boards">
-          {search || projectIds.size > 0
-            ? 'No boards match these filters.'
-            : isProjectPage
-              ? 'No boards in this project yet.'
-              : 'No boards found.'}
-        </div>
+              {!collapsedGroups.has('recent') && (
+                <BoardGrid
+                  boards={recentBoards}
+                  onDelete={(board) => setBoardToDelete(board)}
+                  onShare={(board) => setBoardToShare(board)}
+                />
+              )}
+            </section>
+          )}
+          {byProject.map(({ project, boards: groupBoards }) => {
+            const isGroupOpen = !collapsedGroups.has(project.id)
+            return (
+              <section className="board-group" key={project.id}>
+                <GroupHeader
+                  name={project.name}
+                  count={groupBoards.length}
+                  newest={groupBoards[0] ? editedLabel(groupBoards[0].updatedAt) : undefined}
+                  isOpen={isGroupOpen}
+                  onToggle={() => toggleGroup(project.id)}
+                />
+                {isGroupOpen && (
+                  <BoardGrid
+                    boards={groupBoards}
+                    onDelete={(board) => setBoardToDelete(board)}
+                    onShare={(board) => setBoardToShare(board)}
+                  />
+                )}
+              </section>
+            )
+          })}
+          {byProject.length === 0 &&
+            (search || projectIds.size > 0 ? (
+              <div className="empty-boards empty-boards--filtered">
+                <SearchIcon size={24} className="empty-filtered-icon" />
+                <p className="empty-filtered-title">No matching boards</p>
+                <p className="empty-filtered-desc">
+                  {search
+                    ? `No boards match "${search}". Try another search term or clear filters.`
+                    : 'No boards match the selected filters.'}
+                </p>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setSearch('')
+                    setProjectIds(new Set())
+                    if (isProjectPage) navigate({ to: '/' })
+                  }}
+                >
+                  <RotateCcw size={14} />
+                  Clear filters
+                </Button>
+              </div>
+            ) : isProjectPage ? (
+              <WorkspaceEmptyState isProjectPage projectName={currentProject?.name} onCreateBoard={openCreateModal} />
+            ) : (
+              <WorkspaceEmptyState onCreateBoard={openCreateModal} />
+            ))}
+        </>
       )}
 
       <CreateBoardModal
@@ -259,6 +293,7 @@ export function WorkspaceHome() {
         onOpenChange={setIsCreateModalOpen}
         projects={workspace.data.projects}
         defaultProjectId={queryProjectId}
+        initialBoardName={initialBoardName}
         onCreateBoard={handleCreateBoard}
       />
 
@@ -299,13 +334,7 @@ function BoardGrid({
   return boards.length > 0 ? (
     <div className="board-grid">
       {boards.map((board, index) => (
-        <BoardPreview
-          key={board.id}
-          board={board}
-          index={index}
-          onDelete={onDelete}
-          onShare={onShare}
-        />
+        <BoardPreview key={board.id} board={board} index={index} onDelete={onDelete} onShare={onShare} />
       ))}
     </div>
   ) : (

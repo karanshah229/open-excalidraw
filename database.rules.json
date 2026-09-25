@@ -1,0 +1,27 @@
+{
+  "rules": {
+    "boards": {
+      "$boardId": {
+        ".read": "auth != null",
+        "elements": {
+          "$elementId": {
+            ".write": "auth != null",
+            ".validate": "newData.hasChildren(['id', 'version', 'versionNonce', 'data']) && newData.child('data').isString() && newData.child('data').val().length < 262144"
+          }
+        },
+        "meta": {
+          ".write": "auth != null"
+        }
+      }
+    },
+    "presence": {
+      "$boardId": {
+        ".read": "auth != null",
+        "$sessionId": {
+          ".write": "auth != null",
+          ".validate": "newData.hasChildren(['userId', 'sessionId', 'displayName', 'color', 'lastSeen'])"
+        }
+      }
+    }
+  }
+}

@@ -92,8 +92,8 @@ export function SettingsPage() {
                 <div className="settings-section-header">
                   <h2>Appearance & Theme</h2>
                   <p>
-                    Customize your visual preferences. The theme applies to both our custom interface
-                    and the Excalidraw canvas.
+                    Customize your visual preferences. The theme applies to both our custom interface and the Excalidraw
+                    canvas.
                   </p>
                 </div>
 
@@ -146,8 +146,8 @@ export function SettingsPage() {
                 <div className="settings-section-header">
                   <h2>Model Context Protocol (MCP)</h2>
                   <p>
-                    OpenExcalidraw connects your editor canvas to AI agents via the Model Context
-                    Protocol WebSocket bridge.
+                    OpenExcalidraw connects your editor canvas to AI agents via the Model Context Protocol WebSocket
+                    bridge.
                   </p>
                 </div>
 
@@ -249,10 +249,7 @@ export function SettingsPage() {
                             disabled={mcp.isChecking || mcp.isStarting}
                             title="Re-check MCP bridge connection"
                           >
-                            <RefreshCw
-                              size={13}
-                              className={mcp.isChecking ? 'sync-status-icon--saving' : ''}
-                            />
+                            <RefreshCw size={13} className={mcp.isChecking ? 'sync-status-icon--saving' : ''} />
                             <span>Check status</span>
                           </button>
                         )}
@@ -294,18 +291,13 @@ export function SettingsPage() {
 
                   {mcp.status === 'offline' && (
                     <div className="mcp-offline-help">
-                      <p className="mcp-offline-text">
-                        The MCP server bridge is offline.
-                      </p>
+                      <p className="mcp-offline-text">The MCP server bridge is offline.</p>
                     </div>
                   )}
 
                   {mcp.status === 'running' && (
                     <div className="mcp-notice mcp-notice--running">
-                      <p>
-                        The MCP server is connected and ready to sync operations between your agent and
-                        the canvas.
-                      </p>
+                      <p>The MCP server is connected and ready to sync operations between your agent and the canvas.</p>
                     </div>
                   )}
                 </div>
@@ -316,9 +308,7 @@ export function SettingsPage() {
               <section className="settings-section animate-fade-in">
                 <div className="settings-section-header">
                   <h2>User Profile</h2>
-                  <p>
-                    Your user profile details are synced from your Google account and are read-only.
-                  </p>
+                  <p>Your user profile details are synced from your Google account and are read-only.</p>
                 </div>
 
                 <div className="settings-card">
@@ -363,13 +353,7 @@ export function SettingsPage() {
                       <label htmlFor="settings-email">
                         <strong>Email Address</strong>
                       </label>
-                      <input
-                        id="settings-email"
-                        type="email"
-                        className="ui-input"
-                        value={user.email}
-                        readOnly
-                      />
+                      <input id="settings-email" type="email" className="ui-input" value={user.email} readOnly />
                     </div>
                   </div>
                 </div>

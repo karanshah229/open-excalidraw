@@ -21,11 +21,7 @@ export interface McpStatusInfo {
   stopServer: () => Promise<void>
 }
 
-const LOCAL_NETWORK_PERMISSION_NAMES = [
-  'loopback-network',
-  'local-network',
-  'local-network-access',
-]
+const LOCAL_NETWORK_PERMISSION_NAMES = ['loopback-network', 'local-network', 'local-network-access']
 
 async function queryDevicePermission(): Promise<{
   state: DeviceAccessPermissionState

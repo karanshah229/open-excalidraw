@@ -1,3 +1,7 @@
 {
-  "projects": { "default": "open-excalidraw-b2ab4" }
+  "projects": {
+    "default": "open-excalidraw-dev",
+    "development": "open-excalidraw-dev",
+    "production": "open-excalidraw-b2ab4"
+  }
 }

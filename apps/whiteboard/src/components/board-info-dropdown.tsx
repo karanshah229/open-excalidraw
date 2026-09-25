@@ -78,16 +78,11 @@ export function BoardInfoDropdown({
     return trimmed.toLowerCase().endsWith('.excalidraw') ? trimmed : `${trimmed}.excalidraw`
   }, [boardName])
 
-  const isCurrentOwner =
-    !projectOwnerId ||
-    projectOwnerId === 'local-user' ||
-    projectOwnerId === authUser?.uid
+  const isCurrentOwner = !projectOwnerId || projectOwnerId === 'local-user' || projectOwnerId === authUser?.uid
 
-  const ownerName = isCurrentOwner
-    ? `${fullName || authUser?.displayName || 'User'} (You)`
-    : projectOwnerId
+  const ownerName = isCurrentOwner ? `${fullName || authUser?.displayName || 'User'} (You)` : projectOwnerId
 
-  const ownerEmail = isCurrentOwner ? (user?.email || authUser?.email) : undefined
+  const ownerEmail = isCurrentOwner ? user?.email || authUser?.email : undefined
 
   const updatedTime = useMemo(() => formatTimestamp(updatedAt), [updatedAt])
   const createdTime = useMemo(() => formatTimestamp(createdAt), [createdAt])
@@ -106,22 +101,13 @@ export function BoardInfoDropdown({
   return (
     <Popover.Root open={isOpen} onOpenChange={setIsOpen}>
       <Popover.Trigger asChild>
-        <button
-          type="button"
-          className="board-info-trigger"
-          title="Board details"
-          aria-label="Board details"
-        >
+        <button type="button" className="board-info-trigger" title="Board details" aria-label="Board details">
           <Info size={14} />
         </button>
       </Popover.Trigger>
 
       <Popover.Portal>
-        <Popover.Content
-          className="board-info-popover animate-fade-in"
-          align="end"
-          sideOffset={8}
-        >
+        <Popover.Content className="board-info-popover animate-fade-in" align="end" sideOffset={8}>
           <div className="board-info-header">
             <span className="board-info-header-title">Board details</span>
           </div>
@@ -190,11 +176,7 @@ export function BoardInfoDropdown({
                 <span className="board-info-item-value" title={updatedTime.formatted}>
                   {updatedTime.formatted}
                 </span>
-                {updatedTime.relative && (
-                  <span className="board-info-item-subtext">
-                    ({updatedTime.relative})
-                  </span>
-                )}
+                {updatedTime.relative && <span className="board-info-item-subtext">({updatedTime.relative})</span>}
               </div>
             </div>
 
@@ -218,9 +200,7 @@ export function BoardInfoDropdown({
                 <span>File size</span>
               </div>
               <div className="board-info-item-value-wrap board-info-item-value-wrap--stacked">
-                <span className="board-info-item-value">
-                  {formatBytes(sceneData.bytes)}
-                </span>
+                <span className="board-info-item-value">{formatBytes(sceneData.bytes)}</span>
                 <span className="board-info-item-subtext">
                   {sceneData.elementsCount} element{sceneData.elementsCount === 1 ? '' : 's'}
                 </span>
