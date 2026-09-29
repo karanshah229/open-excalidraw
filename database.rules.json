@@ -4,9 +4,10 @@
       "$boardId": {
         ".read": "auth != null",
         "elements": {
+          ".write": "auth != null",
           "$elementId": {
             ".write": "auth != null",
-            ".validate": "newData.hasChildren(['id', 'version', 'versionNonce', 'data']) && newData.child('data').isString() && newData.child('data').val().length < 262144"
+            ".validate": "!newData.exists() || (newData.hasChildren(['id', 'version', 'versionNonce', 'data']) && newData.child('data').isString() && newData.child('data').val().length < 262144)"
           }
         },
         "meta": {
@@ -19,7 +20,7 @@
         ".read": "auth != null",
         "$sessionId": {
           ".write": "auth != null",
-          ".validate": "newData.hasChildren(['userId', 'sessionId', 'displayName', 'color', 'lastSeen'])"
+          ".validate": "!newData.exists() || newData.hasChildren(['userId', 'sessionId', 'displayName', 'color', 'lastSeen'])"
         }
       }
     }

@@ -16,7 +16,14 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test:collab": "pnpm dlx tsx tests/collab-edge-cases.test.ts",
-    "test:e2e:collab": "node tests/e2e-collab-suite.mjs"
+    "test:e2e:collab": "node tests/e2e-collab-suite.mjs",
+    "test:e2e:visual": "node tests/e2e-visual-screenshots.mjs",
+    "test:network": "node tests/network-lifecycle.test.mjs",
+    "test:repro": "node tests/repro-user-str.mjs",
+    "test:inactive": "node tests/inactive-tab-presence-cursor.test.mjs",
+    "test:zoom": "node tests/board-auto-zoom-center.test.mjs",
+    "test:solo": "node tests/solo-no-collab-banner.test.mjs",
+    "test:undo": "node tests/incognito-undo-beforeunload.test.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

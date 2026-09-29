@@ -7,6 +7,13 @@ export interface CollaboratorPresence {
   isAnonymous: boolean
   cursor?: { x: number; y: number } | null
   selectedElementIds?: string[]
+  joinedAt?: number
+  lastSeen: number
+}
+
+export interface ActiveSessionRecord {
+  sessionId: string
+  joinedAt: number
   lastSeen: number
 }
 
@@ -33,4 +40,5 @@ export interface CollabUser {
   color: string
   avatarUrl?: string
   isAnonymous: boolean
+  joinedAt?: number
 }

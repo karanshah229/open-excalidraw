@@ -5,12 +5,18 @@ import { reconcileElements } from '@excalidraw/excalidraw'
 import { type User } from 'firebase/auth'
 import { getFirebaseAuth, getFirebaseRtdb, getFirebaseStorage } from '../../lib/firebase'
 import { ensureAuthenticatedUser, generateSessionId, resolveCollabUser, getAnonymousProfile } from './anonymous-user'
-import { CollaborationService } from './collaboration-service'
+import {
+  CollaborationService,
+  applyDeltaPatch,
+  computeSessionEditorStatus,
+  isValidExcalidrawElement,
+} from './collaboration-service'
 import type { CollaboratorPresence, CollabUser } from './types'
 
 export interface UseCollaborationOptions {
   boardId: string
   enabled: boolean
+  sessionId?: string
   authUser?: User | null
   isAuthLoading?: boolean
   isReadOnly: boolean
@@ -22,6 +28,7 @@ export interface UseCollaborationOptions {
 export function useCollaboration({
   boardId,
   enabled,
+  sessionId,
   authUser,
   isAuthLoading,
   isReadOnly,
@@ -30,12 +37,14 @@ export function useCollaboration({
   appStateRef,
 }: UseCollaborationOptions) {
   // Session ID stays fixed for the lifetime of this tab
-  const sessionIdRef = useRef<string>(generateSessionId())
+  const sessionIdRef = useRef<string>(sessionId || generateSessionId())
+  const sessionJoinedAtRef = useRef<number>(Date.now())
 
   const [collabUser, setCollabUser] = useState<CollabUser>(() => {
     const sid = sessionIdRef.current
     if (authUser) {
-      return resolveCollabUser(authUser, sid)
+      const resolved = resolveCollabUser(authUser, sid)
+      return { ...resolved, joinedAt: sessionJoinedAtRef.current }
     }
     const profile = getAnonymousProfile(sid)
     return {
@@ -44,11 +53,20 @@ export function useCollaboration({
       displayName: profile.displayName,
       color: profile.color,
       isAnonymous: true,
+      joinedAt: sessionJoinedAtRef.current,
     }
   })
   const [activeCollaborators, setActiveCollaborators] = useState<CollaboratorPresence[]>([])
   const collabUserRef = useRef(collabUser)
   collabUserRef.current = collabUser
+
+  // Task 4: Spectator mode calculation (capped at 10 active editors)
+  const { isEditor, editorCount, totalCount } = useMemo(() => {
+    return computeSessionEditorStatus(activeCollaborators, sessionIdRef.current, sessionJoinedAtRef.current, 10)
+  }, [activeCollaborators])
+  const isSpectator = !isEditor
+  const isSpectatorRef = useRef(isSpectator)
+  isSpectatorRef.current = isSpectator
 
   // Collaboration service singleton ref
   const collabServiceRef = useRef<CollaborationService>(new CollaborationService())
@@ -56,42 +74,74 @@ export function useCollaboration({
   // Keep track of known element versions to only broadcast actual deltas
   const knownElementVersionsRef = useRef<Map<string, { version: number; versionNonce: number }>>(new Map())
 
+  // Task 2 & 3: Dragging pixel storm suppression & delta patch baselines
+  const isDraggingRef = useRef<boolean>(false)
+  const pendingDragElementsRef = useRef<Map<string, any>>(new Map())
+  const lastBroadcastElementsRef = useRef<Map<string, any>>(new Map())
+
   // Scoped undo / redo stacks for current user
   const userUndoStackRef = useRef<any[][]>([])
   const userRedoStackRef = useRef<any[][]>([])
 
-  // Seed known element versions from initial elements to prevent false-positive delta broadcasts on load
+  // Seed known element versions and snapshot baselines from initial elements
   useEffect(() => {
     if (elementsRef.current && elementsRef.current.length > 0) {
       for (const elem of elementsRef.current) {
-        if (elem?.id && !knownElementVersionsRef.current.has(elem.id)) {
-          knownElementVersionsRef.current.set(elem.id, {
-            version: Number(elem.version ?? 1),
-            versionNonce: Number(elem.versionNonce ?? 0),
-          })
+        if (elem?.id) {
+          if (!knownElementVersionsRef.current.has(elem.id)) {
+            knownElementVersionsRef.current.set(elem.id, {
+              version: Number(elem.version ?? 1),
+              versionNonce: Number(elem.versionNonce ?? 0),
+            })
+          }
+          if (!lastBroadcastElementsRef.current.has(elem.id)) {
+            lastBroadcastElementsRef.current.set(elem.id, { ...elem })
+          }
         }
       }
     }
-  }, [elementsRef])
+  }, [enabled, elementsRef])
 
   // Throttling pointer updates (max 30 updates per second / 33ms)
   const lastPointerBroadcastRef = useRef<number>(0)
   const pendingPointerRef = useRef<{ x: number; y: number } | null>(null)
   const pointerTimerRef = useRef<number | null>(null)
+  const idlePointerTimerRef = useRef<number | null>(null)
 
   const [isAuthReady, setIsAuthReady] = useState(false)
 
-  // Initialize service with Firebase instances
+  // Initialize service with Firebase instances and enforce dormant offline state when solo
   useEffect(() => {
     const rtdb = getFirebaseRtdb()
     const storage = getFirebaseStorage()
-    if (rtdb) collabServiceRef.current.setDatabase(rtdb)
+    if (rtdb) {
+      collabServiceRef.current.setDatabase(rtdb)
+      if (!enabled) {
+        collabServiceRef.current.goOffline()
+      }
+    }
     if (storage) collabServiceRef.current.setStorage(storage)
   }, [])
 
+  // Toggle RTDB offline/online based on dynamic enabled (Lazy Collab upgrade/downgrade)
+  useEffect(() => {
+    if (enabled) {
+      collabServiceRef.current.goOnline()
+    } else {
+      // Allow in-flight leavePresence and delta cleanup packets to flush before disconnecting socket
+      const service = collabServiceRef.current
+      const timer = window.setTimeout(() => {
+        service.goOffline()
+      }, 150)
+      return () => {
+        window.clearTimeout(timer)
+        service.goOffline()
+      }
+    }
+  }, [enabled])
+
   // 1. Maintain authenticated user identity (Google or Anonymous fallback)
   useEffect(() => {
-    if (!enabled) return
     if (isAuthLoading) return
 
     let cancelled = false
@@ -125,7 +175,7 @@ export function useCollaboration({
     return () => {
       cancelled = true
     }
-  }, [enabled, authUser, isAuthLoading])
+  }, [authUser, isAuthLoading])
 
   // 2. Join presence and subscribe to remote collaborators
   useEffect(() => {
@@ -151,6 +201,7 @@ export function useCollaboration({
       isCancelled = true
       unsubPresence()
       if (leavePresence) leavePresence()
+      setActiveCollaborators([])
     }
   }, [enabled, collabUser, boardId, isAuthReady])
 
@@ -159,22 +210,22 @@ export function useCollaboration({
     if (!enabled || !boardId || !isAuthReady) return
 
     const service = collabServiceRef.current
-    const unsubElements = service.subscribeToElements(boardId, (remoteElement) => {
-      if (!remoteElement || !remoteElement.id) return
+    const unsubElements = service.subscribeToElements(boardId, (remotePatch) => {
+      if (!remotePatch || !remotePatch.id) return
 
       // Don't reconcile if we already have this exact version or newer
-      const known = knownElementVersionsRef.current.get(remoteElement.id)
+      const known = knownElementVersionsRef.current.get(remotePatch.id)
       if (known) {
-        if (remoteElement.version < known.version) return
+        if (remotePatch.version < known.version) return
         // Align with Excalidraw engine standard: lowest versionNonce wins deterministic tie-break
-        if (remoteElement.version === known.version && remoteElement.versionNonce >= known.versionNonce) {
+        if (remotePatch.version === known.version && remotePatch.versionNonce >= known.versionNonce) {
           // If local version is strictly superior (lower nonce), re-assert to RTDB
           // so all peers and the database converge deterministically to the winner
-          if (known.versionNonce < remoteElement.versionNonce) {
+          if (known.versionNonce < remotePatch.versionNonce) {
             const localList = apiRef.current ? apiRef.current.getSceneElements() : elementsRef.current
-            const localEl = localList.find((e: any) => e.id === remoteElement.id)
+            const localEl = localList.find((e: any) => e.id === remotePatch.id)
             const cu = collabUserRef.current
-            if (localEl && cu) {
+            if (localEl && cu && !isSpectatorRef.current) {
               void service.broadcastElementDeltas(boardId, [localEl], cu.uid)
             }
           }
@@ -182,15 +233,31 @@ export function useCollaboration({
         }
       }
 
-      knownElementVersionsRef.current.set(remoteElement.id, {
-        version: remoteElement.version,
-        versionNonce: remoteElement.versionNonce,
+      knownElementVersionsRef.current.set(remotePatch.id, {
+        version: remotePatch.version,
+        versionNonce: remotePatch.versionNonce,
       })
 
-      // Reconcile with live scene elements using Excalidraw's engine
+      // Task 3: Merge incoming patch over existing local element
       const local = apiRef.current ? apiRef.current.getSceneElements() : elementsRef.current
+      const existingEl = local.find((e: any) => e.id === remotePatch.id)
+
+      // Guard: If element is not in local scene, reject if it's an incomplete delta patch
+      if (!existingEl && !isValidExcalidrawElement(remotePatch)) {
+        return
+      }
+
+      const mergedElement = applyDeltaPatch(existingEl, remotePatch)
+      if (!isValidExcalidrawElement(mergedElement)) {
+        return
+      }
+
+      // Cache merged element for subsequent local patch comparisons
+      lastBroadcastElementsRef.current.set(mergedElement.id, { ...mergedElement })
+
+      // Reconcile with live scene elements using Excalidraw's engine
       const appState = appStateRef.current
-      const reconciled = reconcileElements(local, [remoteElement], appState as any)
+      const reconciled = reconcileElements(local, [mergedElement], appState as any)
 
       elementsRef.current = reconciled
       apiRef.current?.updateScene({ elements: reconciled })
@@ -235,10 +302,117 @@ export function useCollaboration({
     })
   }, [excalidrawCollaborators, apiRef])
 
-  // 5. Throttled Pointer / Cursor broadcasting
+  // Task 2: Commit pending drag elements on pointerUp / drag completion
+  const commitPendingDrag = useCallback(() => {
+    if (pendingDragElementsRef.current.size === 0 || !collabUserRef.current || isSpectatorRef.current || isReadOnly) {
+      return
+    }
+    const pending = Array.from(pendingDragElementsRef.current.values())
+    pendingDragElementsRef.current.clear()
+    void collabServiceRef.current.broadcastElementDeltas(
+      boardId,
+      pending,
+      collabUserRef.current.uid,
+      lastBroadcastElementsRef.current,
+    )
+    for (const elem of pending) {
+      lastBroadcastElementsRef.current.set(elem.id, { ...elem })
+    }
+  }, [boardId, isReadOnly])
+
+  // Global window pointerup to catch drag release outside canvas
+  useEffect(() => {
+    const handleGlobalPointerUp = () => {
+      if (isDraggingRef.current) {
+        isDraggingRef.current = false
+        commitPendingDrag()
+      }
+    }
+    if (typeof window !== 'undefined') {
+      window.addEventListener('pointerup', handleGlobalPointerUp)
+      window.addEventListener('mouseup', handleGlobalPointerUp)
+    }
+    return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('pointerup', handleGlobalPointerUp)
+        window.removeEventListener('mouseup', handleGlobalPointerUp)
+      }
+    }
+  }, [commitPendingDrag])
+
+  // 5. Throttled Pointer / Cursor broadcasting & Drag State Tracking
+  const clearCursor = useCallback(() => {
+    if (!enabled || !collabUserRef.current || !boardId) return
+    if (pointerTimerRef.current) {
+      window.clearTimeout(pointerTimerRef.current)
+      pointerTimerRef.current = null
+    }
+    if (idlePointerTimerRef.current) {
+      window.clearTimeout(idlePointerTimerRef.current)
+      idlePointerTimerRef.current = null
+    }
+    pendingPointerRef.current = null
+    const selectedIds = Object.keys(appStateRef.current.selectedElementIds || {})
+    void collabServiceRef.current.updatePresence(boardId, collabUserRef.current.sessionId, null, selectedIds)
+  }, [enabled, boardId, appStateRef])
+
+  // Clear cursor on window blur, mouse leaving viewport, or tab visibility hidden
+  useEffect(() => {
+    if (!enabled || !collabUser) return
+
+    const handleWindowBlur = () => {
+      clearCursor()
+    }
+
+    const handleMouseLeave = (e: MouseEvent) => {
+      if (!e.relatedTarget) {
+        clearCursor()
+      }
+    }
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        clearCursor()
+      }
+    }
+
+    window.addEventListener('blur', handleWindowBlur)
+    document.addEventListener('mouseleave', handleMouseLeave)
+    document.addEventListener('visibilitychange', handleVisibility)
+
+    return () => {
+      window.removeEventListener('blur', handleWindowBlur)
+      document.removeEventListener('mouseleave', handleMouseLeave)
+      document.removeEventListener('visibilitychange', handleVisibility)
+      if (idlePointerTimerRef.current) {
+        window.clearTimeout(idlePointerTimerRef.current)
+        idlePointerTimerRef.current = null
+      }
+    }
+  }, [enabled, collabUser, clearCursor])
+
   const onPointerUpdate = useCallback(
     (payload: { pointer: { x: number; y: number }; button: 'down' | 'up' }) => {
       if (!enabled || !collabUser) return
+
+      // Spectators do not broadcast cursor/presence packets
+      if (isSpectatorRef.current) return
+
+      if (payload.button === 'down') {
+        isDraggingRef.current = true
+      } else if (payload.button === 'up') {
+        const wasDragging = isDraggingRef.current
+        isDraggingRef.current = false
+        if (wasDragging) {
+          commitPendingDrag()
+        }
+      }
+
+      // Reset idle timer: if user doesn't move mouse on canvas for 8 seconds, clear cursor
+      if (idlePointerTimerRef.current) {
+        window.clearTimeout(idlePointerTimerRef.current)
+      }
+      idlePointerTimerRef.current = window.setTimeout(clearCursor, 8000)
 
       const now = Date.now()
       pendingPointerRef.current = payload.pointer
@@ -250,7 +424,7 @@ export function useCollaboration({
       } else if (!pointerTimerRef.current) {
         pointerTimerRef.current = window.setTimeout(() => {
           pointerTimerRef.current = null
-          if (!pendingPointerRef.current || !collabUser) return
+          if (!pendingPointerRef.current || !collabUser || isSpectatorRef.current) return
           lastPointerBroadcastRef.current = Date.now()
           const selectedIds = Object.keys(appStateRef.current.selectedElementIds || {})
           void collabServiceRef.current.updatePresence(
@@ -262,13 +436,13 @@ export function useCollaboration({
         }, 33)
       }
     },
-    [enabled, collabUser, isReadOnly, boardId, appStateRef],
+    [enabled, collabUser, boardId, appStateRef, commitPendingDrag, clearCursor],
   )
 
   // 6. Broadcast local changes (called from Excalidraw onChange)
   const broadcastChanges = useCallback(
     (currentElements: readonly any[]) => {
-      if (!enabled || !collabUser || isReadOnly) return
+      if (!enabled || !collabUser || isReadOnly || isSpectatorRef.current) return
 
       const changedElements: any[] = []
       const known = knownElementVersionsRef.current
@@ -276,15 +450,35 @@ export function useCollaboration({
       for (const elem of currentElements) {
         if (!elem || !elem.id) continue
         const prev = known.get(elem.id)
-        if (!prev || elem.version > prev.version) {
+        if (
+          !prev ||
+          elem.version > prev.version ||
+          (elem.version === prev.version && elem.versionNonce !== prev.versionNonce)
+        ) {
           changedElements.push(elem)
           known.set(elem.id, { version: Number(elem.version ?? 1), versionNonce: Number(elem.versionNonce ?? 0) })
         }
       }
 
       if (changedElements.length > 0) {
-        // Tag with author UID and broadcast
-        void collabServiceRef.current.broadcastElementDeltas(boardId, changedElements, collabUser.uid)
+        if (isDraggingRef.current) {
+          // Task 2: Suppress RTDB element write storm during active drag.
+          // Buffer latest mutated elements for atomic commit on pointerUp.
+          for (const elem of changedElements) {
+            pendingDragElementsRef.current.set(elem.id, elem)
+          }
+        } else {
+          // Task 3: Broadcast stripped delta patches against previous known state
+          void collabServiceRef.current.broadcastElementDeltas(
+            boardId,
+            changedElements,
+            collabUser.uid,
+            lastBroadcastElementsRef.current,
+          )
+          for (const elem of changedElements) {
+            lastBroadcastElementsRef.current.set(elem.id, { ...elem })
+          }
+        }
       }
     },
     [enabled, collabUser, isReadOnly, boardId],
@@ -350,6 +544,14 @@ export function useCollaboration({
       userRedoStack: userRedoStackRef.current,
       recordUserAction,
       performScopedUndo,
+      isEditor,
+      isSpectator,
+      editorCount,
+      totalCount,
+      commitPendingDrag,
+      isDraggingRef,
+      pendingDragElementsRef,
+      lastBroadcastElementsRef,
       simulateSleepWipe: async (bid: string) => {
         const rtdb = getFirebaseRtdb()
         if (rtdb && collabUser?.sessionId) {
@@ -368,5 +570,15 @@ export function useCollaboration({
     broadcastChanges,
     recordUserAction,
     performScopedUndo,
+    isEditor,
+    isSpectator,
+    editorCount,
+    totalCollaboratorCount: totalCount,
+    sessionId: sessionIdRef.current,
+    commitPendingDrag,
+    isDraggingRef,
+    pendingDragElementsRef,
+    lastBroadcastElementsRef,
+    clearBoardElements: useCallback((bid: string) => collabServiceRef.current.clearBoardElements(bid), []),
   }
 }

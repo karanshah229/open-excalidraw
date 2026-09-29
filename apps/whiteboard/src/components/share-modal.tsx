@@ -83,6 +83,10 @@ export function ShareModal({
         ownerName: shareConfig.ownerName || resolvedOwnerName,
         ownerEmail: shareConfig.ownerEmail || resolvedOwnerEmail,
         ownerPhotoURL: shareConfig.ownerPhotoURL || resolvedOwnerPhoto,
+        scene:
+          (!shareConfig.scene?.elements || shareConfig.scene.elements.length === 0) && scene?.elements?.length
+            ? scene
+            : shareConfig.scene,
       }
     }
     return {

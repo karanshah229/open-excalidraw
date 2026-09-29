@@ -10,18 +10,23 @@ import {
 import { getDatabase, connectDatabaseEmulator, type Database } from 'firebase/database'
 import { getStorage, connectStorageEmulator, type FirebaseStorage } from 'firebase/storage'
 
+const env =
+  typeof import.meta !== 'undefined' && import.meta.env
+    ? import.meta.env
+    : typeof process !== 'undefined' && process.env
+      ? (process.env as any)
+      : {}
+
 const config = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-  appId: import.meta.env.VITE_FIREBASE_APP_ID,
+  apiKey: env.VITE_FIREBASE_API_KEY,
+  authDomain: env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: env.VITE_FIREBASE_APP_ID,
   databaseURL:
-    import.meta.env.VITE_FIREBASE_DATABASE_URL ||
-    (import.meta.env.VITE_FIREBASE_PROJECT_ID
-      ? `https://${import.meta.env.VITE_FIREBASE_PROJECT_ID}-default-rtdb.firebaseio.com`
-      : undefined),
+    env.VITE_FIREBASE_DATABASE_URL ||
+    (env.VITE_FIREBASE_PROJECT_ID ? `https://${env.VITE_FIREBASE_PROJECT_ID}-default-rtdb.firebaseio.com` : undefined),
 }
 
 export const isFirebaseConfigured = Boolean(config.apiKey && config.authDomain && config.projectId && config.appId)

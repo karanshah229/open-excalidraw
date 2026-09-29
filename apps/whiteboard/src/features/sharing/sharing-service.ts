@@ -1,7 +1,10 @@
-import { doc, getDoc, onSnapshot, setDoc, updateDoc } from 'firebase/firestore'
+import { collection, deleteDoc, doc, getDoc, onSnapshot, setDoc, updateDoc } from 'firebase/firestore'
 import { getFirestoreDb } from '../../lib/firebase'
 import { firestoreValue, workspaceStore, workspaceValue } from '../workspace/workspace-api'
 import type { BoardScene } from '@agentic-whiteboard/storage'
+import type { ActiveSessionRecord } from '../collaboration/types'
+
+export const STALE_SESSION_TIMEOUT_MS = 45 * 1000 // 45 seconds (supported by 15s heartbeat)
 
 export type ShareAccessLevel = 'restricted' | 'anyone_with_link'
 export type ShareRole = 'viewer' | 'editor'
@@ -28,37 +31,16 @@ export interface BoardShareConfig {
   updatedAt: string
 }
 
-const LOCAL_SHARE_PREFIX = 'agentic-whiteboard:share:'
-
-function getLocalShare(boardId: string): BoardShareConfig | null {
-  try {
-    const raw = localStorage.getItem(`${LOCAL_SHARE_PREFIX}${boardId}`)
-    return raw ? JSON.parse(raw) : null
-  } catch {
-    return null
-  }
-}
-
-function setLocalShare(config: BoardShareConfig) {
-  try {
-    localStorage.setItem(`${LOCAL_SHARE_PREFIX}${config.boardId}`, JSON.stringify(config))
-  } catch {
-    // storage may be full or disabled
-  }
-}
-
-async function getDocWithTimeout<T>(docRef: any, timeoutMs = 2500): Promise<T> {
+async function getDocWithTimeout<T>(docRef: any, timeoutMs = 3000): Promise<T> {
   return Promise.race([
     getDoc(docRef) as Promise<T>,
     new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Firestore getDoc timeout')), timeoutMs)),
   ])
 }
 
+const activeSessionRefCount = new Map<string, number>()
+
 export const sharingService = {
-  hasLocalAccess(boardId: string): boolean {
-    const cached = getLocalShare(boardId)
-    return Boolean(cached && cached.generalAccess === 'anyone_with_link')
-  },
   async getShareConfig(
     boardId: string,
     fallback?: {
@@ -76,22 +58,17 @@ export const sharingService = {
         const snap = await getDocWithTimeout<any>(doc(db, 'boardShares', boardId))
         if (snap.exists()) {
           const data = workspaceValue(snap.data()) as BoardShareConfig
-          setLocalShare(data)
+          if (
+            (!data.scene?.elements || data.scene.elements.length === 0) &&
+            fallback?.scene?.elements &&
+            fallback.scene.elements.length > 0
+          ) {
+            data.scene = fallback.scene
+          }
           return data
         }
       } catch {
-        // Fall back to local share config if Firestore lookup fails (e.g. offline)
-      }
-    }
-
-    const cached = getLocalShare(boardId)
-    if (cached) {
-      return {
-        ...cached,
-        boardName: fallback?.boardName ?? cached.boardName,
-        ownerName: fallback?.ownerName ?? cached.ownerName,
-        ownerEmail: fallback?.ownerEmail ?? cached.ownerEmail,
-        ownerPhotoURL: fallback?.ownerPhotoURL ?? cached.ownerPhotoURL,
+        // Fall through to default if Firestore lookup fails
       }
     }
 
@@ -117,10 +94,10 @@ export const sharingService = {
 
   async saveShareConfig(config: BoardShareConfig): Promise<void> {
     let resolvedScene = config.scene
-    if (!resolvedScene) {
+    if (!resolvedScene || !resolvedScene.elements || resolvedScene.elements.length === 0) {
       try {
         const localDoc = await workspaceStore.loadBoard(config.boardId)
-        if (localDoc?.scene) {
+        if (localDoc?.scene?.elements && localDoc.scene.elements.length > 0) {
           resolvedScene = localDoc.scene
         }
       } catch {
@@ -135,8 +112,6 @@ export const sharingService = {
       invitedEmails: Array.from(new Set(config.invitedEmails.map((e) => e.trim().toLowerCase()))),
     }
 
-    setLocalShare(normalizedConfig)
-
     const db = getFirestoreDb()
     if (db) {
       const ref = doc(db, 'boardShares', config.boardId)
@@ -145,16 +120,7 @@ export const sharingService = {
   },
 
   async syncBoardSceneToShare(boardId: string, scene: BoardScene, boardName?: string): Promise<void> {
-    const cached = getLocalShare(boardId)
     const db = getFirestoreDb()
-
-    if (cached) {
-      cached.scene = scene
-      if (boardName) cached.boardName = boardName
-      cached.updatedAt = new Date().toISOString()
-      setLocalShare(cached)
-    }
-
     if (db) {
       try {
         const ref = doc(db, 'boardShares', boardId)
@@ -194,7 +160,6 @@ export const sharingService = {
       (snap) => {
         if (snap.exists()) {
           const data = workspaceValue(snap.data()) as BoardShareConfig
-          setLocalShare(data)
           onUpdate(data)
         }
       },
@@ -222,40 +187,176 @@ export const sharingService = {
         const snap = await getDocWithTimeout<any>(doc(db, 'boardShares', boardId))
         if (snap.exists()) {
           remoteData = workspaceValue(snap.data()) as BoardShareConfig
-          setLocalShare(remoteData)
         }
       } catch (err: any) {
-        const localCached = getLocalShare(boardId)
-        if (localCached && localCached.generalAccess === 'anyone_with_link') {
-          return { status: 'allowed', config: localCached }
-        }
         if (err?.code === 'permission-denied') {
           return { status: 'restricted' }
         }
       }
     }
 
-    const config = remoteData ?? getLocalShare(boardId)
-    if (!config) {
+    if (!remoteData) {
       return { status: 'not-found' }
     }
 
     // Permission checks
-    if (config.generalAccess === 'anyone_with_link') {
-      return { status: 'allowed', config }
+    if (remoteData.generalAccess === 'anyone_with_link') {
+      return { status: 'allowed', config: remoteData }
     }
 
-    if (currentUserId && config.ownerId === currentUserId) {
-      return { status: 'allowed', config }
+    if (currentUserId && remoteData.ownerId === currentUserId) {
+      return { status: 'allowed', config: remoteData }
     }
 
     if (currentUserEmail) {
       const normalizedEmail = currentUserEmail.trim().toLowerCase()
-      if (config.invitedEmails.some((e) => e.toLowerCase() === normalizedEmail)) {
-        return { status: 'allowed', config }
+      if (remoteData.invitedEmails.some((e) => e.toLowerCase() === normalizedEmail)) {
+        return { status: 'allowed', config: remoteData }
       }
     }
 
-    return { status: 'restricted', config }
+    return { status: 'restricted', config: remoteData }
   },
+
+  async registerActiveSession(boardId: string, sessionId: string): Promise<() => void> {
+    const regKey = `${boardId}:${sessionId}`
+    activeSessionRefCount.set(regKey, (activeSessionRefCount.get(regKey) ?? 0) + 1)
+
+    const sessionData: ActiveSessionRecord = {
+      sessionId,
+      joinedAt: Date.now(),
+      lastSeen: Date.now(),
+    }
+
+    // 1. Direct Firestore session registration
+    const db = getFirestoreDb()
+    if (db) {
+      try {
+        const sessionRef = doc(db, 'boardShares', boardId, 'activeSessions', sessionId)
+        await setDoc(sessionRef, sessionData)
+      } catch (err: any) {
+        console.warn('[Collab] Could not register Firestore active session:', err?.message)
+      }
+    }
+
+    // 2. Periodic heartbeat to keep session fresh
+    const heartbeatTimer = setInterval(() => {
+      if (cleanedUp) return
+      const now = Date.now()
+      sessionData.lastSeen = now
+
+      const currentDb = getFirestoreDb()
+      if (currentDb) {
+        const sessionRef = doc(currentDb, 'boardShares', boardId, 'activeSessions', sessionId)
+        updateDoc(sessionRef, { lastSeen: now }).catch(() => {})
+      }
+    }, 15000)
+
+    // Cleanup logic
+    let cleanedUp = false
+    const cleanup = () => {
+      if (cleanedUp) return
+      cleanedUp = true
+      clearInterval(heartbeatTimer)
+      const currentCount = (activeSessionRefCount.get(regKey) ?? 1) - 1
+      if (currentCount <= 0) {
+        activeSessionRefCount.delete(regKey)
+        void sharingService.removeActiveSession(boardId, sessionId)
+      } else {
+        activeSessionRefCount.set(regKey, currentCount)
+      }
+    }
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('beforeunload', cleanup, { once: true })
+      window.addEventListener('pagehide', cleanup, { once: true })
+    }
+
+    return cleanup
+  },
+
+  async removeActiveSession(boardId: string, sessionId: string): Promise<void> {
+    // 1. Reliable synchronous keepalive REST delete (survives tab closure & beforeunload)
+    const env =
+      typeof import.meta !== 'undefined' && import.meta.env
+        ? import.meta.env
+        : typeof process !== 'undefined' && process.env
+          ? (process.env as any)
+          : {}
+    const db = getFirestoreDb()
+    const projectId = db?.app.options.projectId || env.VITE_FIREBASE_PROJECT_ID
+    if (projectId && typeof fetch !== 'undefined') {
+      try {
+        const deleteUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/boardShares/${boardId}/activeSessions/${sessionId}`
+        fetch(deleteUrl, { method: 'DELETE', keepalive: true }).catch(() => {})
+      } catch {
+        // ignore
+      }
+    }
+
+    // 2. Firestore doc cleanup via SDK
+    if (db) {
+      try {
+        const sessionRef = doc(db, 'boardShares', boardId, 'activeSessions', sessionId)
+        await deleteDoc(sessionRef)
+      } catch (err: any) {
+        console.warn('[Collab] Could not remove Firestore active session:', err?.message)
+      }
+    }
+  },
+
+  subscribeToActiveSessions(
+    boardId: string,
+    onActiveSessionsChange: (activeSessions: ActiveSessionRecord[]) => void,
+  ): () => void {
+    const db = getFirestoreDb()
+    if (!db) {
+      onActiveSessionsChange([])
+      return () => {}
+    }
+
+    try {
+      const sessionsCol = collection(db, 'boardShares', boardId, 'activeSessions')
+      return onSnapshot(
+        sessionsCol,
+        (snap) => {
+          const list: ActiveSessionRecord[] = []
+          const now = Date.now()
+          snap.forEach((d) => {
+            const data = d.data() as any
+            if (data) {
+              const joinedAt = Number(data.joinedAt ?? now)
+              const lastSeen = Number(data.lastSeen ?? joinedAt)
+              if (now - lastSeen > STALE_SESSION_TIMEOUT_MS) {
+                // Actively purge stale session document from Firestore
+                deleteDoc(d.ref).catch(() => {})
+              } else {
+                list.push({
+                  sessionId: d.id,
+                  joinedAt,
+                  lastSeen,
+                })
+              }
+            }
+          })
+          onActiveSessionsChange(filterValidActiveSessions(list))
+        },
+        (err) => {
+          console.warn('[Collab] Firestore activeSessions subscription warning:', err?.message)
+          onActiveSessionsChange([])
+        },
+      )
+    } catch {
+      onActiveSessionsChange([])
+      return () => {}
+    }
+  },
+}
+
+export function filterValidActiveSessions(
+  sessions: ActiveSessionRecord[],
+  timeoutMs = STALE_SESSION_TIMEOUT_MS,
+  now = Date.now(),
+): ActiveSessionRecord[] {
+  return sessions.filter((s) => s && s.sessionId && now - (s.lastSeen || s.joinedAt) <= timeoutMs)
 }

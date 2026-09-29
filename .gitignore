@@ -32,3 +32,6 @@ yarn-error.log*
 
 # Firebase CLI local cache
 .firebase/
+
+# Scratch directory
+scratch/

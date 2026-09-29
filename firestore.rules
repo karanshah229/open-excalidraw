@@ -10,6 +10,10 @@ service cloud.firestore {
       }
     }
 
+    match /boardShares/{boardId}/activeSessions/{sessionId} {
+      allow read, write, delete: if true;
+    }
+
     match /boardShares/{boardId} {
       allow read: if resource.data.generalAccess == 'anyone_with_link'
         || (request.auth != null && (

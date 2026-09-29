@@ -8,13 +8,14 @@ import {
   onDisconnect,
   remove,
   goOnline,
+  goOffline,
   type Database,
 } from 'firebase/database'
 import { ref as storageRef, uploadBytes, getDownloadURL, type FirebaseStorage } from 'firebase/storage'
 import type { CollaboratorPresence, CollabUser, ElementDeltaRecord } from './types'
 
 export const MAX_ELEMENT_PAYLOAD_BYTES = 262144 // 256KB
-export const STALE_PRESENCE_TIMEOUT_MS = 15000 // 15 seconds
+export const STALE_PRESENCE_TIMEOUT_MS = 60000 // 60 seconds (prevents presence flapping when tabs are in background)
 
 export function cleanPayload<T extends Record<string, any>>(obj: T): T {
   const clean: any = {}
@@ -46,6 +47,26 @@ export class CollaborationService {
 
   setStorage(storage: FirebaseStorage) {
     this.storage = storage
+  }
+
+  goOffline() {
+    if (this.rtdb) {
+      try {
+        goOffline(this.rtdb)
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  goOnline() {
+    if (this.rtdb) {
+      try {
+        goOnline(this.rtdb)
+      } catch {
+        // ignore
+      }
+    }
   }
 
   // ==========================================
@@ -80,6 +101,7 @@ export class CollaborationService {
           isAnonymous: user.isAnonymous,
           cursor: this.currentCursor,
           selectedElementIds: this.currentSelectedElementIds,
+          joinedAt: user.joinedAt || Date.now(),
           lastSeen: Date.now(),
         })
         await set(presenceRef, presencePayload)
@@ -217,6 +239,24 @@ export class CollaborationService {
   }
 
   /**
+   * Sets a presence record directly (used in test suites or multi-user simulations).
+   */
+  async injectPresence(boardId: string, presence: CollaboratorPresence): Promise<void> {
+    if (!this.rtdb) return
+    const presenceRef = ref(this.rtdb, `presence/${boardId}/${presence.sessionId}`)
+    await set(presenceRef, cleanPayload(presence))
+  }
+
+  /**
+   * Removes a presence record directly.
+   */
+  async removePresence(boardId: string, sessionId: string): Promise<void> {
+    if (!this.rtdb) return
+    const presenceRef = ref(this.rtdb, `presence/${boardId}/${sessionId}`)
+    await remove(presenceRef)
+  }
+
+  /**
    * Subscribes to live presence in the room. Filters out stale cursors, corrupt nodes, and own session.
    * Periodically prunes expired collaborators automatically.
    */
@@ -285,10 +325,15 @@ export class CollaborationService {
   // ==========================================
 
   /**
-   * Broadcasts element mutations as deltas to RTDB.
+   * Broadcasts element mutations as deltas or delta patches to RTDB.
    * Validates size limit to prevent memory exhaustion / vandalism.
    */
-  async broadcastElementDeltas(boardId: string, elements: any[], authorUid: string): Promise<void> {
+  async broadcastElementDeltas(
+    boardId: string,
+    elements: any[],
+    authorUid: string,
+    previousElementsMap?: Map<string, any>,
+  ): Promise<void> {
     if (!this.rtdb || elements.length === 0) return
 
     const now = Date.now()
@@ -296,7 +341,11 @@ export class CollaborationService {
 
     for (const elem of elements) {
       if (!elem || !elem.id) continue
-      const serialized = JSON.stringify(elem)
+
+      const prevElem = previousElementsMap?.get(elem.id)
+      const patch = createDeltaPatch(elem, prevElem)
+      const serialized = JSON.stringify(patch)
+
       if (serialized.length > MAX_ELEMENT_PAYLOAD_BYTES) {
         console.warn(`[Collab] Element ${elem.id} exceeds 256KB payload limit. Skipping broadcast.`)
         continue
@@ -357,6 +406,19 @@ export class CollaborationService {
     }
   }
 
+  /**
+   * Clears ephemeral elements for a board in RTDB when room downgrades to solo.
+   */
+  async clearBoardElements(boardId: string): Promise<void> {
+    if (!this.rtdb) return
+    try {
+      const elementsRef = ref(this.rtdb, `boards/${boardId}/elements`)
+      await remove(elementsRef)
+    } catch {
+      // ignore
+    }
+  }
+
   // ==========================================
   // ASSET / IMAGE DECOUPLING
   // ==========================================
@@ -400,5 +462,118 @@ export class CollaborationService {
     const blob = new Blob([json], { type: 'application/json' })
     const snapshotRef = storageRef(this.storage, `boards/${boardId}/snapshots/latest.json`)
     await uploadBytes(snapshotRef, blob)
+  }
+}
+
+/**
+ * Creates a minimal delta patch of changed properties against the previous known element.
+ * If previousElement is not provided (newly created element), returns the full element.
+ */
+export function createDeltaPatch(currentElement: any, previousElement?: any): any {
+  if (!previousElement || !currentElement) {
+    return currentElement
+  }
+
+  const patch: Record<string, any> = {
+    id: currentElement.id,
+    type: currentElement.type,
+    version: Number(currentElement.version ?? 1),
+    versionNonce: Number(currentElement.versionNonce ?? 0),
+  }
+  if (currentElement.lastModifiedBy) {
+    patch.lastModifiedBy = currentElement.lastModifiedBy
+  }
+
+  // Find all keys that differ from previous state
+  for (const [key, value] of Object.entries(currentElement)) {
+    if (key === 'id' || key === 'type' || key === 'version' || key === 'versionNonce' || key === 'lastModifiedBy') {
+      continue
+    }
+    const prevValue = previousElement[key]
+    if (JSON.stringify(value) !== JSON.stringify(prevValue)) {
+      patch[key] = value
+    }
+  }
+
+  return patch
+}
+
+/**
+ * Merges a remote delta patch over a local element baseline.
+ */
+export function applyDeltaPatch(localElement: any, patch: any): any {
+  if (!localElement) {
+    return patch
+  }
+  return {
+    ...localElement,
+    ...patch,
+  }
+}
+
+/**
+ * Validates that an element has minimum required properties to be a complete Excalidraw element.
+ * Prevents partial delta patches from entering the scene without a local baseline.
+ */
+export function isValidExcalidrawElement(elem: any): boolean {
+  return Boolean(
+    elem &&
+    typeof elem.id === 'string' &&
+    typeof elem.type === 'string' &&
+    typeof elem.x === 'number' &&
+    !isNaN(elem.x) &&
+    typeof elem.y === 'number' &&
+    !isNaN(elem.y) &&
+    typeof elem.width === 'number' &&
+    !isNaN(elem.width) &&
+    typeof elem.height === 'number' &&
+    !isNaN(elem.height),
+  )
+}
+
+/**
+ * Deterministically computes whether a session is granted Active Editor status (capped at maxEditors, default 10).
+ * Sorted by joinedAt ascending, tie-broken by sessionId.
+ */
+export function computeSessionEditorStatus(
+  collaborators: CollaboratorPresence[],
+  mySessionId: string,
+  myJoinedAt: number,
+  maxEditors = 10,
+): { isEditor: boolean; editorCount: number; totalCount: number; rank: number } {
+  const allSessionsMap = new Map<string, { sessionId: string; joinedAt: number }>()
+
+  // My session
+  allSessionsMap.set(mySessionId, {
+    sessionId: mySessionId,
+    joinedAt: myJoinedAt,
+  })
+
+  // Add remote collaborators
+  for (const c of collaborators) {
+    if (c && c.sessionId) {
+      allSessionsMap.set(c.sessionId, {
+        sessionId: c.sessionId,
+        joinedAt: c.joinedAt ?? c.lastSeen ?? Date.now(),
+      })
+    }
+  }
+
+  const sorted = Array.from(allSessionsMap.values()).sort((a, b) => {
+    if (a.joinedAt !== b.joinedAt) {
+      return a.joinedAt - b.joinedAt
+    }
+    return a.sessionId.localeCompare(b.sessionId)
+  })
+
+  const rank = sorted.findIndex((s) => s.sessionId === mySessionId)
+  const isEditor = rank >= 0 && rank < maxEditors
+  const editorCount = Math.min(sorted.length, maxEditors)
+
+  return {
+    isEditor,
+    editorCount,
+    totalCount: sorted.length,
+    rank: rank + 1,
   }
 }

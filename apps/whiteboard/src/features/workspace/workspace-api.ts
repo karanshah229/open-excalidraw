@@ -2,6 +2,7 @@ import { RxDbWorkspaceStore } from '@agentic-whiteboard/storage'
 import type { Board, BoardDocument, Project } from '@agentic-whiteboard/storage'
 import { collection, doc, getDoc, getDocs, onSnapshot, query, runTransaction, setDoc, where } from 'firebase/firestore'
 import { getFirestoreDb } from '../../lib/firebase'
+import { reconcileElementsLWW } from '../collaboration/reconcile'
 
 export type WorkspaceBoard = Board & { project: Project }
 export const workspaceStore = new RxDbWorkspaceStore()
@@ -15,7 +16,6 @@ let projectsListener: (() => void) | undefined
 const SYNC_DEBOUNCE_MS = 150
 const MIN_WRITE_INTERVAL_MS = 1_000
 const MAX_RETRY_DELAY_MS = 60_000
-const ACTIVE_FLAG_MIGRATION_KEY = 'agentic-whiteboard:active-boards-v1'
 
 class SyncConflictError extends Error {}
 
@@ -129,27 +129,46 @@ async function syncWorkspace(userId: string) {
         const current = await workspaceStore.loadBoard(board.id)
         if (!current || (current.syncStatus !== 'local-only' && current.syncStatus !== 'sync-failed')) return
         const ref = doc(db, 'users', userId, 'projects', current.projectId, 'boards', current.id)
+        let resolvedBoard = current
         await runTransaction(db, async (transaction) => {
           const remoteSnapshot = await transaction.get(ref)
-          const remoteRevision = remoteSnapshot.exists() ? Number(remoteSnapshot.data().revision ?? 0) : 0
-          if (remoteSnapshot.exists() && remoteRevision !== current.baseRevision) {
-            throw new SyncConflictError('This board changed in another tab or device. Your local copy was preserved.')
+          if (remoteSnapshot.exists()) {
+            const remoteData = workspaceValue(remoteSnapshot.data()) as BoardDocument
+            const remoteRevision = Number(remoteData.revision ?? 0)
+            if (remoteRevision !== current.baseRevision) {
+              // Element-level LWW reconciliation
+              const mergedElements = reconcileElementsLWW(
+                current.scene?.elements ?? [],
+                remoteData.scene?.elements ?? [],
+              )
+              const nextRev = Math.max(current.revision, remoteRevision) + 1
+              resolvedBoard = {
+                ...current,
+                revision: nextRev,
+                baseRevision: nextRev,
+                scene: {
+                  ...current.scene,
+                  elements: mergedElements,
+                },
+                updatedAt: new Date().toISOString(),
+              }
+              transaction.set(ref, firestoreValue(cloudBoard(resolvedBoard)))
+              return
+            }
           }
           transaction.set(ref, firestoreValue(cloudBoard(current)))
         })
-        await workspaceStore.markBoardSynced(current.id, current.revision)
-        window.dispatchEvent(new CustomEvent(`board-sync:${current.id}`, { detail: 'synced' }))
+        if (resolvedBoard !== current) {
+          await workspaceStore.upsertBoard(resolvedBoard)
+        }
+        await workspaceStore.markBoardSynced(resolvedBoard.id, resolvedBoard.revision)
+        window.dispatchEvent(new CustomEvent(`board-sync:${resolvedBoard.id}`, { detail: 'synced' }))
       })
     } catch (error) {
-      if (error instanceof SyncConflictError) {
-        await workspaceStore.markBoardConflict(board.id, error.message)
-        window.dispatchEvent(new CustomEvent(`board-sync:${board.id}`, { detail: 'conflict' }))
-      } else {
-        const current = await workspaceStore.loadBoard(board.id)
-        const nextAttempt = (current?.syncAttempts ?? 0) + 1
-        await workspaceStore.markBoardSyncFailed(board.id, errorMessage(error), retryAt(nextAttempt))
-        window.dispatchEvent(new CustomEvent(`board-sync:${board.id}`, { detail: 'sync-failed' }))
-      }
+      const current = await workspaceStore.loadBoard(board.id)
+      const nextAttempt = (current?.syncAttempts ?? 0) + 1
+      await workspaceStore.markBoardSyncFailed(board.id, errorMessage(error), retryAt(nextAttempt))
+      window.dispatchEvent(new CustomEvent(`board-sync:${board.id}`, { detail: 'sync-failed' }))
     }
   }
 
@@ -180,11 +199,19 @@ async function downloadWorkspace(userId: string) {
           if (local?.syncStatus === 'local-only' || local?.syncStatus === 'sync-failed') {
             if (matchesCommittedVersion(local, remote)) {
               await workspaceStore.markBoardSynced(remote.id, remote.revision)
-            } else if (remote.revision !== local.baseRevision) {
-              await workspaceStore.markBoardConflict(
-                remote.id,
-                'This board changed remotely while local work was pending.',
-              )
+            } else {
+              // Element-level LWW reconciliation
+              const mergedElements = reconcileElementsLWW(local.scene?.elements ?? [], remote.scene?.elements ?? [])
+              const mergedBoard: BoardDocument = {
+                ...local,
+                revision: Math.max(local.revision, remote.revision) + 1,
+                scene: {
+                  ...local.scene,
+                  elements: mergedElements,
+                },
+              }
+              await workspaceStore.upsertBoard(mergedBoard)
+              queueSync()
             }
           } else if (!local || remote.revision >= local.revision) {
             await workspaceStore.upsertBoard(remote)
@@ -193,26 +220,6 @@ async function downloadWorkspace(userId: string) {
       )
     }),
   )
-}
-
-/** Add the activity flag to pre-existing cloud boards before active-only reads begin. */
-async function migrateLegacyBoardActivity(userId: string) {
-  const db = getFirestoreDb()
-  const migrationKey = `${ACTIVE_FLAG_MIGRATION_KEY}:${userId}`
-  if (!db || localStorage.getItem(migrationKey)) return
-
-  const projects = await getDocs(collection(db, 'users', userId, 'projects'))
-  await Promise.all(
-    projects.docs.map(async (project) => {
-      const boards = await getDocs(collection(db, 'users', userId, 'projects', project.id, 'boards'))
-      await Promise.all(
-        boards.docs
-          .filter((board) => board.data().active === undefined)
-          .map((board) => setDoc(board.ref, { active: true }, { merge: true })),
-      )
-    }),
-  )
-  localStorage.setItem(migrationKey, 'complete')
 }
 
 function subscribeToRemoteWorkspace(userId: string) {
@@ -238,15 +245,22 @@ function subscribeToRemoteWorkspace(userId: string) {
                 const local = await workspaceStore.loadBoard(remote.id)
                 const normalized = cloudBoard(remote)
                 if (local?.syncStatus === 'local-only' || local?.syncStatus === 'sync-failed') {
-                  // Firestore can emit this tab's transaction before markBoardSynced runs.
-                  // Keep that in-flight acknowledgement owned by syncWorkspace; only a truly
-                  // newer remote revision is a conflict.
                   if (normalized.revision !== local.baseRevision && normalized.revision !== local.revision) {
-                    await workspaceStore.markBoardConflict(
-                      remote.id,
-                      'This board changed remotely while local work was pending.',
+                    // Element-level LWW reconciliation
+                    const mergedElements = reconcileElementsLWW(
+                      local.scene?.elements ?? [],
+                      normalized.scene?.elements ?? [],
                     )
-                    await updateSyncStatus(remote.id, 'conflict')
+                    const mergedBoard: BoardDocument = {
+                      ...local,
+                      revision: Math.max(local.revision, normalized.revision) + 1,
+                      scene: {
+                        ...local.scene,
+                        elements: mergedElements,
+                      },
+                    }
+                    await workspaceStore.upsertBoard(mergedBoard)
+                    queueSync()
                   }
                 } else if (!local || normalized.revision >= local.revision) {
                   await workspaceStore.upsertBoard(normalized)
@@ -263,6 +277,9 @@ function subscribeToRemoteWorkspace(userId: string) {
 
 export const workspaceApi = {
   async listWorkspace(): Promise<{ projects: Project[]; boards: WorkspaceBoard[] }> {
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      return { projects: [], boards: [] }
+    }
     await workspaceStore.bootstrap()
     const projects = await workspaceStore.listProjects()
     const boardGroups = await Promise.all(projects.map((project) => workspaceStore.listBoards(project.id)))
@@ -344,7 +361,6 @@ export const workspaceApi = {
   async activateCloudWorkspace(userId: string) {
     activeUserId = userId
     await workspaceStore.bootstrap()
-    await migrateLegacyBoardActivity(userId)
     await downloadWorkspace(userId)
     const claimedProjectIds = await workspaceStore.claimLocalProjects(userId)
     claimedProjectIds.forEach((projectId) => dirtyProjectIds.add(projectId))
