@@ -3,10 +3,15 @@ import { createPortal } from 'react-dom'
 import { Link, useNavigate, useParams, useBlocker } from '@tanstack/react-router'
 import { useQueryClient } from '@tanstack/react-query'
 import { Check, Copy, Eye, Loader2, Lock, Pencil, Share2 } from 'lucide-react'
-import { convertToExcalidrawElements, Excalidraw, MainMenu } from '@excalidraw/excalidraw'
+import { convertToExcalidrawElements, Excalidraw, MainMenu, exportToSvg } from '@excalidraw/excalidraw'
 import type { ExcalidrawImperativeAPI } from '@excalidraw/excalidraw/types'
 import type { BoardDocument, BoardScene, BoardSyncStatus } from '@agentic-whiteboard/storage'
 import { workspaceApi } from '../features/workspace/workspace-api'
+import {
+  generateArchitecturalTemplate,
+  computeAutoLayout,
+  type ArchitectureTemplateType,
+} from '../features/mcp-bridge/mcp-operations'
 import { useTheme } from '../lib/theme-context'
 import { useAuth } from '../lib/auth-context'
 import { BoardInfoDropdown } from '../components/board-info-dropdown'
@@ -120,6 +125,7 @@ function getSceneSignature(scene?: { elements?: readonly any[]; appState?: any }
     (key, value) => (key === 'updated' || key === 'versionNonce' ? undefined : value),
   )
 }
+
 
 function getOrCreateSessionId(boardId: string): string {
   if (typeof window === 'undefined') return generateSessionId()
@@ -535,6 +541,7 @@ export function BoardEditor() {
             createdAt: document.createdAt,
             updatedAt: document.updatedAt,
           })
+
           setInitialData({
             elements: convertToExcalidrawElements(document.scene.elements as any, { regenerateIds: false }),
             appState: {
@@ -622,19 +629,38 @@ export function BoardEditor() {
   }, [boardId, isReadOnly, isSharedBoard])
 
   const sendScene = useCallback(
-    (elements = elementsRef.current, operationId?: string) => {
+    (elements = elementsRef.current, operationId?: string, result?: unknown) => {
       if (isReadOnly) return
       if (socketRef.current?.readyState !== WebSocket.OPEN) return
+      const selected = appStateRef.current?.selectedElementIds as Record<string, boolean> | undefined
+      const selectionIds = selected ? Object.keys(selected).filter((id) => selected[id]) : []
       socketRef.current.send(
         JSON.stringify({
           type: 'scene',
           operationId,
           scene: { elements, appState: appStateRef.current },
-          selectionIds: [],
+          selectionIds,
+          result,
         }),
       )
     },
     [isReadOnly],
+  )
+
+  const sendOperationResult = useCallback(
+    (operationId: string, ok: boolean, data?: unknown, error?: string) => {
+      if (socketRef.current?.readyState !== WebSocket.OPEN) return
+      socketRef.current.send(
+        JSON.stringify({
+          type: 'operation_result',
+          operationId,
+          ok,
+          data,
+          error,
+        }),
+      )
+    },
+    [],
   )
 
   useEffect(() => {
@@ -647,22 +673,6 @@ export function BoardEditor() {
     const connect = async () => {
       if (disposed) return
 
-      // Probe Vite MCP process endpoint if available to avoid opening WS when server is off
-      try {
-        const res = await fetch('/api/mcp/process').catch(() => null)
-        if (res && res.ok) {
-          const data = (await res.json().catch(() => null)) as { running?: boolean } | null
-          if (data && data.running === false) {
-            // MCP server not running; retry check in 30s instead of slamming WS port
-            if (!disposed) retryId = window.setTimeout(connect, 30_000)
-            return
-          }
-        }
-      } catch {
-        // ignore
-      }
-
-      if (disposed) return
       const socket = new WebSocket(import.meta.env.VITE_MCP_BRIDGE_URL ?? 'ws://127.0.0.1:8787')
       socketRef.current = socket
       socket.onopen = () => {
@@ -670,7 +680,7 @@ export function BoardEditor() {
         retryDelay = 5_000
         sendScene()
       }
-      socket.onmessage = ({ data }) => {
+      socket.onmessage = async ({ data }) => {
         const message = JSON.parse(data) as { type?: string; operation?: any }
         if (message.type !== 'operation' || !apiRef.current) return
         userHasInteractedRef.current = true
@@ -678,25 +688,353 @@ export function BoardEditor() {
         operationRef.current = operation.id
         const wasEmpty = elementsRef.current.length === 0
         let next = elementsRef.current
-        if (operation.type === 'add_elements')
+
+        if (operation.type === 'add_elements') {
           next = [...next, ...convertToExcalidrawElements(operation.elements, { regenerateIds: true })]
-        if (operation.type === 'update_elements') {
+          elementsRef.current = next
+          apiRef.current.updateScene({ elements: next })
+          sendScene(next, operation.id)
+          if (wasEmpty && apiRef.current) {
+            requestAnimationFrame(() => {
+              zoomToContentWithPadding(apiRef.current!, next, true)
+            })
+          }
+        } else if (operation.type === 'update_elements') {
           const patches = new Map(operation.patches.map((patch: any) => [patch.id, patch.changes]))
           next = next.map((element) =>
             patches.has(element.id) ? { ...element, ...(patches.get(element.id) as Record<string, unknown>) } : element,
           )
-        }
-        if (operation.type === 'delete_elements') {
+          elementsRef.current = next
+          apiRef.current.updateScene({ elements: next })
+          sendScene(next, operation.id)
+        } else if (operation.type === 'delete_elements') {
           const ids = new Set(operation.ids)
           next = next.map((element) => (ids.has(element.id) ? { ...element, isDeleted: true } : element))
-        }
-        elementsRef.current = next
-        apiRef.current.updateScene({ elements: next })
-        sendScene(next, operation.id)
-        if (wasEmpty && operation.type === 'add_elements' && apiRef.current) {
+          elementsRef.current = next
+          apiRef.current.updateScene({ elements: next })
+          sendScene(next, operation.id)
+        } else if (operation.type === 'clear_canvas') {
+          const clearedCount = next.filter((e) => !e.isDeleted).length
+          next = next.map((element) => ({ ...element, isDeleted: true }))
+          elementsRef.current = next
+          apiRef.current.updateScene({ elements: next })
+          sendScene(next, operation.id, { ok: true, clearedCount })
+        } else if (operation.type === 'set_selection') {
+          const ids: string[] = Array.isArray(operation.ids) ? operation.ids : []
+          const selectedMap: Record<string, true> = {}
+          for (const id of ids) selectedMap[id] = true
+          apiRef.current.updateScene({
+            appState: {
+              selectedElementIds: selectedMap,
+            },
+          })
+          appStateRef.current = {
+            ...appStateRef.current,
+            selectedElementIds: selectedMap,
+          }
+          sendOperationResult(operation.id, true, { ok: true, selectedCount: ids.length, selectedIds: ids })
+        } else if (operation.type === 'zoom_to_content') {
+          const targetIds: string[] | undefined = operation.targetIds
+          const animate = Boolean(operation.animate ?? true)
+          if (targetIds && targetIds.length > 0) {
+            const targetSet = new Set(targetIds)
+            const targets = apiRef.current.getSceneElements().filter((e) => targetSet.has(e.id) && !e.isDeleted)
+            if (targets.length > 0) {
+              const appState = apiRef.current.getAppState()
+              const offsets = getCanvasOffsets(appState.width, appState.height)
+              apiRef.current.scrollToContent(targets, {
+                fitToContent: true,
+                animate,
+                maxZoom: 1,
+                canvasOffsets: offsets,
+              })
+            }
+          } else {
+            zoomToContentWithPadding(apiRef.current, undefined, animate)
+          }
+          sendOperationResult(operation.id, true, { ok: true, message: 'Viewport updated' })
+        } else if (operation.type === 'find_elements') {
+          const query = (operation.query ?? '').toLowerCase().trim()
+          const filterType = operation.elementType ? String(operation.elementType).toLowerCase().trim() : undefined
+          const nonDeleted = elementsRef.current.filter((e) => !e.isDeleted)
+          const matches = nonDeleted
+            .filter((e) => {
+              if (filterType && e.type !== filterType) return false
+              if (!query) return true
+              const idMatch = String(e.id || '').toLowerCase().includes(query)
+              const textMatch = typeof e.text === 'string' && e.text.toLowerCase().includes(query)
+              const labelMatch =
+                e.label && typeof e.label.text === 'string' && e.label.text.toLowerCase().includes(query)
+              return idMatch || textMatch || labelMatch
+            })
+            .map((e) => ({
+              id: e.id,
+              type: e.type,
+              x: e.x,
+              y: e.y,
+              width: e.width,
+              height: e.height,
+              text: e.text || e.label?.text || undefined,
+              strokeColor: e.strokeColor,
+              backgroundColor: e.backgroundColor,
+              groupIds: e.groupIds || [],
+            }))
+          sendOperationResult(operation.id, true, { ok: true, count: matches.length, elements: matches })
+        } else if (operation.type === 'group_elements') {
+          const ids = new Set<string>(operation.ids || [])
+          const newGroupId = `group_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`
+          next = next.map((el) => {
+            if (ids.has(el.id)) {
+              const groupIds = Array.isArray(el.groupIds) ? [...el.groupIds] : []
+              if (!groupIds.includes(newGroupId)) groupIds.push(newGroupId)
+              return { ...el, groupIds, version: (el.version ?? 1) + 1, versionNonce: Math.floor(Math.random() * 1e9) }
+            }
+            return el
+          })
+          elementsRef.current = next
+          apiRef.current.updateScene({ elements: next })
+          sendScene(next, operation.id, { ok: true, groupId: newGroupId, groupedCount: ids.size })
+        } else if (operation.type === 'ungroup_elements') {
+          const ids = new Set<string>(operation.ids || [])
+          const targetGroupId = operation.groupId as string | undefined
+          next = next.map((el) => {
+            if (ids.has(el.id) || (targetGroupId && Array.isArray(el.groupIds) && el.groupIds.includes(targetGroupId))) {
+              const groupIds = Array.isArray(el.groupIds)
+                ? targetGroupId
+                  ? el.groupIds.filter((g: string) => g !== targetGroupId)
+                  : []
+                : []
+              return { ...el, groupIds, version: (el.version ?? 1) + 1, versionNonce: Math.floor(Math.random() * 1e9) }
+            }
+            return el
+          })
+          elementsRef.current = next
+          apiRef.current.updateScene({ elements: next })
+          sendScene(next, operation.id, { ok: true, message: 'Elements ungrouped' })
+        } else if (operation.type === 'export_image') {
+          try {
+            const elements = elementsRef.current.filter((e) => !e.isDeleted)
+            const svgEl = await exportToSvg({
+              elements: elements as any,
+              appState: {
+                exportBackground: operation.exportBackground ?? true,
+                exportWithDarkMode: operation.darkMode ?? (resolvedTheme === 'dark'),
+                theme: resolvedTheme,
+              },
+              files: null,
+              exportPadding: operation.exportPadding ?? 16,
+              skipInliningFonts: true,
+              renderEmbeddables: false,
+            })
+            sendOperationResult(operation.id, true, {
+              ok: true,
+              format: 'svg',
+              elementCount: elements.length,
+              svg: svgEl.outerHTML,
+            })
+          } catch (err: any) {
+            sendOperationResult(operation.id, false, null, err?.message || 'Failed to export SVG')
+          }
+        } else if (operation.type === 'insert_library_item') {
+          const template = operation.template as ArchitectureTemplateType
+          const x = typeof operation.x === 'number' ? operation.x : 200
+          const y = typeof operation.y === 'number' ? operation.y : 200
+          const label = operation.label as string | undefined
+          const skeletons = generateArchitecturalTemplate(template, x, y, label)
+          const converted = convertToExcalidrawElements(skeletons as any, { regenerateIds: true })
+          next = [...next, ...converted]
+          elementsRef.current = next
+          apiRef.current.updateScene({ elements: next })
+          sendScene(next, operation.id, {
+            ok: true,
+            template,
+            insertedCount: converted.length,
+            insertedIds: converted.map((e) => e.id),
+          })
           requestAnimationFrame(() => {
             zoomToContentWithPadding(apiRef.current!, next, true)
           })
+        } else if (operation.type === 'auto_layout') {
+          next = computeAutoLayout(next, {
+            layout: operation.layout || 'horizontal',
+            ids: operation.ids,
+            spacing: operation.spacing,
+            columns: operation.columns,
+            startX: operation.startX,
+            startY: operation.startY,
+          })
+          elementsRef.current = next
+          apiRef.current.updateScene({ elements: next })
+          sendScene(next, operation.id, { ok: true, layout: operation.layout || 'horizontal' })
+          requestAnimationFrame(() => {
+            zoomToContentWithPadding(apiRef.current!, next, true)
+          })
+        } else if (operation.type === 'set_canvas_background') {
+          const color = String(operation.color || 'transparent')
+          appStateRef.current = {
+            ...appStateRef.current,
+            viewBackgroundColor: color,
+          }
+          apiRef.current.updateScene({
+            appState: {
+              viewBackgroundColor: color,
+            },
+          })
+          sendScene(next, operation.id, { ok: true, viewBackgroundColor: color })
+        } else if (operation.type === 'list_projects') {
+          try {
+            const data = await workspaceApi.listWorkspace()
+            sendOperationResult(operation.id, true, {
+              ok: true,
+              projects: data.projects.map((p) => ({
+                id: p.id,
+                name: p.name,
+                ownerId: p.ownerId,
+                createdAt: p.createdAt,
+                updatedAt: p.updatedAt,
+              })),
+            })
+          } catch (err: any) {
+            sendOperationResult(operation.id, false, null, err?.message || 'Failed to list projects')
+          }
+        } else if (operation.type === 'list_boards') {
+          try {
+            const data = await workspaceApi.listWorkspace()
+            let boards = data.boards
+            if (operation.projectId) {
+              boards = boards.filter((b) => b.projectId === operation.projectId)
+            }
+            sendOperationResult(operation.id, true, {
+              ok: true,
+              boards: boards.map((b) => ({
+                id: b.id,
+                name: b.name,
+                projectId: b.projectId,
+                projectName: b.project?.name,
+                updatedAt: b.updatedAt,
+                syncStatus: b.syncStatus,
+              })),
+            })
+          } catch (err: any) {
+            sendOperationResult(operation.id, false, null, err?.message || 'Failed to list boards')
+          }
+        } else if (operation.type === 'create_board') {
+          try {
+            const name = String(operation.name || 'Untitled')
+            let projectId = operation.projectId
+            if (!projectId) {
+              const data = await workspaceApi.listWorkspace()
+              projectId = data.projects[0]?.id
+              if (!projectId) {
+                const proj = await workspaceApi.createProject('General')
+                projectId = proj.id
+              }
+            }
+            const newBoard = await workspaceApi.createBoard(projectId, name)
+            queryClient.invalidateQueries({ queryKey: ['workspace'] })
+            if (operation.openBoard) {
+              void navigate({ to: '/boards/$boardId', params: { boardId: newBoard.id } })
+            }
+            sendOperationResult(operation.id, true, {
+              ok: true,
+              board: {
+                id: newBoard.id,
+                name: newBoard.name,
+                projectId: newBoard.projectId,
+              },
+            })
+          } catch (err: any) {
+            sendOperationResult(operation.id, false, null, err?.message || 'Failed to create board')
+          }
+        } else if (operation.type === 'rename_board') {
+          try {
+            const targetBoardId = (operation.boardId as string) || boardId
+            const newName = String(operation.name || 'Untitled').trim()
+            await workspaceApi.renameBoard(targetBoardId, newName)
+            if (targetBoardId === boardId) {
+              setBoardMeta((prev) => (prev ? { ...prev, boardName: newName } : prev))
+              if (documentRef.current) {
+                documentRef.current = { ...documentRef.current, name: newName }
+              }
+            }
+            queryClient.invalidateQueries({ queryKey: ['workspace'] })
+            sendOperationResult(operation.id, true, {
+              ok: true,
+              boardId: targetBoardId,
+              name: newName,
+            })
+          } catch (err: any) {
+            sendOperationResult(operation.id, false, null, err?.message || 'Failed to rename board')
+          }
+        } else if (operation.type === 'switch_board') {
+          try {
+            const targetBoardId = String(operation.boardId)
+            void navigate({ to: '/boards/$boardId', params: { boardId: targetBoardId } })
+            sendOperationResult(operation.id, true, { ok: true, boardId: targetBoardId })
+          } catch (err: any) {
+            sendOperationResult(operation.id, false, null, err?.message || 'Failed to switch board')
+          }
+        } else if (operation.type === 'get_share_info') {
+          try {
+            const targetBoardId = (operation.boardId as string) || boardId
+            const config = await sharingService.getShareConfig(targetBoardId, {
+              boardName: boardMeta?.boardName,
+              ownerId: boardMeta?.projectOwnerId,
+            })
+            const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:5173'
+            sendOperationResult(operation.id, true, {
+              ok: true,
+              boardId: targetBoardId,
+              boardName: config.boardName,
+              shareUrl: `${origin}/boards/${targetBoardId}`,
+              generalAccess: config.generalAccess,
+              generalRole: config.generalRole,
+              invitedEmails: config.invitedEmails,
+              collaborators: config.collaborators,
+            })
+          } catch (err: any) {
+            sendOperationResult(operation.id, false, null, err?.message || 'Failed to get share info')
+          }
+        } else if (operation.type === 'share_board') {
+          try {
+            const targetBoardId = (operation.boardId as string) || boardId
+            const currentConfig = await sharingService.getShareConfig(targetBoardId, {
+              boardName: boardMeta?.boardName,
+              ownerId: boardMeta?.projectOwnerId,
+            })
+            const updated = {
+              ...currentConfig,
+              generalAccess: operation.generalAccess ?? currentConfig.generalAccess,
+              generalRole: operation.generalRole ?? currentConfig.generalRole,
+            }
+            if (operation.inviteEmail) {
+              const email = String(operation.inviteEmail).trim().toLowerCase()
+              if (!updated.invitedEmails.includes(email)) {
+                updated.invitedEmails = [...updated.invitedEmails, email]
+              }
+              updated.collaborators = {
+                ...updated.collaborators,
+                [email]: {
+                  email,
+                  role: operation.inviteRole || 'editor',
+                  addedAt: new Date().toISOString(),
+                },
+              }
+            }
+            await sharingService.saveShareConfig(updated)
+            const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:5173'
+            sendOperationResult(operation.id, true, {
+              ok: true,
+              boardId: targetBoardId,
+              shareUrl: `${origin}/boards/${targetBoardId}`,
+              generalAccess: updated.generalAccess,
+              generalRole: updated.generalRole,
+              invitedEmails: updated.invitedEmails,
+              collaborators: updated.collaborators,
+            })
+          } catch (err: any) {
+            sendOperationResult(operation.id, false, null, err?.message || 'Failed to update sharing')
+          }
         }
         operationRef.current = null
       }

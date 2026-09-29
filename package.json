@@ -23,7 +23,9 @@
     "test:inactive": "node tests/inactive-tab-presence-cursor.test.mjs",
     "test:zoom": "node tests/board-auto-zoom-center.test.mjs",
     "test:solo": "node tests/solo-no-collab-banner.test.mjs",
-    "test:undo": "node tests/incognito-undo-beforeunload.test.mjs"
+    "test:undo": "node tests/incognito-undo-beforeunload.test.mjs",
+    "test:mcp": "pnpm dlx tsx tests/mcp-tools-suite.test.ts",
+    "test:mcp:e2e": "node tests/mcp-live-e2e.test.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
