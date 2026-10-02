@@ -2,13 +2,33 @@ rules_version = '2';
 
 service firebase.storage {
   match /b/{bucket}/o {
+    function board(boardId) {
+      return firestore.get(/databases/(default)/documents/boardShares/$(boardId)).data;
+    }
+    function isOwner(boardData) { return request.auth != null && boardData.ownerId == request.auth.uid; }
+    function hasInvitedEmail(boardData) {
+      return request.auth != null && request.auth.token.email != null
+        && boardData.invitedEmails != null && request.auth.token.email in boardData.invitedEmails;
+    }
+    function canRead(boardData) {
+      return boardData.generalAccess == 'anyone_with_link' || isOwner(boardData) || hasInvitedEmail(boardData);
+    }
+    function canEdit(boardData) {
+      return isOwner(boardData)
+        || (boardData.generalAccess == 'anyone_with_link' && boardData.generalRole == 'editor')
+        || (request.auth != null && request.auth.token.email != null && boardData.collaborators != null
+          && boardData.collaborators[request.auth.token.email] != null
+          && boardData.collaborators[request.auth.token.email].role == 'editor');
+    }
+
     match /boards/{boardId}/assets/{fileId} {
-      allow read: if request.auth != null;
+      allow read: if canRead(board(boardId));
       // Allow upload up to 10MB per image
-      allow write: if request.auth != null && request.resource.size < 10 * 1024 * 1024;
+      allow write: if canEdit(board(boardId)) && request.resource.size < 10 * 1024 * 1024;
     }
     match /boards/{boardId}/snapshots/{snapshotId} {
-      allow read, write: if request.auth != null;
+      allow read: if canRead(board(boardId));
+      allow write: if canEdit(board(boardId));
     }
   }
 }

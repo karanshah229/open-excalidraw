@@ -12,6 +12,7 @@ export interface CollaboratorPresence {
 }
 
 export interface ActiveSessionRecord {
+  userId: string
   sessionId: string
   joinedAt: number
   lastSeen: number

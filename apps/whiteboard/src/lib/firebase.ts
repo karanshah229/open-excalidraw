@@ -152,6 +152,10 @@ export function getFirebaseAppCheck() {
   return appCheck
 }
 
+/** Must match the deployed `SYNC_ACCESS_FUNCTION_REGION`. */
+export function getSyncAccessFunctionRegion(): string | undefined {
+  return env.VITE_FIREBASE_SYNC_ACCESS_FUNCTION_REGION
+}
+
 export const googleProvider = new GoogleAuthProvider()
 googleProvider.setCustomParameters({ prompt: 'select_account' })
-

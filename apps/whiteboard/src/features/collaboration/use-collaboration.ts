@@ -9,6 +9,7 @@ import {
   CollaborationService,
   applyDeltaPatch,
   computeSessionEditorStatus,
+  haveElementPropertiesChanged,
   isValidExcalidrawElement,
 } from './collaboration-service'
 import type { CollaboratorPresence, CollabUser } from './types'
@@ -23,6 +24,17 @@ export interface UseCollaborationOptions {
   apiRef: React.RefObject<ExcalidrawImperativeAPI | null>
   elementsRef: React.MutableRefObject<any[]>
   appStateRef: React.MutableRefObject<Record<string, unknown>>
+}
+
+export function getFullSceneElements(
+  api: ExcalidrawImperativeAPI | null | undefined,
+  fallback: readonly any[] = [],
+): any[] {
+  if (!api) return [...fallback]
+  if (typeof (api as any).getSceneElementsIncludingDeleted === 'function') {
+    return [...(api as any).getSceneElementsIncludingDeleted()]
+  }
+  return [...api.getSceneElements()]
 }
 
 export function useCollaboration({
@@ -78,29 +90,27 @@ export function useCollaboration({
   const isDraggingRef = useRef<boolean>(false)
   const pendingDragElementsRef = useRef<Map<string, any>>(new Map())
   const lastBroadcastElementsRef = useRef<Map<string, any>>(new Map())
-
-  // Scoped undo / redo stacks for current user
-  const userUndoStackRef = useRef<any[][]>([])
-  const userRedoStackRef = useRef<any[][]>([])
+  const seededBoardIdRef = useRef<string | null>(null)
 
   // Seed known element versions and snapshot baselines from initial elements
   useEffect(() => {
-    if (elementsRef.current && elementsRef.current.length > 0) {
-      for (const elem of elementsRef.current) {
+    const sourceElements = apiRef.current?.getSceneElementsIncludingDeleted() || elementsRef.current || []
+    if (sourceElements && sourceElements.length > 0) {
+      for (const elem of sourceElements) {
         if (elem?.id) {
-          if (!knownElementVersionsRef.current.has(elem.id)) {
+          const existing = knownElementVersionsRef.current.get(elem.id)
+          const elemVersion = Number(elem.version ?? 1)
+          if (!existing || elemVersion >= existing.version) {
             knownElementVersionsRef.current.set(elem.id, {
-              version: Number(elem.version ?? 1),
+              version: elemVersion,
               versionNonce: Number(elem.versionNonce ?? 0),
             })
           }
-          if (!lastBroadcastElementsRef.current.has(elem.id)) {
-            lastBroadcastElementsRef.current.set(elem.id, { ...elem })
-          }
+          lastBroadcastElementsRef.current.set(elem.id, { ...elem })
         }
       }
     }
-  }, [enabled, elementsRef])
+  }, [enabled, elementsRef, apiRef])
 
   // Throttling pointer updates (max 30 updates per second / 33ms)
   const lastPointerBroadcastRef = useRef<number>(0)
@@ -110,33 +120,25 @@ export function useCollaboration({
 
   const [isAuthReady, setIsAuthReady] = useState(false)
 
-  // Initialize service with Firebase instances and enforce dormant offline state when solo
+  // Initialize the collaboration service. The shared RTDB client must remain
+  // online in solo mode so the connection-owned active-session lobby can
+  // discover a second participant.
   useEffect(() => {
     const rtdb = getFirebaseRtdb()
     const storage = getFirebaseStorage()
     if (rtdb) {
       collabServiceRef.current.setDatabase(rtdb)
-      if (!enabled) {
-        collabServiceRef.current.goOffline()
-      }
     }
     if (storage) collabServiceRef.current.setStorage(storage)
   }, [])
 
-  // Toggle RTDB offline/online based on dynamic enabled (Lazy Collab upgrade/downgrade)
+  // The active-session lobby also uses this RTDB client. Never call goOffline
+  // while collaboration is lazy-disabled: that would disconnect the very
+  // connection whose session record is needed to detect a second participant.
+  // Scene/presence listeners are independently attached only when `enabled`.
   useEffect(() => {
     if (enabled) {
       collabServiceRef.current.goOnline()
-    } else {
-      // Allow in-flight leavePresence and delta cleanup packets to flush before disconnecting socket
-      const service = collabServiceRef.current
-      const timer = window.setTimeout(() => {
-        service.goOffline()
-      }, 150)
-      return () => {
-        window.clearTimeout(timer)
-        service.goOffline()
-      }
     }
   }, [enabled])
 
@@ -210,7 +212,7 @@ export function useCollaboration({
     if (!enabled || !boardId || !isAuthReady) return
 
     const service = collabServiceRef.current
-    const unsubElements = service.subscribeToElements(boardId, (remotePatch) => {
+    const unsubElements = service.subscribeToElements(boardId, (remotePatch, meta) => {
       if (!remotePatch || !remotePatch.id) return
 
       // Don't reconcile if we already have this exact version or newer
@@ -219,10 +221,8 @@ export function useCollaboration({
         if (remotePatch.version < known.version) return
         // Align with Excalidraw engine standard: lowest versionNonce wins deterministic tie-break
         if (remotePatch.version === known.version && remotePatch.versionNonce >= known.versionNonce) {
-          // If local version is strictly superior (lower nonce), re-assert to RTDB
-          // so all peers and the database converge deterministically to the winner
           if (known.versionNonce < remotePatch.versionNonce) {
-            const localList = apiRef.current ? apiRef.current.getSceneElements() : elementsRef.current
+            const localList = getFullSceneElements(apiRef.current, elementsRef.current)
             const localEl = localList.find((e: any) => e.id === remotePatch.id)
             const cu = collabUserRef.current
             if (localEl && cu && !isSpectatorRef.current) {
@@ -238,8 +238,8 @@ export function useCollaboration({
         versionNonce: remotePatch.versionNonce,
       })
 
-      // Task 3: Merge incoming patch over existing local element
-      const local = apiRef.current ? apiRef.current.getSceneElements() : elementsRef.current
+      // Task 3: Merge incoming patch over existing local element (including tombstones)
+      const local = getFullSceneElements(apiRef.current, elementsRef.current)
       const existingEl = local.find((e: any) => e.id === remotePatch.id)
 
       // Guard: If element is not in local scene, reject if it's an incomplete delta patch
@@ -247,7 +247,7 @@ export function useCollaboration({
         return
       }
 
-      const mergedElement = applyDeltaPatch(existingEl, remotePatch)
+      const mergedElement = { ...applyDeltaPatch(existingEl, remotePatch), lastModifiedBy: meta.lastModifiedBy }
       if (!isValidExcalidrawElement(mergedElement)) {
         return
       }
@@ -260,13 +260,32 @@ export function useCollaboration({
       const reconciled = reconcileElements(local, [mergedElement], appState as any)
 
       elementsRef.current = reconciled
-      apiRef.current?.updateScene({ elements: reconciled })
+      // Remote state is authoritative for rendering but must never become a
+      // local undo/redo entry in Excalidraw's multiplayer history.
+      apiRef.current?.updateScene({ elements: reconciled, captureUpdate: 'NEVER' })
     })
 
     return () => {
       unsubElements()
     }
   }, [enabled, boardId, isAuthReady, elementsRef, appStateRef, apiRef])
+
+  // A late joiner may start from a Firestore snapshot that predates this live
+  // room. Seed full elements once per room entry so RTDB never contains only a
+  // delta patch for an element the joiner has not seen before.
+  useEffect(() => {
+    if (!enabled) {
+      seededBoardIdRef.current = null
+      return
+    }
+    if (!isAuthReady || !collabUser || isSpectatorRef.current || seededBoardIdRef.current === boardId) return
+
+    const scene = getFullSceneElements(apiRef.current, elementsRef.current)
+    seededBoardIdRef.current = boardId
+    if (scene.length > 0) {
+      void collabServiceRef.current.broadcastElementDeltas(boardId, scene, collabUser.uid)
+    }
+  }, [enabled, isAuthReady, collabUser, boardId, apiRef, elementsRef])
 
   // 4. Convert active collaborators to Excalidraw's native Collaborator Map
   const excalidrawCollaborators = useMemo(() => {
@@ -394,6 +413,9 @@ export function useCollaboration({
   const onPointerUpdate = useCallback(
     (payload: { pointer: { x: number; y: number }; button: 'down' | 'up' }) => {
       if (!enabled || !collabUser) return
+      if (!payload.pointer || !Number.isFinite(payload.pointer.x) || !Number.isFinite(payload.pointer.y)) {
+        return
+      }
 
       // Spectators do not broadcast cursor/presence packets
       if (isSpectatorRef.current) return
@@ -442,96 +464,101 @@ export function useCollaboration({
   // 6. Broadcast local changes (called from Excalidraw onChange)
   const broadcastChanges = useCallback(
     (currentElements: readonly any[]) => {
-      if (!enabled || !collabUser || isReadOnly || isSpectatorRef.current) return
+      if (!enabled || !collabUser || isReadOnly || isSpectatorRef.current) {
+        // Even when dormant (solo mode), track latest element snapshots and versions
+        // so that when collaboration activates, our baseline is 100% accurate and
+        // subsequent local edits, undos, or redos detect accurate deltas.
+        for (const elem of currentElements) {
+          if (!elem || !elem.id) continue
+          const existing = knownElementVersionsRef.current.get(elem.id)
+          const elemVersion = Number(elem.version ?? 1)
+          if (!existing || elemVersion >= existing.version) {
+            knownElementVersionsRef.current.set(elem.id, {
+              version: elemVersion,
+              versionNonce: Number(elem.versionNonce ?? 0),
+            })
+          }
+          lastBroadcastElementsRef.current.set(elem.id, { ...elem })
+        }
+        return
+      }
 
       const changedElements: any[] = []
       const known = knownElementVersionsRef.current
+      let hasVersionBumps = false
 
       for (const elem of currentElements) {
         if (!elem || !elem.id) continue
         const prev = known.get(elem.id)
-        if (
+        const last = lastBroadcastElementsRef.current.get(elem.id)
+
+        const isForwardVersion =
           !prev ||
           elem.version > prev.version ||
           (elem.version === prev.version && elem.versionNonce !== prev.versionNonce)
-        ) {
+
+        if (isForwardVersion) {
           changedElements.push(elem)
           known.set(elem.id, { version: Number(elem.version ?? 1), versionNonce: Number(elem.versionNonce ?? 0) })
+        } else if (last) {
+          // Detect if an element was resurrected or reverted locally (e.g. via Undo)
+          // where Excalidraw restored an older or matching version number
+          const isResurrected = Boolean(last.isDeleted) && !elem.isDeleted
+          const hasStateChanged = haveElementPropertiesChanged(last, elem)
+
+          if (isResurrected || hasStateChanged) {
+            const bumpedVersion = Math.max(Number(elem.version ?? 1), Number(prev?.version ?? 1)) + 1
+            const bumpedNonce = Math.floor(Math.random() * 1000000)
+            const bumpedElem = { ...elem, version: bumpedVersion, versionNonce: bumpedNonce }
+            changedElements.push(bumpedElem)
+            known.set(elem.id, { version: bumpedVersion, versionNonce: bumpedNonce })
+            hasVersionBumps = true
+          }
         }
       }
 
+      if (hasVersionBumps && apiRef.current) {
+        // Keep Excalidraw's internal scene elements in sync with the bumped versions
+        const fullScene = getFullSceneElements(apiRef.current, elementsRef.current)
+        const updatedScene = fullScene.map((el) => {
+          const bumped = changedElements.find((b) => b.id === el.id)
+          return bumped || el
+        })
+
+        // `updateScene()` can synchronously re-enter Excalidraw's onChange.
+        // Establish the new baseline first, otherwise that nested onChange sees
+        // the same mutation against the old baseline, bumps it again, and loops.
+        for (const element of changedElements) {
+          lastBroadcastElementsRef.current.set(element.id, { ...element })
+        }
+        elementsRef.current = updatedScene
+        apiRef.current.updateScene({ elements: updatedScene, captureUpdate: 'NEVER' })
+      }
+
       if (changedElements.length > 0) {
+        const authoredChanges = changedElements.map((element) => ({ ...element, lastModifiedBy: collabUser.uid }))
         if (isDraggingRef.current) {
           // Task 2: Suppress RTDB element write storm during active drag.
           // Buffer latest mutated elements for atomic commit on pointerUp.
-          for (const elem of changedElements) {
+          for (const elem of authoredChanges) {
             pendingDragElementsRef.current.set(elem.id, elem)
           }
         } else {
           // Task 3: Broadcast stripped delta patches against previous known state
           void collabServiceRef.current.broadcastElementDeltas(
             boardId,
-            changedElements,
+            authoredChanges,
             collabUser.uid,
             lastBroadcastElementsRef.current,
           )
-          for (const elem of changedElements) {
+          for (const elem of authoredChanges) {
             lastBroadcastElementsRef.current.set(elem.id, { ...elem })
           }
         }
       }
     },
-    [enabled, collabUser, isReadOnly, boardId],
+    [enabled, collabUser, isReadOnly, boardId, apiRef, elementsRef],
   )
-
-  // 7. Scoped Undo for current user: records history snapshot
-  const recordUserAction = useCallback(
-    (previousElements: any[]) => {
-      if (!collabUser) return
-      userUndoStackRef.current.push(previousElements)
-      userRedoStackRef.current = [] // clear redo stack on new action
-    },
-    [collabUser],
-  )
-
-  // 8. User-Scoped Undo: only rolls back mutations authored by the current user
-  const performScopedUndo = useCallback(() => {
-    if (!collabUser || userUndoStackRef.current.length === 0) return null
-    const priorState = userUndoStackRef.current.pop()
-    if (!priorState) return null
-
-    const currentScene = [...(apiRef.current ? apiRef.current.getSceneElements() : elementsRef.current)]
-    userRedoStackRef.current.push(currentScene)
-
-    // Roll back elements authored by current user
-    const updated = currentScene.map((el: any) => {
-      const priorEl = priorState.find((p: any) => p.id === el.id)
-      if (priorEl && (el.lastModifiedBy === collabUser.uid || priorEl.lastModifiedBy === collabUser.uid)) {
-        return { ...priorEl, version: (el.version || 1) + 1, versionNonce: Date.now() % 1000000 }
-      }
-      return el
-    })
-
-    // If an element was created in this action (not in priorState), mark it deleted
-    for (const el of currentScene) {
-      if (!priorState.some((p: any) => p.id === el.id) && el.lastModifiedBy === collabUser.uid) {
-        const idx = updated.findIndex((u: any) => u.id === el.id)
-        if (idx !== -1) {
-          updated[idx] = {
-            ...updated[idx],
-            isDeleted: true,
-            version: (updated[idx].version || 1) + 1,
-            versionNonce: Date.now() % 1000000,
-          }
-        }
-      }
-    }
-
-    elementsRef.current = updated
-    apiRef.current?.updateScene({ elements: updated })
-    broadcastChanges(updated)
-    return updated
-  }, [collabUser, apiRef, elementsRef, broadcastChanges])
 
   if (import.meta.env.DEV && typeof window !== 'undefined') {
     ;(window as any).__collab = {
@@ -540,10 +567,6 @@ export function useCollaboration({
       excalidrawCollaborators,
       service: collabServiceRef.current,
       broadcastChanges,
-      userUndoStack: userUndoStackRef.current,
-      userRedoStack: userRedoStackRef.current,
-      recordUserAction,
-      performScopedUndo,
       isEditor,
       isSpectator,
       editorCount,
@@ -554,9 +577,10 @@ export function useCollaboration({
       lastBroadcastElementsRef,
       simulateSleepWipe: async (bid: string) => {
         const rtdb = getFirebaseRtdb()
-        if (rtdb && collabUser?.sessionId) {
+        const sid = collabUserRef.current?.sessionId
+        if (rtdb && sid) {
           const { ref, remove } = await import('firebase/database')
-          await remove(ref(rtdb, `presence/${bid}/${collabUser.sessionId}`))
+          await remove(ref(rtdb, `presence/${bid}/${sid}`))
         }
       },
     }
@@ -568,8 +592,6 @@ export function useCollaboration({
     excalidrawCollaborators,
     onPointerUpdate,
     broadcastChanges,
-    recordUserAction,
-    performScopedUndo,
     isEditor,
     isSpectator,
     editorCount,

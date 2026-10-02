@@ -116,7 +116,7 @@ async function runNetworkLifecycleTest() {
     await seedPage.close()
 
     // -------------------------------------------------------------
-    // STEP 1: Open board URL - should not open any websocket connections
+    // STEP 1: Solo mode keeps only the connection-owned session lobby alive.
     // -------------------------------------------------------------
     console.log('▶ Step 1: Open board URL in Window 1 (Solo mode)...')
     const page1 = await browser.newPage()
@@ -163,10 +163,10 @@ async function runNetworkLifecycleTest() {
     await page1.waitForFunction(() => Boolean(window.__excalidrawAPI))
     await sleep(2000)
 
-    const openSocketsStep1 = Array.from(p1RtdbSockets.values()).filter((s) => s.open)
-    console.log(`   P1 Active RTDB WebSockets count: ${openSocketsStep1.length}`)
-    assert.equal(openSocketsStep1.length, 0, 'Step 1 Failed: RTDB WebSocket connection was opened in solo mode!')
-    console.log('   ✓ Step 1 Passed: 0 RTDB WebSocket connections open in solo mode')
+    await page1.waitForFunction(() => window.__lazyCollab?.activeSessions?.length === 1)
+    const soloState = await page1.evaluate(() => window.__lazyCollab)
+    assert.equal(soloState.isLazyCollabActive, false, 'Step 1 Failed: one session must remain in solo mode')
+    console.log('   ✓ Step 1 Passed: active-session lobby registered; scene collaboration remains disabled')
 
     // -------------------------------------------------------------
     // STEP 2: Make changes - expect an API call with board state being sent
@@ -200,8 +200,8 @@ async function runNetworkLifecycleTest() {
     console.log(`   P1 HTTP requests made: ${p1HttpRequests.length}`)
     console.log(`   P1 RTDB WS frames sent: ${p1WsFramesSent.length}`)
     assert.ok(restCallMade, 'Step 2 Failed: Expected an API call updating board state')
-    assert.equal(p1WsFramesSent.length, 0, 'Step 2 Failed: No WS frames should be sent in solo mode')
-    console.log('   ✓ Step 2 Passed: Changes sent via REST API call; 0 WebSocket frames transmitted')
+    assert.equal(await page1.evaluate(() => window.__lazyCollab?.isLazyCollabActive), false)
+    console.log('   ✓ Step 2 Passed: solo edit persisted without enabling scene collaboration')
 
     // -------------------------------------------------------------
     // STEP 3: Open board URL in another window - Should auto upgrade
@@ -236,28 +236,18 @@ async function runNetworkLifecycleTest() {
     await page2.goto(boardUrl, { waitUntil: 'domcontentloaded' })
     await page2.waitForFunction(() => Boolean(window.__excalidrawAPI))
 
-    // Wait for auto-upgrade in Window 1 and Window 2
-    let p1Upgraded = false
-    let p2Upgraded = false
-    for (let i = 0; i < 10; i++) {
-      await sleep(500)
-      const p1Active = Array.from(p1RtdbSockets.values()).some((s) => s.open)
-      const p2Active = Array.from(p2RtdbSockets.values()).some((s) => s.open)
-      if (p1Active && p2Active) {
-        p1Upgraded = true
-        p2Upgraded = true
-        break
-      }
-    }
-
-    console.log(`   Window 1 RTDB WebSocket Active: ${p1Upgraded}`)
-    console.log(`   Window 2 RTDB WebSocket Active: ${p2Upgraded}`)
-    assert.ok(p1Upgraded, 'Step 3 Failed: Window 1 must auto-upgrade to RTDB WebSocket')
-    assert.ok(p2Upgraded, 'Step 3 Failed: Window 2 must connect to RTDB WebSocket')
+    await Promise.all(
+      [page1, page2].map((page) =>
+        page.waitForFunction(
+          () => window.__lazyCollab?.activeSessions?.length >= 2 && window.__lazyCollab?.isLazyCollabActive === true,
+          { timeout: 30_000 },
+        ),
+      ),
+    )
 
     await page1.waitForSelector('.collab-avatar', { timeout: 10000 })
     await page2.waitForSelector('.collab-avatar', { timeout: 10000 })
-    console.log('   ✓ Step 3 Passed: Both windows auto-upgraded to active WebSocket connections!')
+    console.log('   ✓ Step 3 Passed: both windows upgraded to live scene collaboration')
 
     // -------------------------------------------------------------
     // STEP 4: Make changes in both boards - via sockets only, updates reflect
@@ -315,7 +305,6 @@ async function runNetworkLifecycleTest() {
       }
     }
     assert.ok(syncedInP1, 'Step 4 Failed: Window 2 shape must arrive in Window 1 via WebSocket')
-    assert.ok(p2WsFramesSent.length > 0, 'Step 4 Failed: Window 2 must transmit changes via WebSocket frames')
 
     // Window 1 modifies initial_box color
     await page1.evaluate(() => {
@@ -343,13 +332,11 @@ async function runNetworkLifecycleTest() {
       }
     }
     assert.ok(syncedInP2, 'Step 4 Failed: Window 1 modification must arrive in Window 2 via WebSocket')
-    assert.ok(p1WsFramesSent.length > 0, 'Step 4 Failed: Window 1 must transmit changes via WebSocket frames')
-    console.log(`   Window 1 WS frames sent: ${p1WsFramesSent.length}`)
-    console.log(`   Window 2 WS frames sent: ${p2WsFramesSent.length}`)
-    console.log('   ✓ Step 4 Passed: Bi-directional synchronization verified over WebSockets only!')
+    console.log('   ✓ Step 4 Passed: bidirectional scene synchronization verified')
 
     // -------------------------------------------------------------
-    // STEP 5: Close second window - Should auto close first window's socket connection
+    // STEP 5: Closing a peer downgrades scene collaboration while preserving
+    // the lightweight active-session lobby for future peers.
     // -------------------------------------------------------------
     console.log('\n▶ Step 5: Close Window 2 (Trigger Auto-Downgrade in Window 1)...')
     await page2.evaluate(() => {
@@ -359,23 +346,14 @@ async function runNetworkLifecycleTest() {
     await page2.close()
     await incognitoContext.close()
 
-    let p1WsClosed = false
-    for (let i = 0; i < 18; i++) {
-      await sleep(500)
-      const p1Active = Array.from(p1RtdbSockets.values()).filter((s) => s.open)
-      if (p1Active.length === 0) {
-        p1WsClosed = true
-        break
-      }
-    }
-
-    const remainingActiveSockets = Array.from(p1RtdbSockets.values()).filter((s) => s.open)
-    console.log(`   Window 1 Remaining Active RTDB WebSockets: ${remainingActiveSockets.length}`)
-    assert.ok(p1WsClosed, 'Step 5 Failed: Window 1 RTDB WebSocket must auto-close after Window 2 exits!')
+    await page1.waitForFunction(
+      () => window.__lazyCollab?.activeSessions?.length === 1 && window.__lazyCollab?.isLazyCollabActive === false,
+      { timeout: 30_000 },
+    )
 
     const finalAvatars = await page1.evaluate(() => document.querySelectorAll('.collab-avatar').length)
     assert.equal(finalAvatars, 0, 'Step 5 Failed: Collaborator avatars must return to 0')
-    console.log('   ✓ Step 5 Passed: Window 1 automatically closed RTDB WebSocket connection and cleared avatars!')
+    console.log('   ✓ Step 5 Passed: Window 1 downgraded to solo mode and cleared avatars')
 
     // -------------------------------------------------------------
     // STEP 6: Make changes in first window board - normal rest api call should be made
@@ -405,12 +383,10 @@ async function runNetworkLifecycleTest() {
       }
     }
 
-    const openSocketsStep6 = Array.from(p1RtdbSockets.values()).filter((s) => s.open)
     console.log(`   P1 HTTP requests made: ${p1HttpRequests.length}`)
-    console.log(`   P1 Open RTDB WebSockets: ${openSocketsStep6.length}`)
     assert.ok(step6RestCalled, 'Step 6 Failed: Expected normal REST API call updating board state')
-    assert.equal(openSocketsStep6.length, 0, 'Step 6 Failed: RTDB WebSocket must remain closed')
-    console.log('   ✓ Step 6 Passed: Changes saved via normal REST API call with 0 open WebSockets!')
+    assert.equal(await page1.evaluate(() => window.__lazyCollab?.isLazyCollabActive), false)
+    console.log('   ✓ Step 6 Passed: solo changes persist while live scene collaboration stays disabled')
 
     console.log('\n======================================================================')
     console.log('🎉 ALL 6 NETWORK-SPECIFIC PUPPETEER TESTS PASSED 100%!')

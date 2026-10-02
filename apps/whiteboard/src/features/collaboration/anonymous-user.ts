@@ -38,6 +38,12 @@ export const COLLAB_COLORS = [
   '#16A34A', // green-600
 ] as const
 
+// Several board effects can need authentication during the first render. Firebase
+// may create different anonymous users for concurrent sign-in calls; the first
+// caller would then hold a UID that no longer matches the authenticated RTDB
+// connection. Deduplicate that bootstrap per Auth instance.
+const pendingAnonymousSignIns = new WeakMap<Auth, Promise<User | null>>()
+
 /**
  * Deterministically maps a string ID (e.g. Firebase UID) to a city name and color.
  * Guarantees that the same user/visitor gets the identical anonymous avatar across refreshes.
@@ -75,16 +81,22 @@ export async function ensureAuthenticatedUser(auth: Auth): Promise<User | null> 
   if (auth.currentUser) {
     return auth.currentUser
   }
-  try {
-    const userCredential = await signInAnonymously(auth)
-    return userCredential.user
-  } catch (err: any) {
-    console.warn(
-      '[Collab] Anonymous auth not enabled in Firebase Console yet. Running in local session mode:',
-      err?.message,
-    )
-    return null
-  }
+
+  const pending = pendingAnonymousSignIns.get(auth)
+  if (pending) return pending
+
+  const signIn = signInAnonymously(auth)
+    .then((credential) => credential.user)
+    .catch((err: any) => {
+      console.warn(
+        '[Collab] Anonymous auth not enabled in Firebase Console yet. Running in local session mode:',
+        err?.message,
+      )
+      return null
+    })
+    .finally(() => pendingAnonymousSignIns.delete(auth))
+  pendingAnonymousSignIns.set(auth, signIn)
+  return signIn
 }
 
 /**

@@ -299,7 +299,9 @@ async function runLiveMcpE2ETest() {
     assert.ok(browserState, 'window.__excalidrawAPI must be available in development mode')
     assert.ok(browserState.elementCount >= 5, `Expected >= 5 elements in browser, got ${browserState.elementCount}`)
     assert.equal(browserState.viewBackgroundColor, '#1e1e24', 'Browser canvas background must match MCP change')
-    console.log(`   ✓ Verified in Puppeteer browser: ${browserState.elementCount} live elements, background: ${browserState.viewBackgroundColor}`)
+    console.log(
+      `   ✓ Verified in Puppeteer browser: ${browserState.elementCount} live elements, background: ${browserState.viewBackgroundColor}`,
+    )
 
     // ------------------------------------------------------------------
     // 16. Test Workspace & Sharing Queries

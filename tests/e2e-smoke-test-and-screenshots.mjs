@@ -86,9 +86,16 @@ async function runE2ESmokeTest() {
     })
 
     await page1.goto('http://localhost:5173', { waitUntil: 'domcontentloaded' })
-    await page1.evaluate((cfg) => {
-      localStorage.setItem('agentic-whiteboard:library:v1', '[]')
-      localStorage.setItem(`agentic-whiteboard:share:${cfg.boardId}`, JSON.stringify(cfg))
+    await page1.evaluate(async (cfg) => {
+      const { getFirebaseAuth } = await import('/src/lib/firebase.ts')
+      const { signInAnonymously } = await import('/src/features/collaboration/anonymous-user.ts')
+      const { sharingService } = await import('/src/features/sharing/sharing-service.ts')
+      const auth = getFirebaseAuth()
+      if (auth && !auth.currentUser) await signInAnonymously(auth)
+      await sharingService.saveShareConfig({
+        ...cfg,
+        ownerId: auth?.currentUser?.uid ?? cfg.ownerId,
+      })
     }, shareConfig)
 
     await page1.goto(boardUrl, { waitUntil: 'domcontentloaded' })
@@ -108,12 +115,6 @@ async function runE2ESmokeTest() {
         console.log(`   [Tab 2 Log] ${text}`)
       }
     })
-
-    await page2.goto('http://localhost:5173', { waitUntil: 'domcontentloaded' })
-    await page2.evaluate((cfg) => {
-      localStorage.setItem('agentic-whiteboard:library:v1', '[]')
-      localStorage.setItem(`agentic-whiteboard:share:${cfg.boardId}`, JSON.stringify(cfg))
-    }, shareConfig)
 
     await page2.goto(boardUrl, { waitUntil: 'domcontentloaded' })
     await page2.waitForSelector('.excalidraw', { timeout: 15000 })

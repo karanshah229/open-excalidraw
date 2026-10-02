@@ -11,6 +11,7 @@ import type { BoardScene } from '@agentic-whiteboard/storage'
 export interface ShareModalProps {
   open: boolean
   onOpenChange: (open: boolean) => void
+  onShareConfigSaved?: () => void
   boardId: string
   boardName: string
   ownerId?: string
@@ -25,6 +26,7 @@ const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 export function ShareModal({
   open,
   onOpenChange,
+  onShareConfigSaved,
   boardId,
   boardName,
   ownerId,
@@ -126,6 +128,7 @@ export function ShareModal({
     setShareConfig(updated)
     try {
       await sharingService.saveShareConfig(updated)
+      onShareConfigSaved?.()
     } catch (err) {
       console.error('Failed to update general access:', err)
     }
@@ -141,6 +144,7 @@ export function ShareModal({
     setShareConfig(updated)
     try {
       await sharingService.saveShareConfig(updated)
+      onShareConfigSaved?.()
     } catch (err) {
       console.error('Failed to update general role:', err)
     }
@@ -168,6 +172,7 @@ export function ShareModal({
     setShareConfig(updated)
     try {
       await sharingService.saveShareConfig(updated)
+      onShareConfigSaved?.()
     } catch (err) {
       console.error('Failed to update collaborator role:', err)
     }
@@ -210,6 +215,7 @@ export function ShareModal({
 
     try {
       await sharingService.saveShareConfig(updated)
+      onShareConfigSaved?.()
     } catch (err) {
       console.error('Failed to add collaborator:', err)
     }
@@ -233,6 +239,7 @@ export function ShareModal({
 
     try {
       await sharingService.saveShareConfig(updated)
+      onShareConfigSaved?.()
     } catch (err) {
       console.error('Failed to remove collaborator:', err)
     }
@@ -257,6 +264,7 @@ export function ShareModal({
         ...effectiveConfig,
         scene: scene ?? effectiveConfig.scene,
       })
+      onShareConfigSaved?.()
     } catch (err) {
       console.error('Failed to save share config on done:', err)
     } finally {

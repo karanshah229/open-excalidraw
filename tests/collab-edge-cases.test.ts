@@ -9,16 +9,13 @@ import {
 import {
   cleanPayload,
   MAX_ELEMENT_PAYLOAD_BYTES,
-  STALE_PRESENCE_TIMEOUT_MS,
   createDeltaPatch,
   applyDeltaPatch,
+  haveElementPropertiesChanged,
   computeSessionEditorStatus,
 } from '../apps/whiteboard/src/features/collaboration/collaboration-service'
-import {
-  filterValidActiveSessions,
-  STALE_SESSION_TIMEOUT_MS,
-} from '../apps/whiteboard/src/features/sharing/sharing-service'
 import { getCollaboratorInitials } from '../apps/whiteboard/src/features/collaboration/collaborator-bar'
+import { mergeDeltaRecordsOntoBase } from '../apps/whiteboard/src/features/collaboration/reconcile'
 import type { CollaboratorPresence, ActiveSessionRecord } from '../apps/whiteboard/src/features/collaboration/types'
 
 async function runAllEdgeCaseTests() {
@@ -158,7 +155,7 @@ async function runAllEdgeCaseTests() {
   // ----------------------------------------------------
   // EDGE CASE 5: Ghost Cursor Cleanup & Disconnects
   // ----------------------------------------------------
-  console.log('\n▶ Test 5: Ghost Cursor Cleanup on Disconnect / Stale Heartbeat')
+  console.log('\n▶ Test 5: Connection-Owned Presence Cleanup')
   {
     const now = Date.now()
     const presenceMap: Record<string, CollaboratorPresence> = {
@@ -180,12 +177,14 @@ async function runAllEdgeCaseTests() {
       },
     }
 
-    // Filter logic as implemented in CollaborationService.subscribeToPresence
-    const active = Object.values(presenceMap).filter((p) => now - p.lastSeen < STALE_PRESENCE_TIMEOUT_MS)
+    // Presence liveness is connection-owned: an idle tab remains present until
+    // RTDB removes its record after transport disconnect detection.
+    const active = Object.values(presenceMap)
 
-    assert.equal(active.length, 1, 'Ghost user must be pruned')
-    assert.equal(active[0].displayName, 'Anonymous Tokyo', 'Only fresh user remains active')
-    console.log('   ✓ Stale cursor (>60s) successfully purged; active cursor preserved')
+    assert.equal(active.length, 2, 'Idle connected collaborators must not be timed out by a client clock')
+    delete presenceMap.ghost_user // Models RTDB executing the server-registered onDisconnect.remove().
+    assert.equal(Object.values(presenceMap).length, 1, 'Server disconnect removal clears the departed peer')
+    console.log('   ✓ Idle collaborator retained; server-side disconnect removal clears the departed peer')
     passedCount++
   }
 
@@ -434,50 +433,50 @@ async function runAllEdgeCaseTests() {
   // ----------------------------------------------------
   // EDGE CASE 12: Lazy Collab Upgrade (1 -> 2) & Downgrade (2 -> 1)
   // ----------------------------------------------------
-  console.log('\n▶ Test 12: Lazy Collab (Just-In-Time RTDB Connection)')
+  console.log('\n▶ Test 12: Connection-Authoritative RTDB Lobby')
   {
     const now = Date.now()
 
     // 1. Solo user opens board
-    const session1: ActiveSessionRecord = { sessionId: 'tab_user1_aaa', joinedAt: now, lastSeen: now }
+    const session1: ActiveSessionRecord = { userId: 'user1', sessionId: 'tab_user1_aaa', joinedAt: now, lastSeen: now }
     const activeSessions: ActiveSessionRecord[] = [session1]
 
-    let validSessions = filterValidActiveSessions(activeSessions, STALE_SESSION_TIMEOUT_MS, now)
-    assert.equal(validSessions.length, 1, 'Only 1 active session initially')
-    let isLazyCollabActive = validSessions.length >= 2
-    assert.equal(isLazyCollabActive, false, 'RTDB should remain dormant (false) when solo drawing')
+    assert.equal(activeSessions.length, 1, 'Only 1 active session initially')
+    let isLazyCollabActive = activeSessions.length >= 2
+    assert.equal(isLazyCollabActive, false, 'Solo uses the lightweight RTDB lobby only')
 
     // 2. Second user (or tab) joins -> Upgrade trigger
-    const session2: ActiveSessionRecord = { sessionId: 'tab_user2_bbb', joinedAt: now + 500, lastSeen: now + 500 }
+    const session2: ActiveSessionRecord = {
+      userId: 'user2',
+      sessionId: 'tab_user2_bbb',
+      joinedAt: now + 500,
+      lastSeen: now + 500,
+    }
     activeSessions.push(session2)
 
-    validSessions = filterValidActiveSessions(activeSessions, STALE_SESSION_TIMEOUT_MS, now + 500)
-    assert.equal(validSessions.length, 2, '2 active sessions detected')
-    isLazyCollabActive = validSessions.length >= 2
+    assert.equal(activeSessions.length, 2, '2 active sessions detected')
+    isLazyCollabActive = activeSessions.length >= 2
     assert.equal(isLazyCollabActive, true, 'RTDB should upgrade to active (true) when 2+ sessions present')
 
     // 3. Multi-tab verification under same user UID
     const sessionSameUserTab2: ActiveSessionRecord = {
+      userId: 'user1',
       sessionId: 'tab_user1_second_window',
       joinedAt: now + 600,
       lastSeen: now + 600,
     }
     const multiTabSessions = [session1, sessionSameUserTab2]
-    const validMultiTab = filterValidActiveSessions(multiTabSessions, STALE_SESSION_TIMEOUT_MS, now + 600)
-    assert.equal(validMultiTab.length, 2, 'Same user with 2 tabs properly tracked as 2 active sessions')
+    assert.equal(multiTabSessions.length, 2, 'Same user with 2 tabs properly tracked as 2 active sessions')
 
-    // 4. Stale session cleanup (>3 minutes) -> Downgrade back to solo
-    const futureTime = now + 4 * 60 * 1000 // 4 minutes later
-    session1.lastSeen = futureTime
-    validSessions = filterValidActiveSessions(activeSessions, STALE_SESSION_TIMEOUT_MS, futureTime)
-    assert.equal(validSessions.length, 1, 'Stale session (>3m) automatically purged')
-    assert.equal(validSessions[0].sessionId, 'tab_user1_aaa')
-    isLazyCollabActive = validSessions.length >= 2
-    assert.equal(isLazyCollabActive, false, 'RTDB should downgrade to dormant solo mode when peer departs')
+    // 4. The server's disconnect event removes only the departed connection.
+    activeSessions.splice(activeSessions.indexOf(session2), 1)
+    assert.equal(activeSessions.length, 1, 'Server disconnect removal leaves the surviving peer')
+    isLazyCollabActive = activeSessions.length >= 2
+    assert.equal(isLazyCollabActive, false, 'Room downgrades when the server removes the peer')
 
-    console.log('   ✓ RTDB stays 100% dormant during solo sessions (0 RTDB connections, 0 bandwidth)')
+    console.log('   ✓ Solo uses a lightweight RTDB lobby connection, not Firestore polling')
     console.log('   ✓ Dynamically upgrades to RTDB when 2+ sessions detected (including multi-window)')
-    console.log('   ✓ Stale session filter (>3min) purges dead tabs and cleanly downgrades to solo mode')
+    console.log('   ✓ Server disconnect removal cleanly downgrades to solo mode')
     passedCount++
   }
 
@@ -716,8 +715,127 @@ async function runAllEdgeCaseTests() {
     passedCount++
   }
 
+  // ----------------------------------------------------
+  // EDGE CASE 16: Undo of non-geometric properties and removed bindings
+  // ----------------------------------------------------
+  console.log('\n▶ Test 16: Complete Undo/Revert Property Detection')
+  {
+    const before = {
+      id: 'architecture-arrow',
+      type: 'arrow',
+      x: 10,
+      y: 20,
+      width: 200,
+      height: 80,
+      points: [
+        [0, 0],
+        [200, 80],
+      ],
+      text: 'routes requests',
+      angle: 0.5,
+      link: 'https://example.test/route',
+      boundElements: [{ id: 'label', type: 'text' }],
+      version: 9,
+      versionNonce: 55,
+    }
+    const reverted = {
+      ...before,
+      points: [
+        [0, 0],
+        [150, 40],
+      ],
+      text: 'routes events',
+      angle: 0,
+      link: undefined,
+      boundElements: [],
+      version: 8,
+      versionNonce: 44,
+    }
+
+    assert.equal(
+      haveElementPropertiesChanged(before, reverted),
+      true,
+      'Undoing text, points, rotation, bindings, or a removed link must be broadcast',
+    )
+
+    const patch = createDeltaPatch(reverted, before)
+    assert.equal(patch.link, null, 'A removed optional property must clear the peer value')
+    assert.deepEqual(
+      patch.points,
+      [
+        [0, 0],
+        [150, 40],
+      ],
+      'Arrow bend changes must survive delta creation',
+    )
+    assert.equal(patch.text, 'routes events', 'Text reversions must survive delta creation')
+    assert.equal(patch.angle, 0, 'Rotation reversions must survive delta creation')
+
+    const reconstructed = applyDeltaPatch(before, patch)
+    assert.equal(reconstructed.link, null, 'Peer link must be cleared rather than retaining stale data')
+    assert.deepEqual(reconstructed.boundElements, [], 'Peer bindings must be removed')
+    console.log('   ✓ Undo/revert detects labels, arrows, rotation, bindings, and removed properties')
+    passedCount++
+  }
+
+  // ----------------------------------------------------
+  // EDGE CASE 17: Crash recovery compaction preserves full elements
+  // ----------------------------------------------------
+  console.log('\n▶ Test 17: RTDB Delta Compaction After Abrupt Exit')
+  {
+    const base = [
+      {
+        id: 'database',
+        type: 'rectangle',
+        x: 0,
+        y: 0,
+        width: 160,
+        height: 80,
+        strokeColor: '#111827',
+        backgroundColor: '#dbeafe',
+        version: 4,
+        versionNonce: 100,
+      },
+    ]
+    const records = [
+      {
+        id: 'database',
+        version: 5,
+        versionNonce: 200,
+        data: JSON.stringify({ id: 'database', type: 'rectangle', x: 480, version: 5, versionNonce: 200 }),
+      },
+      {
+        id: 'queue',
+        version: 1,
+        versionNonce: 300,
+        data: JSON.stringify({
+          id: 'queue',
+          type: 'rectangle',
+          x: 700,
+          y: 10,
+          width: 160,
+          height: 80,
+          version: 1,
+          versionNonce: 300,
+        }),
+      },
+    ]
+
+    const compacted = mergeDeltaRecordsOntoBase(base, records)
+    const database = compacted.find((element) => element.id === 'database')!
+    assert.equal(database.x, 480, 'A newer delta must update the changed property')
+    assert.equal(database.strokeColor, '#111827', 'A partial delta must retain base styling')
+    assert.equal(database.backgroundColor, '#dbeafe', 'A partial delta must retain base fills')
+    assert.ok(
+      compacted.some((element) => element.id === 'queue'),
+      'A complete new RTDB element must survive compaction',
+    )
+    console.log('   ✓ Crash-recovery merge keeps base properties and accepts complete new elements')
+    passedCount++
+  }
+
   console.log('\n====================================================')
-  console.log(`🎉 ALL ${passedCount}/15 COLLABORATION EDGE CASES VERIFIED!`)
+  console.log(`🎉 ALL ${passedCount}/17 COLLABORATION EDGE CASES VERIFIED!`)
   console.log('====================================================\n')
 }
 

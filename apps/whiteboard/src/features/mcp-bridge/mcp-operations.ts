@@ -1,13 +1,7 @@
 import type { BoardShareConfig } from '../sharing/sharing-service'
 
 export type ArchitectureTemplateType =
-  | 'microservice'
-  | 'database_cluster'
-  | 'api_gateway'
-  | 'queue'
-  | 'client_frontend'
-  | 'auth_service'
-  | 'cloud_storage'
+  'microservice' | 'database_cluster' | 'api_gateway' | 'queue' | 'client_frontend' | 'auth_service' | 'cloud_storage'
 
 export interface AutoLayoutOptions {
   layout: 'horizontal' | 'vertical' | 'grid'
@@ -242,10 +236,7 @@ export function generateArchitecturalTemplate(
   }
 }
 
-export function computeAutoLayout(
-  allElements: any[],
-  options: AutoLayoutOptions,
-): any[] {
+export function computeAutoLayout(allElements: any[], options: AutoLayoutOptions): any[] {
   const targetIds = options.ids && options.ids.length > 0 ? new Set(options.ids) : null
   const nodes = allElements.filter((e) => !e.isDeleted && e.type !== 'arrow' && (!targetIds || targetIds.has(e.id)))
   if (nodes.length === 0) return allElements

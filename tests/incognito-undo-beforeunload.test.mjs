@@ -4,6 +4,11 @@ import assert from 'node:assert'
 const BASE_URL = 'http://localhost:5173'
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+const within = (promise, label, timeoutMs = 15_000) =>
+  Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out`)), timeoutMs)),
+  ])
 
 async function runTest() {
   console.log('======================================================================')
@@ -27,6 +32,8 @@ async function runTest() {
     console.log('▶ Step 1: Opening board as Host (Window 1)...')
     const page1 = await browser.newPage()
     await page1.setViewport({ width: 1440, height: 900 })
+    page1.setDefaultTimeout(15_000)
+    page1.setDefaultNavigationTimeout(20_000)
     await page1.goto(BASE_URL, { waitUntil: 'domcontentloaded' })
 
     await page1.evaluate(async (id) => {
@@ -65,15 +72,18 @@ async function runTest() {
     console.log('   ✓ Window 1 loaded board successfully')
 
     // Share board as anyone_with_link + editor
-    await page1.evaluate(async (id) => {
-      const { sharingService } = await import('/src/features/sharing/sharing-service.ts')
-      const config = await sharingService.getShareConfig(id)
-      await sharingService.saveShareConfig({
-        ...config,
-        generalAccess: 'anyone_with_link',
-        generalRole: 'editor',
-      })
-    }, boardId)
+    await within(
+      page1.evaluate(async (id) => {
+        const { sharingService } = await import('/src/features/sharing/sharing-service.ts')
+        const config = await sharingService.getShareConfig(id)
+        await sharingService.saveShareConfig({
+          ...config,
+          generalAccess: 'anyone_with_link',
+          generalRole: 'editor',
+        })
+      }, boardId),
+      'Share configuration write',
+    )
     console.log('   ✓ Board shared as anyone_with_link + editor')
 
     // -------------------------------------------------------------
@@ -83,6 +93,8 @@ async function runTest() {
     const incognitoContext = await browser.createBrowserContext()
     const page2 = await incognitoContext.newPage()
     await page2.setViewport({ width: 1440, height: 900 })
+    page2.setDefaultTimeout(15_000)
+    page2.setDefaultNavigationTimeout(20_000)
 
     let dialogAppeared = false
     page2.on('dialog', async (dialog) => {

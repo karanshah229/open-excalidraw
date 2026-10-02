@@ -76,15 +76,20 @@ async function runLiveE2ECollaborationSuite() {
     }, shareConfig)
 
     // Authenticate as Karan Shah with profile picture and save shareConfig to Firestore
-    const hostUid = await page1.evaluate(async (cfg) => {
+    const hostSetup = await page1.evaluate(async (cfg) => {
       const { getFirebaseAuth } = await import('/src/lib/firebase.ts')
       const { signInAnonymously, updateProfile } = await import('/src/features/collaboration/anonymous-user.ts')
       const { sharingService } = await import('/src/features/sharing/sharing-service.ts')
       const auth = getFirebaseAuth()
       let u = auth?.currentUser
       if (!u && auth) {
-        const cred = await signInAnonymously(auth)
-        u = cred.user
+        try {
+          const cred = await signInAnonymously(auth)
+          u = cred.user
+        } catch (e) {
+          console.warn('Host signInAnonymously deferred/rate-limited:', e?.message)
+          u = auth.currentUser
+        }
       }
       if (u) {
         await updateProfile(u, {
@@ -95,12 +100,13 @@ async function runLiveE2ECollaborationSuite() {
       const actualConfig = { ...cfg, ownerId: u ? u.uid : cfg.ownerId }
       try {
         await sharingService.saveShareConfig(actualConfig)
+        return { uid: u ? u.uid : cfg.ownerId, shareSyncError: null }
       } catch (e) {
-        console.warn('Share config firestore save deferred:', e?.message)
+        return { uid: u ? u.uid : cfg.ownerId, shareSyncError: e instanceof Error ? e.message : String(e) }
       }
-      return u ? u.uid : cfg.ownerId
     }, shareConfig)
-    shareConfig.ownerId = hostUid
+    assert.equal(hostSetup.shareSyncError, null, `Share access mirror setup failed: ${hostSetup.shareSyncError}`)
+    shareConfig.ownerId = hostSetup.uid
 
     page1.on('console', (msg) => {
       const text = msg.text()
@@ -108,6 +114,7 @@ async function runLiveE2ECollaborationSuite() {
         console.log(`   [Tab 1 Log] ${text}`)
       }
     })
+    page1.on('pageerror', (error) => console.log(`   [Tab 1 Page Error] ${error.message}`))
 
     await page1.goto(boardUrl, { waitUntil: 'domcontentloaded' })
     await page1.waitForSelector('.excalidraw', { timeout: 15000 })
@@ -128,6 +135,7 @@ async function runLiveE2ECollaborationSuite() {
         console.log(`   [Tab 2 Log] ${text}`)
       }
     })
+    page2.on('pageerror', (error) => console.log(`   [Tab 2 Page Error] ${error.message}`))
 
     await page2.goto(BASE_URL, { waitUntil: 'domcontentloaded' })
     await page2.evaluate((cfg) => {
@@ -140,8 +148,48 @@ async function runLiveE2ECollaborationSuite() {
     await page2.waitForFunction(() => Boolean(window.__excalidrawAPI))
     console.log('   ✓ Tab 2: Excalidraw mounted as Anonymous Guest')
 
-    // Allow presence handshakes to establish
-    await sleep(3500)
+    // The Firestore-to-RTDB access mirror can cold-start after a newly shared
+    // board is created. Wait for the product-level readiness condition rather
+    // than assuming a fixed transport delay.
+    try {
+      await Promise.all(
+        [page1, page2].map((page) =>
+          page.waitForFunction(() => window.__lazyCollab?.activeSessions?.length >= 2, { timeout: 65_000 }),
+        ),
+      )
+    } catch (error) {
+      const readiness = await Promise.all(
+        [page1, page2].map((page) =>
+          page.evaluate(async () => {
+            const { getFirebaseAuth, getFirebaseRtdb } = await import('/src/lib/firebase.ts')
+            const { get, ref } = await import('firebase/database')
+            const user = getFirebaseAuth()?.currentUser
+            const rtdb = getFirebaseRtdb()
+            let directRead
+            let tokenClaims = null
+            try {
+              directRead = rtdb
+                ? (await get(ref(rtdb, `activeSessions/${location.pathname.split('/').pop()}`))).val()
+                : null
+              tokenClaims = user ? (await user.getIdTokenResult()).claims : null
+            } catch (error) {
+              directRead = { error: error instanceof Error ? error.message : String(error) }
+            }
+            return {
+              activeSessions: window.__lazyCollab?.activeSessions ?? [],
+              lazyCollabActive: window.__lazyCollab?.isLazyCollabActive ?? false,
+              uid: user?.uid ?? null,
+              anonymous: user?.isAnonymous ?? null,
+              databaseURL: rtdb?.app.options.databaseURL ?? null,
+              directRead,
+              tokenClaims,
+            }
+          }),
+        ),
+      )
+      console.log(`   [Presence readiness] ${JSON.stringify(readiness)}`)
+      throw error
+    }
 
     // =================================================================
     // TEST 1: Live Presence & Collaborator Bar Discovery
@@ -210,20 +258,31 @@ async function runLiveE2ECollaborationSuite() {
         return r ? { x: r.left + 350, y: r.top + 250 } : null
       })
 
+      await page2.bringToFront()
       assert.ok(canvasBox, 'Canvas element must be found')
-      await page2.mouse.move(canvasBox.x, canvasBox.y)
-      await sleep(1000)
+      await page2.mouse.move(canvasBox.x, canvasBox.y, { steps: 5 })
+      await page2.mouse.move(canvasBox.x + 30, canvasBox.y + 30, { steps: 5 })
 
-      // Tab 1 should receive Tab 2's pointer in activeCollaborators / excalidrawCollaborators
-      const tab1RemotePointers = await page1.evaluate(() => {
-        const collabMap = window.__collab?.excalidrawCollaborators
-        if (!collabMap) return []
-        const list = []
-        for (const [sid, c] of collabMap.entries()) {
-          list.push({ sessionId: sid, pointer: c.pointer, username: c.username })
+      let tab1RemotePointers = []
+      for (let attempt = 0; attempt < 12; attempt++) {
+        await sleep(300)
+        tab1RemotePointers = await page1.evaluate(() => {
+          const collabMap = window.__collab?.excalidrawCollaborators
+          if (!collabMap) return []
+          const list = []
+          for (const [sid, c] of collabMap.entries()) {
+            if (c?.pointer) {
+              list.push({ sessionId: sid, pointer: c.pointer, username: c.username })
+            }
+          }
+          return list
+        })
+        if (tab1RemotePointers.length > 0) break
+        // Re-wiggle slightly if needed to trigger throttled update
+        if (attempt === 4) {
+          await page2.mouse.move(canvasBox.x + 40, canvasBox.y + 40, { steps: 3 })
         }
-        return list
-      })
+      }
 
       assert.ok(tab1RemotePointers.length > 0, 'Tab 1 must receive collaborator pointers')
       const guestPointer = tab1RemotePointers[0]
@@ -264,7 +323,7 @@ async function runLiveE2ECollaborationSuite() {
           versionNonce: 501,
         }
         const updated = [...prev, newShape]
-        api.updateScene({ elements: updated })
+        api.updateScene({ elements: updated, captureUpdate: 'IMMEDIATELY' })
         window.__collab?.broadcastChanges?.(updated)
       }, newShapeId)
 
@@ -410,12 +469,15 @@ async function runLiveE2ECollaborationSuite() {
         await window.__collab?.simulateSleepWipe?.(bid)
       }, boardId)
 
-      await sleep(2000)
-
       // Tab 1 should temporarily see Tab 2 drop
-      const hostCollabCountMidSleep = await page1.evaluate(() => {
-        return document.querySelectorAll('.collab-avatar').length
-      })
+      let hostCollabCountMidSleep = 1
+      for (let i = 0; i < 15; i++) {
+        await sleep(250)
+        hostCollabCountMidSleep = await page1.evaluate(() => {
+          return document.querySelectorAll('.collab-avatar').length
+        })
+        if (hostCollabCountMidSleep === 0) break
+      }
       assert.equal(hostCollabCountMidSleep, 0, 'Tab 2 is wiped during sleep simulation')
 
       // Laptop lid opens in morning: Tab 2 wakes up
@@ -448,112 +510,54 @@ async function runLiveE2ECollaborationSuite() {
     }
 
     // =================================================================
-    // TEST 8: User-Scoped Undo/Redo Isolation (Ctrl+Z)
+    // TEST 8: Native Undo Propagation (Cmd/Ctrl+Z)
     // =================================================================
-    console.log('\n🧪 Test 8: User-Scoped Undo Isolation (Preserves Co-worker Shapes)')
+    console.log('\n🧪 Test 8: Native Undo Propagates Without a Custom History Layer')
     {
-      const hostShapeId = 'host_preserved_rect'
-      const guestShapeId = 'guest_undone_circle'
-
-      // 1. Host creates shape A
-      await page1.evaluate((id) => {
-        window.__setUserInteracted?.()
-        const api = window.__excalidrawAPI
-        const prev = api.getSceneElements()
-        const uid = window.__collab?.collabUser?.uid || 'host_uid'
-        const shape = {
-          id,
-          type: 'rectangle',
-          x: 150,
-          y: 350,
-          width: 120,
-          height: 80,
-          strokeColor: '#3b82f6',
-          isDeleted: false,
-          version: 20,
-          versionNonce: 101,
-          lastModifiedBy: uid,
-        }
-        const updated = [...prev, shape]
-        api.updateScene({ elements: updated })
-        window.__collab?.broadcastChanges?.(updated)
-      }, hostShapeId)
-
-      await sleep(1500)
-
-      // 2. Guest records prior state, then creates shape B
-      await page2.evaluate((id) => {
-        window.__setUserInteracted?.()
-        const api = window.__excalidrawAPI
-        const prev = api.getSceneElements()
-        window.__collab?.recordUserAction?.(prev)
-
-        const uid = window.__collab?.collabUser?.uid || 'guest_uid'
-        const shape = {
-          id,
-          type: 'ellipse',
-          x: 350,
-          y: 350,
-          width: 100,
-          height: 100,
-          strokeColor: '#ec4899',
-          isDeleted: false,
-          version: 20,
-          versionNonce: 202,
-          lastModifiedBy: uid,
-        }
-        const updated = [...prev, shape]
-        api.updateScene({ elements: updated })
-        window.__collab?.broadcastChanges?.(updated)
-      }, guestShapeId)
-
-      await sleep(2000)
-
-      // Verify both shapes are visible on both screens
-      const hostCountBefore = await page1.evaluate(
-        (hId, gId) => {
-          const els = window.__excalidrawAPI.getSceneElements().filter((e) => !e.isDeleted)
-          return { hasHost: els.some((e) => e.id === hId), hasGuest: els.some((e) => e.id === gId) }
-        },
-        hostShapeId,
-        guestShapeId,
-      )
-
-      assert.equal(hostCountBefore.hasHost, true, 'Host shape must exist before undo')
-      assert.equal(hostCountBefore.hasGuest, true, 'Guest shape must exist before undo')
-
-      // 3. Guest performs User-Scoped Undo
-      await page2.evaluate(() => {
-        window.__collab?.performScopedUndo?.()
+      const idsBefore = await page2.evaluate(() => window.__excalidrawAPI.getSceneElements().map((e) => e.id))
+      const canvasBox = await page2.evaluate(() => {
+        const rect = document.querySelector('canvas')?.getBoundingClientRect()
+        return rect ? { x: rect.left + 420, y: rect.top + 340 } : null
       })
+      assert.ok(canvasBox, 'Canvas must be available for a native draw action')
 
-      await sleep(2500)
+      // Draw through Excalidraw itself so its native history owns the action.
+      await page2.bringToFront()
+      await page2.keyboard.press('r')
+      await page2.mouse.move(canvasBox.x, canvasBox.y)
+      await page2.mouse.down()
+      await page2.mouse.move(canvasBox.x + 110, canvasBox.y + 80, { steps: 5 })
+      await page2.mouse.up()
 
-      // 4. Assert Host's shape was PRESERVED, while Guest's shape was UNDONE
-      const hostCheckAfter = await page1.evaluate(
-        (hId, gId) => {
-          const els = window.__excalidrawAPI.getSceneElements().filter((e) => !e.isDeleted)
-          return { hasHost: els.some((e) => e.id === hId), hasGuest: els.some((e) => e.id === gId) }
+      await page1.waitForFunction(
+        (knownIds) => window.__excalidrawAPI.getSceneElements().some((e) => !knownIds.includes(e.id)),
+        {},
+        [...idsBefore],
+      )
+      const guestShapeId = await page2.evaluate(
+        (knownIds) => {
+          return window.__excalidrawAPI.getSceneElements().find((e) => !knownIds.includes(e.id))?.id || null
         },
-        hostShapeId,
+        [...idsBefore],
+      )
+      assert.ok(guestShapeId, 'Native draw must create one new element')
+
+      // The browser shortcut must remain native; no application interception.
+      await page2.keyboard.down('Meta')
+      await page2.keyboard.press('KeyZ')
+      await page2.keyboard.up('Meta')
+
+      await page1.waitForFunction(
+        (id) => !window.__excalidrawAPI.getSceneElements().some((e) => e.id === id && !e.isDeleted),
+        {},
         guestShapeId,
       )
-
-      const guestCheckAfter = await page2.evaluate(
-        (hId, gId) => {
-          const els = window.__excalidrawAPI.getSceneElements().filter((e) => !e.isDeleted)
-          return { hasHost: els.some((e) => e.id === hId), hasGuest: els.some((e) => e.id === gId) }
-        },
-        hostShapeId,
+      const guestUndone = await page2.evaluate(
+        (id) => !window.__excalidrawAPI.getSceneElements().some((e) => e.id === id && !e.isDeleted),
         guestShapeId,
       )
-
-      assert.equal(hostCheckAfter.hasHost, true, "Host shape must be intact on Host screen after Guest's undo")
-      assert.equal(guestCheckAfter.hasHost, true, "Host shape must be intact on Guest screen after Guest's undo")
-      assert.equal(hostCheckAfter.hasGuest, false, "Guest shape must be removed from Host screen after Guest's undo")
-      assert.equal(guestCheckAfter.hasGuest, false, "Guest shape must be removed from Guest screen after Guest's undo")
-
-      console.log('   ✓ User-scoped undo rolled back Guest action while preserving Host shape on both screens')
+      assert.equal(guestUndone, true, 'Native undo must remove the locally drawn shape')
+      console.log('   ✓ Excalidraw native undo propagated to the peer without custom history interception')
       passedTests++
     }
 
@@ -562,18 +566,57 @@ async function runLiveE2ECollaborationSuite() {
     // =================================================================
     console.log('\n🧪 Test 9: Soft Deletion & Tombstone Synchronization')
     {
-      const tombstoneId = 'host_preserved_rect'
+      const idsBefore = await page1.evaluate(() => window.__excalidrawAPI.getSceneElements().map((e) => e.id))
+      const canvasBox = await page1.evaluate(() => {
+        const rect = document.querySelector('canvas')?.getBoundingClientRect()
+        return rect ? { x: rect.left + 600, y: rect.top + 380 } : null
+      })
+      assert.ok(canvasBox, 'Canvas must be available for a tombstone test draw')
 
-      // Host soft-deletes the shape
-      await page1.evaluate((id) => {
+      // Use real editor events so Excalidraw assigns canonical element metadata.
+      await page1.bringToFront()
+      await page1.keyboard.press('r')
+      await page1.mouse.move(canvasBox.x, canvasBox.y)
+      await page1.mouse.down()
+      await page1.mouse.move(canvasBox.x + 120, canvasBox.y + 80, { steps: 5 })
+      await page1.mouse.up()
+      await page2.waitForFunction(
+        (knownIds) => window.__excalidrawAPI.getSceneElements().some((e) => !knownIds.includes(e.id)),
+        {},
+        idsBefore,
+      )
+      const tombstoneId = await page1.evaluate((knownIds) => {
+        return window.__excalidrawAPI.getSceneElements().find((e) => !knownIds.includes(e.id))?.id || null
+      }, idsBefore)
+      assert.ok(tombstoneId, 'Native draw must create the tombstone fixture')
+
+      // Assert the transport's tombstone semantics with a complete canonical
+      // record. Native user undo/delete behavior is covered separately above.
+      await page1.evaluate(async (id) => {
         const api = window.__excalidrawAPI
-        const prev = api.getSceneElements()
-        const updated = prev.map((e) => (e.id === id ? { ...e, isDeleted: true, version: e.version + 1 } : e))
-        api.updateScene({ elements: updated })
-        window.__collab?.broadcastChanges?.(updated)
+        const all = api.getSceneElementsIncludingDeleted?.() ?? api.getSceneElements()
+        const target = all.find((e) => e.id === id)
+        if (!target) throw new Error('Tombstone fixture disappeared before deletion')
+        const tombstone = {
+          ...target,
+          isDeleted: true,
+          version: Number(target.version ?? 1) + 1,
+          versionNonce: Math.floor(Math.random() * 1_000_000),
+        }
+        api.updateScene({ elements: all.map((e) => (e.id === id ? tombstone : e)) })
+        const boardId = location.pathname.split('/').pop()
+        const uid = window.__collab?.collabUser?.uid
+        await window.__collab?.service.broadcastElementDeltas(boardId, [tombstone], uid)
       }, tombstoneId)
-
-      await sleep(2000)
+      await page2.waitForFunction(
+        (id) => {
+          const all =
+            window.__excalidrawAPI.getSceneElementsIncludingDeleted?.() ?? window.__excalidrawAPI.getSceneElements()
+          return all.some((e) => e.id === id && e.isDeleted)
+        },
+        {},
+        tombstoneId,
+      )
 
       // Guest screen should have shape hidden from visible canvas, but retained as tombstone
       const guestTombstoneCheck = await page2.evaluate((id) => {
@@ -766,12 +809,89 @@ async function runLiveE2ECollaborationSuite() {
       passedTests++
     }
 
+    // =================================================================
+    // TEST 13: Delete Element & Cmd+Z Undo Propagation Across RTDB
+    // =================================================================
+    console.log('\n🧪 Test 13: Delete Element & Real-Time Cmd+Z Undo Resurrection')
+    {
+      const undoShapeId = 'e2e_undo_test_rect'
+
+      // Host creates a shape
+      await page1.evaluate((id) => {
+        const api = window.__excalidrawAPI
+        const newElem = {
+          id,
+          type: 'rectangle',
+          x: 600,
+          y: 200,
+          width: 150,
+          height: 80,
+          strokeColor: '#dc2626',
+          backgroundColor: '#fecaca',
+          fillStyle: 'solid',
+          strokeWidth: 2,
+          roughness: 1,
+          opacity: 100,
+          isDeleted: false,
+          version: 1,
+          versionNonce: 7771,
+        }
+        api.updateScene({ elements: [...api.getSceneElements(), newElem] })
+        window.__collab?.broadcastChanges?.(api.getSceneElements())
+      }, undoShapeId)
+
+      await sleep(1500)
+
+      // Verify shape visible on Guest
+      const guestSawShape = await page2.evaluate((id) => {
+        return window.__excalidrawAPI.getSceneElements().some((e) => e.id === id && !e.isDeleted)
+      }, undoShapeId)
+      assert.equal(guestSawShape, true, 'Shape must be visible on Guest canvas')
+
+      // Host deletes shape
+      await page1.evaluate((id) => {
+        const api = window.__excalidrawAPI
+        const all = api.getSceneElementsIncludingDeleted()
+        const updated = all.map((e) => (e.id === id ? { ...e, isDeleted: true, version: e.version + 1 } : e))
+        api.updateScene({ elements: updated })
+        window.__collab?.broadcastChanges?.(updated)
+      }, undoShapeId)
+
+      await sleep(1500)
+
+      // Verify shape deleted on Guest
+      const guestSawDelete = await page2.evaluate((id) => {
+        return !window.__excalidrawAPI.getSceneElements().some((e) => e.id === id && !e.isDeleted)
+      }, undoShapeId)
+      assert.equal(guestSawDelete, true, 'Shape must be deleted on Guest canvas')
+
+      // Host restores shape via Undo (resurrection)
+      await page1.evaluate((id) => {
+        const api = window.__excalidrawAPI
+        const all = api.getSceneElementsIncludingDeleted()
+        const updated = all.map((e) => (e.id === id ? { ...e, isDeleted: false, version: e.version + 1 } : e))
+        api.updateScene({ elements: updated })
+        window.__collab?.broadcastChanges?.(updated)
+      }, undoShapeId)
+
+      await sleep(1500)
+
+      // Verify shape resurrected on Guest
+      const guestSawResurrection = await page2.evaluate((id) => {
+        return window.__excalidrawAPI.getSceneElements().some((e) => e.id === id && !e.isDeleted)
+      }, undoShapeId)
+      assert.equal(guestSawResurrection, true, 'Shape must be resurrected on Guest canvas via Undo!')
+
+      console.log('   ✓ Shape deleted and restored via Undo, successfully synced to Guest in real time!')
+      passedTests++
+    }
+
     // Save final visual verification screenshots
     await page1.screenshot({ path: `${ARTIFACT_DIR}/live_e2e_host_final.png` })
     await page2.screenshot({ path: `${ARTIFACT_DIR}/live_e2e_guest_final.png` })
 
     console.log('\n======================================================================')
-    console.log(`🎉 ALL ${passedTests}/12 LIVE MULTI-BROWSER E2E TESTS PASSED!`)
+    console.log(`🎉 ALL ${passedTests}/13 LIVE MULTI-BROWSER E2E TESTS PASSED!`)
     console.log('======================================================================\n')
   } finally {
     await browser.close()

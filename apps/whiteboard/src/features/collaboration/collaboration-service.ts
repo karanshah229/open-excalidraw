@@ -15,13 +15,18 @@ import { ref as storageRef, uploadBytes, getDownloadURL, type FirebaseStorage } 
 import type { CollaboratorPresence, CollabUser, ElementDeltaRecord } from './types'
 
 export const MAX_ELEMENT_PAYLOAD_BYTES = 262144 // 256KB
-export const STALE_PRESENCE_TIMEOUT_MS = 60000 // 60 seconds (prevents presence flapping when tabs are in background)
 
 export function cleanPayload<T extends Record<string, any>>(obj: T): T {
   const clean: any = {}
   for (const [key, value] of Object.entries(obj)) {
     if (value !== undefined) {
-      clean[key] = value
+      if (typeof value === 'number') {
+        if (Number.isFinite(value)) clean[key] = value
+      } else if (value && typeof value === 'object' && !Array.isArray(value)) {
+        clean[key] = cleanPayload(value)
+      } else {
+        clean[key] = value
+      }
     }
   }
   return clean
@@ -31,7 +36,6 @@ export class CollaborationService {
   private rtdb: Database | undefined
   private storage: FirebaseStorage | undefined
   private activeSessionId: string | null = null
-  private heartbeatInterval: number | null = null
   private currentCursor: { x: number; y: number } | null = null
   private currentSelectedElementIds: string[] = []
   private isConnected: boolean = false
@@ -152,55 +156,40 @@ export class CollaborationService {
       }
     }
 
+    const handleUnload = () => {
+      if (this.rtdb && this.activeSessionId) {
+        try {
+          void remove(presenceRef)
+        } catch {
+          // ignore
+        }
+      }
+    }
+
     if (typeof document !== 'undefined') {
       document.addEventListener('visibilitychange', handleWake)
     }
     if (typeof window !== 'undefined') {
       window.addEventListener('online', handleOnline)
-    }
-
-    // 3. Heartbeat every 10 seconds: keeps presence fresh AND self-heals complete profile if wiped
-    if (this.heartbeatInterval && typeof window !== 'undefined') {
-      window.clearInterval(this.heartbeatInterval)
-    }
-    if (typeof window !== 'undefined') {
-      this.heartbeatInterval = window.setInterval(() => {
-        if (!this.rtdb || !this.activeSessionId || !this.isConnected) return
-        try {
-          void update(
-            presenceRef,
-            cleanPayload({
-              userId: user.uid,
-              sessionId: user.sessionId,
-              displayName: user.displayName,
-              color: user.color,
-              avatarUrl: user.avatarUrl,
-              isAnonymous: user.isAnonymous,
-              lastSeen: Date.now(),
-            }),
-          )
-        } catch {
-          // silent heartbeat ignore
-        }
-      }, 10000)
+      window.addEventListener('beforeunload', handleUnload)
+      window.addEventListener('pagehide', handleUnload)
     }
 
     // Return cleanup function
     return () => {
-      if (this.heartbeatInterval && typeof window !== 'undefined') {
-        window.clearInterval(this.heartbeatInterval)
-        this.heartbeatInterval = null
-      }
       unsubConnected()
       if (typeof document !== 'undefined') {
         document.removeEventListener('visibilitychange', handleWake)
       }
       if (typeof window !== 'undefined') {
         window.removeEventListener('online', handleOnline)
+        window.removeEventListener('beforeunload', handleUnload)
+        window.removeEventListener('pagehide', handleUnload)
       }
       if (this.rtdb) {
         try {
-          void onDisconnect(presenceRef).cancel()
+          // Trigger immediate client removal without cancelling server-side onDisconnect
+          // so if network is lost during unmount, RTDB server still purges the presence
           void remove(presenceRef)
         } catch {
           // ignore cleanup error on unmount
@@ -220,7 +209,9 @@ export class CollaborationService {
     cursor: { x: number; y: number } | null,
     selectedElementIds: string[] = [],
   ): Promise<void> {
-    this.currentCursor = cursor
+    const validCursor =
+      cursor && Number.isFinite(cursor.x) && Number.isFinite(cursor.y) ? { x: cursor.x, y: cursor.y } : null
+    this.currentCursor = validCursor
     this.currentSelectedElementIds = selectedElementIds
     if (!this.rtdb) return
     try {
@@ -228,13 +219,13 @@ export class CollaborationService {
       await update(
         presenceRef,
         cleanPayload({
-          cursor,
+          cursor: validCursor,
           selectedElementIds,
           lastSeen: Date.now(),
         }),
       )
-    } catch {
-      // silent ignore when offline
+    } catch (err: any) {
+      console.warn('[Collab] updatePresence error:', err?.message)
     }
   }
 
@@ -257,8 +248,8 @@ export class CollaborationService {
   }
 
   /**
-   * Subscribes to live presence in the room. Filters out stale cursors, corrupt nodes, and own session.
-   * Periodically prunes expired collaborators automatically.
+   * Subscribes to live presence in the room. RTDB disconnect cleanup—not a
+   * client-clock timeout—is authoritative for whether an idle peer is live.
    */
   subscribeToPresence(
     boardId: string,
@@ -271,17 +262,13 @@ export class CollaborationService {
     let latestRawPresence: Record<string, CollaboratorPresence> = {}
 
     const filterAndEmitActive = () => {
-      const now = Date.now()
       const active: CollaboratorPresence[] = []
 
       for (const [key, presence] of Object.entries(latestRawPresence)) {
         if (!presence || key === currentSessionId) continue
         // Validate presence integrity
         if (!presence.displayName || !presence.color) continue
-        // Filter out ghost entries that missed heartbeats
-        if (now - presence.lastSeen < STALE_PRESENCE_TIMEOUT_MS) {
-          active.push(presence)
-        }
+        active.push(presence)
       }
 
       callback(active)
@@ -306,14 +293,8 @@ export class CollaborationService {
         },
       )
 
-      // Periodic check every 5s so disconnected collaborators disappear without needing incoming DB events
-      const pruneInterval = typeof window !== 'undefined' ? window.setInterval(filterAndEmitActive, 5000) : null
-
       return () => {
         unsubValue()
-        if (pruneInterval !== null && typeof window !== 'undefined') {
-          window.clearInterval(pruneInterval)
-        }
       }
     } catch {
       return () => {}
@@ -325,8 +306,12 @@ export class CollaborationService {
   // ==========================================
 
   /**
-   * Broadcasts element mutations as deltas or delta patches to RTDB.
-   * Validates size limit to prevent memory exhaustion / vandalism.
+   * Broadcasts a complete canonical element record to RTDB.
+   *
+   * RTDB retains only the latest value at an element path. Persisting a patch
+   * there makes crash recovery impossible once the original full element has
+   * been overwritten. The wire record is deliberately complete; versions and
+   * nonces still provide LWW conflict resolution.
    */
   async broadcastElementDeltas(
     boardId: string,
@@ -342,9 +327,8 @@ export class CollaborationService {
     for (const elem of elements) {
       if (!elem || !elem.id) continue
 
-      const prevElem = previousElementsMap?.get(elem.id)
-      const patch = createDeltaPatch(elem, prevElem)
-      const serialized = JSON.stringify(patch)
+      const canonicalElement = cleanPayload({ ...elem, lastModifiedBy: authorUid })
+      const serialized = JSON.stringify(canonicalElement)
 
       if (serialized.length > MAX_ELEMENT_PAYLOAD_BYTES) {
         console.warn(`[Collab] Element ${elem.id} exceeds 256KB payload limit. Skipping broadcast.`)
@@ -491,11 +475,47 @@ export function createDeltaPatch(currentElement: any, previousElement?: any): an
     }
     const prevValue = previousElement[key]
     if (JSON.stringify(value) !== JSON.stringify(prevValue)) {
-      patch[key] = value
+      // JSON serialization drops undefined, which would turn a removal into a
+      // no-op on peers. Use null as the explicit wire representation instead.
+      patch[key] = value === undefined ? null : value
     }
   }
 
+  // A delta must represent removals too. Without this, removing a link,
+  // binding, frame, or optional style leaves the old value on every peer.
+  for (const key of Object.keys(previousElement)) {
+    if (
+      key === 'id' ||
+      key === 'type' ||
+      key === 'version' ||
+      key === 'versionNonce' ||
+      key === 'lastModifiedBy' ||
+      Object.prototype.hasOwnProperty.call(currentElement, key)
+    ) {
+      continue
+    }
+    patch[key] = null
+  }
+
   return patch
+}
+
+/**
+ * Compares all persisted element properties other than replication metadata.
+ * Excalidraw undo may restore an older version while changing text, points,
+ * bindings, or styles, so geometry-only comparisons lose valid user edits.
+ */
+export function haveElementPropertiesChanged(previousElement: any, currentElement: any): boolean {
+  if (!previousElement || !currentElement) return previousElement !== currentElement
+  const ignored = new Set(['version', 'versionNonce', 'lastModifiedBy', 'updated'])
+  const keys = new Set([...Object.keys(previousElement), ...Object.keys(currentElement)])
+  for (const key of keys) {
+    if (ignored.has(key)) continue
+    const previousValue = previousElement[key]
+    const currentValue = currentElement[key]
+    if (JSON.stringify(previousValue) !== JSON.stringify(currentValue)) return true
+  }
+  return false
 }
 
 /**

@@ -73,7 +73,9 @@ async function runMcpToolsSuite() {
   // g2: col 1, row 0 -> (200 + 30, 0) = (230, 0)
   // g3: col 0, row 1 -> (0, 100 + 30) = (0, 130)
   if (g1.x !== 0 || g1.y !== 0 || g2.x !== 230 || g2.y !== 0 || g3.x !== 0 || g3.y !== 130) {
-    throw new Error(`Grid layout coordinates mismatch: g1=(${g1.x},${g1.y}), g2=(${g2.x},${g2.y}), g3=(${g3.x},${g3.y})`)
+    throw new Error(
+      `Grid layout coordinates mismatch: g1=(${g1.x},${g1.y}), g2=(${g2.x},${g2.y}), g3=(${g3.x},${g3.y})`,
+    )
   }
   console.log('   ✓ Grid layout arranged shapes into 2-column matrix')
 

@@ -2,36 +2,48 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function isOwner(data) { return signedIn() && data.ownerId == request.auth.uid; }
+    function hasInvitedEmail(data) {
+      return signedIn() && request.auth.token.email != null
+        && data.invitedEmails != null && request.auth.token.email in data.invitedEmails;
+    }
+    function isEditor(data) {
+      return isOwner(data)
+        || (data.generalAccess == 'anyone_with_link' && data.generalRole == 'editor')
+        || (signedIn() && request.auth.token.email != null && data.collaborators != null
+          && data.collaborators[request.auth.token.email] != null
+          && data.collaborators[request.auth.token.email].role == 'editor');
+    }
+    function canRead(data) {
+      return data.generalAccess == 'anyone_with_link' || isOwner(data) || hasInvitedEmail(data);
+    }
+    function parentBoard(boardId) { return get(/databases/$(database)/documents/boardShares/$(boardId)).data; }
+
     match /users/{userId}/projects/{projectId} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
+      allow read, write: if signedIn() && request.auth.uid == userId;
 
       match /boards/{boardId} {
-        allow read, write: if request.auth != null && request.auth.uid == userId;
+        allow read, write: if signedIn() && request.auth.uid == userId;
       }
     }
 
-    match /boardShares/{boardId}/activeSessions/{sessionId} {
-      allow read, write, delete: if true;
-    }
-
     match /boardShares/{boardId} {
-      allow read: if resource.data.generalAccess == 'anyone_with_link'
-        || (request.auth != null && (
-             request.auth.uid == resource.data.ownerId ||
-             resource.data.ownerId == 'local-user' ||
-             (resource.data.invitedEmails != null && request.auth.token.email != null && request.auth.token.email in resource.data.invitedEmails)
-           ));
+      allow read: if canRead(resource.data);
+      allow create: if signedIn() && request.resource.data.ownerId == request.auth.uid;
+      allow update: if isOwner(resource.data)
+        || (isEditor(resource.data)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['scene', 'updatedAt', 'boardName']));
+      allow delete: if isOwner(resource.data);
 
-      allow create: if request.auth != null && (
-        request.resource.data.ownerId == request.auth.uid ||
-        request.resource.data.ownerId == 'local-user'
-      );
-
-      allow update: if (request.auth != null && (resource.data.ownerId == request.auth.uid || resource.data.ownerId == 'local-user'))
-        || (resource.data.generalAccess == 'anyone_with_link' && resource.data.generalRole == 'editor')
-        || (request.auth != null && resource.data.collaborators != null && request.auth.token.email != null && resource.data.collaborators[request.auth.token.email].role == 'editor');
-
-      allow delete: if request.auth != null && (resource.data.ownerId == request.auth.uid || resource.data.ownerId == 'local-user');
+      match /activeSessions/{sessionId} {
+        allow read: if canRead(parentBoard(boardId));
+        allow create, update, delete: if isEditor(parentBoard(boardId));
+      }
+      match /history/{revisionId} {
+        allow read: if canRead(parentBoard(boardId));
+        allow write: if false;
+      }
     }
   }
 }

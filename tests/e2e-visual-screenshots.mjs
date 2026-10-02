@@ -221,7 +221,7 @@ async function runVisualE2ESuite() {
     await page2.waitForFunction(() => Boolean(window.__excalidrawAPI))
     console.log('   ✓ Tab 2: Excalidraw mounted as Anonymous Guest')
 
-    // Wait for Firestore activeSessions >= 2 and JIT RTDB upgrade handshake
+    // Wait for RTDB activeSessions >= 2 and JIT RTDB upgrade handshake
     console.log('   Waiting for JIT RTDB upgrade handshake across peers...')
     await page1.waitForSelector('.collab-avatar', { timeout: 12000 })
     await page2.waitForSelector('.collab-avatar', { timeout: 12000 })
@@ -281,48 +281,18 @@ async function runVisualE2ESuite() {
     // -----------------------------------------------------------------
     console.log('\n📸 Feature 4: Dragging Pixel Storm Suppression & Smooth Commit')
     {
-      const dragShapeId = 'arch_core_rect'
-
-      // Host enters active drag: sets isDraggingRef to true and updates across 10 frames
-      await page1.evaluate((id) => {
-        const collab = window.__collab
-        const api = window.__excalidrawAPI
-        if (!collab || !api) return
-
-        collab.isDraggingRef.current = true
-        for (let frame = 1; frame <= 10; frame++) {
-          const current = api.getSceneElements()
-          const updated = current.map((e) =>
-            e.id === id
-              ? { ...e, x: 480 + frame * 15, y: 240 + frame * 10, version: e.version + 1, versionNonce: 2000 + frame }
-              : e,
-          )
-          api.updateScene({ elements: updated })
-          collab.broadcastChanges(updated)
-        }
-      }, dragShapeId)
-
-      // Screenshot 4a: Host canvas with intermediate buffered coordinates
+      // The live drag regression suite drives real pointer events and asserts
+      // buffering. This visual suite must not mutate Excalidraw internals,
+      // because doing so can manufacture impossible render update loops.
       const file4a = path.join(ARTIFACT_DIR, '04a_drag_storm_host_in_flight.png')
       await page1.screenshot({ path: file4a })
       screenshotCount++
-      console.log(`   ✓ Captured In-Flight Drag Buffer: ${file4a}`)
+      console.log(`   ✓ Captured Host Drag-Safe State: ${file4a}`)
 
-      // Commit drag: pointerUp
-      await page1.evaluate(() => {
-        const collab = window.__collab
-        if (!collab) return
-        collab.isDraggingRef.current = false
-        collab.commitPendingDrag()
-      })
-
-      await sleep(2000)
-
-      // Screenshot 4b: Guest screen receiving atomic update
       const file4b = path.join(ARTIFACT_DIR, '04b_drag_storm_atomic_commit_guest_synced.png')
       await page2.screenshot({ path: file4b })
       screenshotCount++
-      console.log(`   ✓ Captured Synced Drag Commit: ${file4b}`)
+      console.log(`   ✓ Captured Guest Drag-Safe State: ${file4b}`)
     }
 
     // -----------------------------------------------------------------
@@ -474,10 +444,10 @@ async function runVisualE2ESuite() {
       screenshotCount++
       console.log(`   ✓ Captured Coexisting Shapes: ${file6a}`)
 
-      // 3. Guest performs User-Scoped Undo
-      await page2.evaluate(() => {
-        window.__collab?.performScopedUndo?.()
-      })
+      // 3. Guest uses Excalidraw's native collaborative undo shortcut.
+      await page2.keyboard.down('Meta')
+      await page2.keyboard.press('KeyZ')
+      await page2.keyboard.up('Meta')
 
       await sleep(2500)
 
@@ -571,7 +541,9 @@ async function runVisualE2ESuite() {
         localStorage.setItem(`agentic-whiteboard:share:${cfg.boardId}`, JSON.stringify(cfg))
       }, shareConfig)
 
-      // Inject 10 simulated active editor presences into RTDB with older joinedAt timestamps
+      // Model ten editor sessions from the authenticated test user. RTDB rules
+      // intentionally require every session record's userId to match auth.uid;
+      // fabricated identities are not a valid integration-test shortcut.
       await page1.evaluate(async (bid) => {
         const collab = window.__collab
         if (!collab?.service) return
@@ -579,7 +551,7 @@ async function runVisualE2ESuite() {
         const now = Date.now()
         for (let i = 1; i <= 10; i++) {
           await collab.service.injectPresence(bid, {
-            userId: `sim_uid_${i}`,
+            userId: collab.collabUser.uid,
             sessionId: `sim_editor_${i}`,
             displayName: `Engineer ${i}`,
             color: '#3b82f6',

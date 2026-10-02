@@ -262,14 +262,47 @@ async function runAutoZoomCenterTest() {
     console.log('  ✅ Small diagram capped at zoom 1.0 and centered!\n')
 
     // -------------------------------------------------------------
-    // Test Case 3: Target Real-World Board (3638px wide)
+    // Test Case 3: Architecture-scale fixture. Keep it self-contained: a
+    // developer's historical board is neither a stable test dependency nor
+    // necessarily accessible under production sharing rules.
     // -------------------------------------------------------------
     console.log('▶ Test Case 3: Target Real-World Architecture Board (2140px wide)...')
     const targetViewportWidth = 1440
     const targetViewportHeight = 900
     await page.setViewport({ width: targetViewportWidth, height: targetViewportHeight })
 
-    const targetBoardUrl = `${BASE_URL}/boards/855c1bc5-62b7-4ee2-9f57-10b489a79be5`
+    const targetBoardId = `zoom-architecture-${Date.now().toString(36)}`
+    await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' })
+    await page.evaluate(async (id) => {
+      const { workspaceApi } = await import('/src/features/workspace/workspace-api.ts')
+      const project = await workspaceApi.createProject('Architecture Zoom Test')
+      const elements = Array.from({ length: 24 }, (_, index) => ({
+        id: `architecture-node-${index}`,
+        type: 'rectangle',
+        x: (index % 6) * 420,
+        y: Math.floor(index / 6) * 260,
+        width: 280,
+        height: 150,
+        angle: 0,
+        strokeColor: '#1e1e1e',
+        backgroundColor: '#dbeafe',
+        fillStyle: 'solid',
+        strokeWidth: 2,
+        roughness: 1,
+        opacity: 100,
+        isDeleted: false,
+        version: 1,
+        versionNonce: index + 1,
+      }))
+      await workspaceApi.saveBoard({
+        id,
+        projectId: project.id,
+        name: 'Architecture-scale Zoom Fixture',
+        scene: { elements, appState: { viewBackgroundColor: '#ffffff' } },
+      })
+    }, targetBoardId)
+
+    const targetBoardUrl = `${BASE_URL}/boards/${targetBoardId}`
     await page.goto(targetBoardUrl, { waitUntil: 'domcontentloaded' })
     await page.waitForFunction(
       () =>

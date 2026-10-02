@@ -36,11 +36,7 @@ const assertRevision = (expectedRevision?: number) => {
   return null
 }
 
-const dispatch = async (
-  operation: Record<string, unknown>,
-  expectedRevision?: number,
-  timeoutMs = 12_000,
-) => {
+const dispatch = async (operation: Record<string, unknown>, expectedRevision?: number, timeoutMs = 12_000) => {
   const conflict = assertRevision(expectedRevision)
   if (conflict) return conflict
   if (adapters.size === 0) {
@@ -205,7 +201,10 @@ mcp.registerTool(
   {
     description: 'Patch existing live-canvas elements by ID. IDs and element types cannot be changed.',
     inputSchema: {
-      patches: z.array(z.object({ id: z.string().min(1), changes: z.record(z.unknown()) })).min(1).describe('Array of patches with target element id and dictionary of changed properties.'),
+      patches: z
+        .array(z.object({ id: z.string().min(1), changes: z.record(z.unknown()) }))
+        .min(1)
+        .describe('Array of patches with target element id and dictionary of changed properties.'),
       expectedRevision: z.number().int().nonnegative().optional().describe('Optimistic concurrency revision check.'),
     },
   },
@@ -259,9 +258,13 @@ mcp.registerTool(
 mcp.registerTool(
   'zoom_to_content',
   {
-    description: 'Fit and center the canvas viewport to all content or to specific element IDs with responsive padding.',
+    description:
+      'Fit and center the canvas viewport to all content or to specific element IDs with responsive padding.',
     inputSchema: {
-      targetIds: z.array(z.string()).optional().describe('Optional list of element IDs to focus on. If omitted, fits all content.'),
+      targetIds: z
+        .array(z.string())
+        .optional()
+        .describe('Optional list of element IDs to focus on. If omitted, fits all content.'),
       animate: z.boolean().default(true).describe('Whether to smoothly animate the viewport transition.'),
     },
   },
@@ -273,8 +276,14 @@ mcp.registerTool(
   {
     description: 'Search canvas elements by text query, label, or element type without pulling the entire canvas JSON.',
     inputSchema: {
-      query: z.string().optional().describe('Text query to match against text elements, container labels, or element IDs.'),
-      type: z.string().optional().describe('Filter by Excalidraw element type (e.g. rectangle, ellipse, diamond, text, arrow, line).'),
+      query: z
+        .string()
+        .optional()
+        .describe('Text query to match against text elements, container labels, or element IDs.'),
+      type: z
+        .string()
+        .optional()
+        .describe('Filter by Excalidraw element type (e.g. rectangle, ellipse, diamond, text, arrow, line).'),
     },
   },
   async ({ query, type }) => dispatch({ type: 'find_elements', query, elementType: type }),
@@ -348,15 +357,17 @@ mcp.registerTool(
   {
     description: 'Insert a pre-built architectural pattern, service block, cloud icon, or template onto the canvas.',
     inputSchema: {
-      template: z.enum([
-        'microservice',
-        'database_cluster',
-        'api_gateway',
-        'queue',
-        'client_frontend',
-        'auth_service',
-        'cloud_storage',
-      ]).describe('The architectural pattern to insert.'),
+      template: z
+        .enum([
+          'microservice',
+          'database_cluster',
+          'api_gateway',
+          'queue',
+          'client_frontend',
+          'auth_service',
+          'cloud_storage',
+        ])
+        .describe('The architectural pattern to insert.'),
       x: z.number().default(200).describe('X coordinate on canvas.'),
       y: z.number().default(200).describe('Y coordinate on canvas.'),
       label: z.string().optional().describe('Custom text label for the inserted template.'),
@@ -370,10 +381,17 @@ mcp.registerTool(
 mcp.registerTool(
   'auto_layout',
   {
-    description: 'Automatically arrange elements into a clean, aligned layout (horizontal pipeline, vertical hierarchy, or grid) and update connector paths.',
+    description:
+      'Automatically arrange elements into a clean, aligned layout (horizontal pipeline, vertical hierarchy, or grid) and update connector paths.',
     inputSchema: {
-      layout: z.enum(['horizontal', 'vertical', 'grid']).default('horizontal').describe('Layout orientation: horizontal (left-to-right), vertical (top-to-bottom), or grid.'),
-      ids: z.array(z.string()).optional().describe('Specific element IDs to layout. If omitted, layouts all non-arrow shapes.'),
+      layout: z
+        .enum(['horizontal', 'vertical', 'grid'])
+        .default('horizontal')
+        .describe('Layout orientation: horizontal (left-to-right), vertical (top-to-bottom), or grid.'),
+      ids: z
+        .array(z.string())
+        .optional()
+        .describe('Specific element IDs to layout. If omitted, layouts all non-arrow shapes.'),
       spacing: z.number().default(80).describe('Spacing gap between shapes in pixels.'),
       columns: z.number().default(3).describe('Number of columns when using grid layout.'),
       startX: z.number().optional().describe('Starting X position. Defaults to current leftmost element.'),
@@ -414,7 +432,10 @@ mcp.registerTool(
     description: 'Create a new board in the workspace and optionally navigate the browser to it.',
     inputSchema: {
       name: z.string().min(1).describe('Name for the new board.'),
-      projectId: z.string().optional().describe('Project ID to place the board in. Defaults to the active or default project.'),
+      projectId: z
+        .string()
+        .optional()
+        .describe('Project ID to place the board in. Defaults to the active or default project.'),
       openBoard: z.boolean().default(true).describe('Whether to immediately open the new board in the browser.'),
     },
   },
@@ -462,13 +483,20 @@ mcp.registerTool(
 mcp.registerTool(
   'share_board',
   {
-    description: "Update sharing settings for the board (e.g., set public link access to 'anyone_with_link' or invite collaborators by email).",
+    description:
+      "Update sharing settings for the board (e.g., set public link access to 'anyone_with_link' or invite collaborators by email).",
     inputSchema: {
       boardId: z.string().optional().describe('Board ID to update. Defaults to currently open board.'),
-      generalAccess: z.enum(['restricted', 'anyone_with_link']).optional().describe("Access level: 'restricted' or 'anyone_with_link'."),
+      generalAccess: z
+        .enum(['restricted', 'anyone_with_link'])
+        .optional()
+        .describe("Access level: 'restricted' or 'anyone_with_link'."),
       generalRole: z.enum(['viewer', 'editor']).optional().describe("Role for link visitors: 'viewer' or 'editor'."),
       inviteEmail: z.string().email().optional().describe('Email address to invite to this board.'),
-      inviteRole: z.enum(['viewer', 'editor']).default('editor').describe("Role to grant the invited email: 'viewer' or 'editor'."),
+      inviteRole: z
+        .enum(['viewer', 'editor'])
+        .default('editor')
+        .describe("Role to grant the invited email: 'viewer' or 'editor'."),
     },
   },
   async ({ boardId, generalAccess, generalRole, inviteEmail, inviteRole }) =>
@@ -540,7 +568,9 @@ socketServer.on('connection', (socket) => {
         selectionIds = Array.isArray(message.selectionIds) ? message.selectionIds : []
         revision += 1
         if (message.operationId) {
-          pending.get(message.operationId)?.resolve(message.result ?? { ok: true, operationId: message.operationId, ...summarize() })
+          pending
+            .get(message.operationId)
+            ?.resolve(message.result ?? { ok: true, operationId: message.operationId, ...summarize() })
           pending.delete(message.operationId)
         }
       } else if (message.type === 'operation_result' && message.operationId) {

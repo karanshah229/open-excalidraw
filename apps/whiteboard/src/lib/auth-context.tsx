@@ -2,6 +2,10 @@ import { createContext, useContext, useEffect, useState } from 'react'
 import { onAuthStateChanged, signInWithPopup, signOut, type User } from 'firebase/auth'
 import { getFirebaseAuth, googleProvider, isFirebaseConfigured } from './firebase'
 
+// Firebase normally delivers the initial auth state immediately. A deep link must
+// still be usable if browser storage or a network transition delays that callback.
+const INITIAL_AUTH_STATE_TIMEOUT_MS = 5_000
+
 type AuthContextValue = {
   user: User | null
   isLoading: boolean
@@ -24,14 +28,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setIsLoading(false)
       return
     }
-    return onAuthStateChanged(auth, (nextUser) => {
+    const settle = (nextUser: User | null) => {
       if (nextUser && !nextUser.isAnonymous) {
         setUser(nextUser)
       } else {
         setUser(null)
       }
       setIsLoading(false)
-    })
+    }
+
+    const unsubscribe = onAuthStateChanged(auth, settle)
+    // Do not hold a shared-board deep link hostage to an unavailable initial
+    // callback. Keep the listener alive: a late sign-in still updates the UI.
+    const timeout = window.setTimeout(() => setIsLoading(false), INITIAL_AUTH_STATE_TIMEOUT_MS)
+
+    return () => {
+      unsubscribe()
+      window.clearTimeout(timeout)
+    }
   }, [])
 
   const signInWithGoogle = async () => {

@@ -1,10 +1,16 @@
-import { collection, deleteDoc, doc, getDoc, onSnapshot, setDoc, updateDoc } from 'firebase/firestore'
-import { getFirestoreDb } from '../../lib/firebase'
+import { doc, getDoc, onSnapshot, setDoc, updateDoc } from 'firebase/firestore'
+import { onDisconnect, onValue, ref, remove, set } from 'firebase/database'
+import { getFunctions, httpsCallable } from 'firebase/functions'
+import {
+  getFirebaseApp,
+  getFirebaseAuth,
+  getFirebaseRtdb,
+  getFirestoreDb,
+  getSyncAccessFunctionRegion,
+} from '../../lib/firebase'
 import { firestoreValue, workspaceStore, workspaceValue } from '../workspace/workspace-api'
 import type { BoardScene } from '@agentic-whiteboard/storage'
 import type { ActiveSessionRecord } from '../collaboration/types'
-
-export const STALE_SESSION_TIMEOUT_MS = 45 * 1000 // 45 seconds (supported by 15s heartbeat)
 
 export type ShareAccessLevel = 'restricted' | 'anyone_with_link'
 export type ShareRole = 'viewer' | 'editor'
@@ -35,6 +41,15 @@ async function getDocWithTimeout<T>(docRef: any, timeoutMs = 3000): Promise<T> {
   return Promise.race([
     getDoc(docRef) as Promise<T>,
     new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Firestore getDoc timeout')), timeoutMs)),
+  ])
+}
+
+function withFirestoreWriteTimeout<T>(operation: Promise<T>, timeoutMs = 15_000): Promise<T> {
+  return Promise.race([
+    operation,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`Firestore write acknowledgement timed out after ${timeoutMs}ms`)), timeoutMs),
+    ),
   ])
 }
 
@@ -105,8 +120,14 @@ export const sharingService = {
       }
     }
 
+    // Legacy local workspaces used the placeholder owner `local-user`. A new
+    // share must be claimed by the signed-in Firebase identity before rules
+    // permit it; never persist that placeholder as a cloud owner.
+    const authenticatedOwnerId = getFirebaseAuth()?.currentUser?.uid
+    const ownerId = config.ownerId === 'local-user' && authenticatedOwnerId ? authenticatedOwnerId : config.ownerId
     const normalizedConfig: BoardShareConfig = {
       ...config,
+      ownerId,
       scene: resolvedScene,
       updatedAt: new Date().toISOString(),
       invitedEmails: Array.from(new Set(config.invitedEmails.map((e) => e.trim().toLowerCase()))),
@@ -115,7 +136,24 @@ export const sharingService = {
     const db = getFirestoreDb()
     if (db) {
       const ref = doc(db, 'boardShares', config.boardId)
-      await setDoc(ref, firestoreValue(normalizedConfig) as Record<string, unknown>, { merge: true })
+      await withFirestoreWriteTimeout(
+        setDoc(ref, firestoreValue(normalizedConfig) as Record<string, unknown>, { merge: true }),
+      )
+
+      // RTDB rules cannot consult Firestore. Make the authorization mirror
+      // synchronous for a newly shared board instead of waiting for an
+      // eventually delivered Firestore/Eventarc trigger.
+      const app = getFirebaseApp()
+      const functionRegion = getSyncAccessFunctionRegion()
+      if (app && functionRegion) {
+        const syncAccess = httpsCallable<{ boardId: string }, { mirrored: boolean }>(
+          getFunctions(app, functionRegion),
+          'syncBoardAccessToRtdb',
+        )
+        await syncAccess({ boardId: config.boardId })
+      } else if (app) {
+        throw new Error('VITE_FIREBASE_SYNC_ACCESS_FUNCTION_REGION is required to share a cloud board.')
+      }
     }
   },
 
@@ -129,7 +167,7 @@ export const sharingService = {
           updatedAt: new Date().toISOString(),
         }
         if (boardName) updatePayload.boardName = boardName
-        await updateDoc(ref, updatePayload)
+        await withFirestoreWriteTimeout(updateDoc(ref, updatePayload))
       } catch {
         // Document may not exist yet if the board has never been shared; ignore silently
       }
@@ -140,10 +178,12 @@ export const sharingService = {
     const db = getFirestoreDb()
     if (db) {
       const ref = doc(db, 'boardShares', boardId)
-      await updateDoc(ref, {
-        scene: firestoreValue(scene),
-        updatedAt: new Date().toISOString(),
-      })
+      await withFirestoreWriteTimeout(
+        updateDoc(ref, {
+          scene: firestoreValue(scene),
+          updatedAt: new Date().toISOString(),
+        }),
+      )
     }
   },
 
@@ -218,46 +258,82 @@ export const sharingService = {
     return { status: 'restricted', config: remoteData }
   },
 
-  async registerActiveSession(boardId: string, sessionId: string): Promise<() => void> {
+  async registerActiveSession(boardId: string, sessionId: string, userId: string): Promise<() => void> {
     const regKey = `${boardId}:${sessionId}`
     activeSessionRefCount.set(regKey, (activeSessionRefCount.get(regKey) ?? 0) + 1)
 
     const sessionData: ActiveSessionRecord = {
+      userId,
       sessionId,
       joinedAt: Date.now(),
       lastSeen: Date.now(),
     }
 
-    // 1. Direct Firestore session registration
-    const db = getFirestoreDb()
-    if (db) {
-      try {
-        const sessionRef = doc(db, 'boardShares', boardId, 'activeSessions', sessionId)
-        await setDoc(sessionRef, sessionData)
-      } catch (err: any) {
-        console.warn('[Collab] Could not register Firestore active session:', err?.message)
+    // Session presence is deliberately kept in RTDB, not Firestore. A Firestore
+    // heartbeat costs one document write every 15 seconds per open tab and can
+    // exhaust the Spark daily quota even when nobody edits a board.
+    const rtdb = getFirebaseRtdb()
+    const sessionRef = rtdb ? ref(rtdb, `activeSessions/${boardId}/${sessionId}`) : undefined
+    let released = false
+    let unsubscribeConnection = () => {}
+    let retryTimer: ReturnType<typeof setTimeout> | undefined
+    let retryAttempt = 0
+    let publishing = false
+    if (sessionRef) {
+      const schedulePublicationRetry = () => {
+        // A board can be opened just before its Firestore access policy is
+        // mirrored into RTDB. Retrying this one-time bootstrap is not a
+        // heartbeat: it stops on the first successful publish (or release).
+        if (released || retryTimer || retryAttempt >= 9) return
+        const delayMs = Math.min(200 * 2 ** retryAttempt, 15_000)
+        retryAttempt += 1
+        retryTimer = setTimeout(() => {
+          retryTimer = undefined
+          void publishOnConnection()
+        }, delayMs)
       }
+
+      const publishOnConnection = async () => {
+        if (publishing || released) return
+        publishing = true
+        try {
+          // Attach cleanup before publishing, otherwise a crash in between can
+          // leave a ghost session that no other user is allowed to remove.
+          const disconnect = onDisconnect(sessionRef)
+          await disconnect.remove()
+          if (released) {
+            await disconnect.cancel()
+            return
+          }
+          await set(sessionRef, sessionData)
+          retryAttempt = 0
+          if (retryTimer) {
+            clearTimeout(retryTimer)
+            retryTimer = undefined
+          }
+        } catch (err: any) {
+          console.warn('[Collab] Could not publish RTDB active session:', err?.message)
+          schedulePublicationRetry()
+        } finally {
+          publishing = false
+        }
+      }
+
+      // RTDB transport liveness is authoritative. Fires once initially and on
+      // every reconnection after sleep, a network change, or a socket drop.
+      unsubscribeConnection = onValue(ref(rtdb!, '.info/connected'), (snap) => {
+        if (snap.val() === true && !released) void publishOnConnection()
+      })
     }
-
-    // 2. Periodic heartbeat to keep session fresh
-    const heartbeatTimer = setInterval(() => {
-      if (cleanedUp) return
-      const now = Date.now()
-      sessionData.lastSeen = now
-
-      const currentDb = getFirestoreDb()
-      if (currentDb) {
-        const sessionRef = doc(currentDb, 'boardShares', boardId, 'activeSessions', sessionId)
-        updateDoc(sessionRef, { lastSeen: now }).catch(() => {})
-      }
-    }, 15000)
 
     // Cleanup logic
     let cleanedUp = false
     const cleanup = () => {
       if (cleanedUp) return
       cleanedUp = true
-      clearInterval(heartbeatTimer)
+      released = true
+      unsubscribeConnection()
+      if (retryTimer) clearTimeout(retryTimer)
       const currentCount = (activeSessionRefCount.get(regKey) ?? 1) - 1
       if (currentCount <= 0) {
         activeSessionRefCount.delete(regKey)
@@ -276,31 +352,12 @@ export const sharingService = {
   },
 
   async removeActiveSession(boardId: string, sessionId: string): Promise<void> {
-    // 1. Reliable synchronous keepalive REST delete (survives tab closure & beforeunload)
-    const env =
-      typeof import.meta !== 'undefined' && import.meta.env
-        ? import.meta.env
-        : typeof process !== 'undefined' && process.env
-          ? (process.env as any)
-          : {}
-    const db = getFirestoreDb()
-    const projectId = db?.app.options.projectId || env.VITE_FIREBASE_PROJECT_ID
-    if (projectId && typeof fetch !== 'undefined') {
+    const rtdb = getFirebaseRtdb()
+    if (rtdb) {
       try {
-        const deleteUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/boardShares/${boardId}/activeSessions/${sessionId}`
-        fetch(deleteUrl, { method: 'DELETE', keepalive: true }).catch(() => {})
-      } catch {
-        // ignore
-      }
-    }
-
-    // 2. Firestore doc cleanup via SDK
-    if (db) {
-      try {
-        const sessionRef = doc(db, 'boardShares', boardId, 'activeSessions', sessionId)
-        await deleteDoc(sessionRef)
+        await remove(ref(rtdb, `activeSessions/${boardId}/${sessionId}`))
       } catch (err: any) {
-        console.warn('[Collab] Could not remove Firestore active session:', err?.message)
+        console.warn('[Collab] Could not remove RTDB active session:', err?.message)
       }
     }
   },
@@ -309,54 +366,65 @@ export const sharingService = {
     boardId: string,
     onActiveSessionsChange: (activeSessions: ActiveSessionRecord[]) => void,
   ): () => void {
-    const db = getFirestoreDb()
-    if (!db) {
+    const rtdb = getFirebaseRtdb()
+    if (!rtdb) {
       onActiveSessionsChange([])
       return () => {}
+    }
+
+    const sessionsRef = ref(rtdb, `activeSessions/${boardId}`)
+    let stopped = false
+    let unsubscribe = () => {}
+    let retryTimer: ReturnType<typeof setTimeout> | undefined
+    let retryAttempt = 0
+
+    const attach = () => {
+      if (stopped) return
+      unsubscribe()
+      unsubscribe = onValue(
+        sessionsRef,
+        (snap) => {
+          retryAttempt = 0
+          const list: ActiveSessionRecord[] = []
+          const sessions = snap.val() as Record<string, Partial<ActiveSessionRecord>> | null
+          for (const [sessionId, data] of Object.entries(sessions ?? {})) {
+            if (data) {
+              if (typeof data.userId !== 'string' || !data.userId) continue
+              const joinedAt = Number(data.joinedAt ?? Date.now())
+              const lastSeen = Number(data.lastSeen ?? joinedAt)
+              list.push({ userId: data.userId, sessionId, joinedAt, lastSeen })
+            }
+          }
+          onActiveSessionsChange(list)
+        },
+        (err) => {
+          console.warn('[Collab] RTDB activeSessions subscription warning:', err?.message)
+          onActiveSessionsChange([])
+          // RTDB cancels a denied listener. A just-created board can receive
+          // its server-authorized ACL moments later, so reattach with bounded
+          // backoff instead of permanently treating the room as solo.
+          if (!stopped && retryAttempt < 9) {
+            const delayMs = Math.min(200 * 2 ** retryAttempt, 15_000)
+            retryAttempt += 1
+            retryTimer = setTimeout(() => {
+              retryTimer = undefined
+              attach()
+            }, delayMs)
+          }
+        },
+      )
     }
 
     try {
-      const sessionsCol = collection(db, 'boardShares', boardId, 'activeSessions')
-      return onSnapshot(
-        sessionsCol,
-        (snap) => {
-          const list: ActiveSessionRecord[] = []
-          const now = Date.now()
-          snap.forEach((d) => {
-            const data = d.data() as any
-            if (data) {
-              const joinedAt = Number(data.joinedAt ?? now)
-              const lastSeen = Number(data.lastSeen ?? joinedAt)
-              if (now - lastSeen > STALE_SESSION_TIMEOUT_MS) {
-                // Actively purge stale session document from Firestore
-                deleteDoc(d.ref).catch(() => {})
-              } else {
-                list.push({
-                  sessionId: d.id,
-                  joinedAt,
-                  lastSeen,
-                })
-              }
-            }
-          })
-          onActiveSessionsChange(filterValidActiveSessions(list))
-        },
-        (err) => {
-          console.warn('[Collab] Firestore activeSessions subscription warning:', err?.message)
-          onActiveSessionsChange([])
-        },
-      )
+      attach()
     } catch {
       onActiveSessionsChange([])
-      return () => {}
+    }
+
+    return () => {
+      stopped = true
+      if (retryTimer) clearTimeout(retryTimer)
+      unsubscribe()
     }
   },
-}
-
-export function filterValidActiveSessions(
-  sessions: ActiveSessionRecord[],
-  timeoutMs = STALE_SESSION_TIMEOUT_MS,
-  now = Date.now(),
-): ActiveSessionRecord[] {
-  return sessions.filter((s) => s && s.sessionId && now - (s.lastSeen || s.joinedAt) <= timeoutMs)
 }

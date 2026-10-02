@@ -322,14 +322,7 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
     const db = await database()
     const existingDocument = await (db.boards as any).findOne(document.id).exec()
     const current = existingDocument ? plain<BoardDocument>(existingDocument) : normalizedBoard(document)
-    if (existingDocument && document.revision !== current.revision) {
-      await existingDocument.incrementalPatch({
-        syncStatus: 'conflict',
-        nextSyncAt: null,
-        lastSyncError: 'This board changed in another tab or device. Your local copy was preserved.',
-      })
-      throw new Error('BOARD_REVISION_CONFLICT')
-    }
+    const nextRevision = Math.max(current.revision ?? 0, document.revision ?? 0) + 1
     const updated: BoardDocument = {
       ...document,
       active: document.active ?? current.active ?? true,
@@ -337,7 +330,7 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
       syncStatus: 'local-only',
       // React can still hold the pre-ACK document. Allocate the next revision
       // from IndexedDB so a completed sync can never be followed by a stale save.
-      revision: current.revision + 1,
+      revision: nextRevision,
       baseRevision: current.baseRevision,
       syncAttempts: 0,
       nextSyncAt: null,

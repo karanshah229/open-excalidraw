@@ -21,11 +21,12 @@ import { sharingService } from '../features/sharing/sharing-service'
 import {
   useCollaboration,
   CollaboratorBar,
+  ensureAuthenticatedUser,
   generateSessionId,
   type ActiveSessionRecord,
 } from '../features/collaboration'
 import { reconcileElementsLWW } from '../features/collaboration/reconcile'
-import { isFirebaseConfigured } from '../lib/firebase'
+import { getFirebaseAuth, isFirebaseConfigured } from '../lib/firebase'
 
 const LIBRARY_STORAGE_KEY = 'agentic-whiteboard:library:v1'
 const starterLibraries = [
@@ -126,19 +127,17 @@ function getSceneSignature(scene?: { elements?: readonly any[]; appState?: any }
   )
 }
 
+function prepareInitialElements(elements: readonly any[] = []): any[] {
+  if (!elements || elements.length === 0) return []
+  const converted = convertToExcalidrawElements(elements as any, { regenerateIds: false })
+  const deletedIds = new Set(elements.filter((e) => e?.isDeleted).map((e) => e.id))
+  return converted.map((el) => (deletedIds.has(el.id) ? { ...el, isDeleted: true } : el))
+}
 
-function getOrCreateSessionId(boardId: string): string {
-  if (typeof window === 'undefined') return generateSessionId()
-  try {
-    const key = `agentic-whiteboard:session-id:${boardId}`
-    const existing = sessionStorage.getItem(key)
-    if (existing) return existing
-    const newId = generateSessionId()
-    sessionStorage.setItem(key, newId)
-    return newId
-  } catch {
-    return generateSessionId()
-  }
+function createConnectionSessionId(): string {
+  // A prior connection's onDisconnect must never remove a session published by
+  // a page reload.
+  return generateSessionId()
 }
 
 export function BoardEditor() {
@@ -252,39 +251,49 @@ export function BoardEditor() {
   const [boardNotFound, setBoardNotFound] = useState(false)
   const [activeSessions, setActiveSessions] = useState<ActiveSessionRecord[]>([])
 
-  // Tab-scoped session ID shared across Firestore activeSessions and RTDB (persisted across reloads in same tab)
-  const sessionIdRef = useRef<string>(getOrCreateSessionId(boardId))
+  // Per-page connection ID shared across RTDB activeSessions and presence.
+  const sessionIdRef = useRef<string>(createConnectionSessionId())
 
   // Task 1: Register active session when board is open (1 write on open, 1 on close)
   useEffect(() => {
-    if (!boardId || accessDenied || boardNotFound) return
+    if (!boardId || !isSharedBoard || accessDenied || boardNotFound) return
+    let cancelled = false
     let cleanupSession: (() => void) | undefined
-    void sharingService.registerActiveSession(boardId, sessionIdRef.current).then((cleanup) => {
-      cleanupSession = cleanup
-    })
+    void (async () => {
+      const auth = getFirebaseAuth()
+      const user = authUser ?? auth?.currentUser ?? (auth ? await ensureAuthenticatedUser(auth) : null)
+      if (!user || cancelled) return
+      const cleanup = await sharingService.registerActiveSession(boardId, sessionIdRef.current, user.uid)
+      if (cancelled) cleanup()
+      else cleanupSession = cleanup
+    })()
     return () => {
+      cancelled = true
       if (cleanupSession) cleanupSession()
     }
-  }, [boardId, accessDenied, boardNotFound])
+  }, [boardId, isSharedBoard, authUser?.uid, accessDenied, boardNotFound])
 
   // Task 1: Subscribe to active sessions on the board
   useEffect(() => {
-    if (!boardId || accessDenied || boardNotFound) {
+    if (!boardId || !isSharedBoard || accessDenied || boardNotFound) {
       setActiveSessions([])
       return
     }
     return sharingService.subscribeToActiveSessions(boardId, (sessions) => {
       setActiveSessions(sessions)
     })
-  }, [boardId, accessDenied, boardNotFound])
+  }, [boardId, isSharedBoard, accessDenied, boardNotFound])
 
   // Lazy collab triggers when 2 or more active editor sessions are detected on the board
   const isLazyCollabActive = Boolean(activeSessions.length >= 2)
+  const isLazyCollabActiveRef = useRef(isLazyCollabActive)
+  isLazyCollabActiveRef.current = isLazyCollabActive
   const [isTransitioningCollab, setIsTransitioningCollab] = useState(false)
-
-  const { activeCollaborators, onPointerUpdate, broadcastChanges, isSpectator, clearBoardElements } = useCollaboration({
+  const { activeCollaborators, onPointerUpdate, broadcastChanges, isSpectator } = useCollaboration({
     boardId,
-    enabled: Boolean(isFirebaseConfigured && boardId && !accessDenied && !boardNotFound && isLazyCollabActive),
+    enabled: Boolean(
+      isFirebaseConfigured && isSharedBoard && boardId && !accessDenied && !boardNotFound && isLazyCollabActive,
+    ),
     sessionId: sessionIdRef.current,
     authUser,
     isAuthLoading,
@@ -339,6 +348,8 @@ export function BoardEditor() {
     projectId: string
     projectName: string
     projectOwnerId?: string
+    projectOwnerName?: string
+    projectOwnerEmail?: string
     createdAt?: string
     updatedAt?: string
   } | null>(null)
@@ -436,6 +447,9 @@ export function BoardEditor() {
   useEffect(() => {
     hasAutoZoomedRef.current = false
     setInitialData(null)
+    setIsSharedBoard(false)
+    setAccessDenied(false)
+    setBoardNotFound(false)
     let active = true
     Promise.all([
       workspaceApi.loadBoardWithProject(boardId),
@@ -494,10 +508,19 @@ export function BoardEditor() {
 
           // Update local IndexedDB with authoritative cloud/merged state
           if (details?.document) {
-            void workspaceApi.saveBoard({
-              ...details.document,
-              scene: finalScene,
-            })
+            documentRef.current = details.document
+            saveChainRef.current = saveChainRef.current
+              .then(async () => {
+                const latest = await workspaceApi.loadBoard(details.document.id)
+                const docToSave = latest
+                  ? { ...latest, name: details.document.name, scene: finalScene }
+                  : { ...details.document, scene: finalScene }
+                const saved = await workspaceApi.saveBoard(docToSave)
+                documentRef.current = saved
+              })
+              .catch((err) => {
+                console.error('Failed to update local board on mount:', err)
+              })
           }
 
           setBoardMeta({
@@ -505,12 +528,14 @@ export function BoardEditor() {
             projectId: details?.project.id ?? '',
             projectName: details?.project.name ?? 'Shared board',
             projectOwnerId: config.ownerId,
+            projectOwnerName: config.ownerName,
+            projectOwnerEmail: config.ownerEmail,
             createdAt: config.createdAt,
             updatedAt: config.updatedAt,
           })
 
           setInitialData({
-            elements: convertToExcalidrawElements(finalScene.elements as any, { regenerateIds: false }),
+            elements: prepareInitialElements(finalScene.elements),
             appState: {
               ...finalScene.appState,
               theme: resolvedTheme,
@@ -543,7 +568,7 @@ export function BoardEditor() {
           })
 
           setInitialData({
-            elements: convertToExcalidrawElements(document.scene.elements as any, { regenerateIds: false }),
+            elements: prepareInitialElements(document.scene.elements),
             appState: {
               ...document.scene.appState,
               theme: resolvedTheme,
@@ -596,20 +621,26 @@ export function BoardEditor() {
             ? {
                 ...prev,
                 boardName: updatedConfig.boardName,
+                projectOwnerName: updatedConfig.ownerName ?? prev.projectOwnerName,
+                projectOwnerEmail: updatedConfig.ownerEmail ?? prev.projectOwnerEmail,
                 updatedAt: updatedConfig.updatedAt,
               }
             : prev,
         )
 
-        if (updatedConfig.scene && !pendingSceneRef.current) {
-          const newSignature = getSceneSignature(updatedConfig.scene)
+        if (updatedConfig.scene && !pendingSceneRef.current && !isLazyCollabActiveRef.current) {
+          // Firestore is a durable snapshot, not an authority allowed to roll
+          // back newer local elements. Reconcile per element before rendering.
+          const reconciledElements = reconcileElementsLWW(elementsRef.current, updatedConfig.scene.elements ?? [])
+          const reconciledScene = { ...updatedConfig.scene, elements: reconciledElements }
+          const newSignature = getSceneSignature(reconciledScene)
           if (newSignature !== savedSignature.current) {
             savedSignature.current = newSignature
             committedSignatureRef.current = newSignature
-            elementsRef.current = updatedConfig.scene.elements
+            elementsRef.current = reconciledElements
             appStateRef.current = updatedConfig.scene.appState
             apiRef.current?.updateScene({
-              elements: updatedConfig.scene.elements as any,
+              elements: reconciledElements as any,
             })
           }
         }
@@ -647,21 +678,18 @@ export function BoardEditor() {
     [isReadOnly],
   )
 
-  const sendOperationResult = useCallback(
-    (operationId: string, ok: boolean, data?: unknown, error?: string) => {
-      if (socketRef.current?.readyState !== WebSocket.OPEN) return
-      socketRef.current.send(
-        JSON.stringify({
-          type: 'operation_result',
-          operationId,
-          ok,
-          data,
-          error,
-        }),
-      )
-    },
-    [],
-  )
+  const sendOperationResult = useCallback((operationId: string, ok: boolean, data?: unknown, error?: string) => {
+    if (socketRef.current?.readyState !== WebSocket.OPEN) return
+    socketRef.current.send(
+      JSON.stringify({
+        type: 'operation_result',
+        operationId,
+        ok,
+        data,
+        error,
+      }),
+    )
+  }, [])
 
   useEffect(() => {
     if (isReadOnly) return
@@ -761,7 +789,9 @@ export function BoardEditor() {
             .filter((e) => {
               if (filterType && e.type !== filterType) return false
               if (!query) return true
-              const idMatch = String(e.id || '').toLowerCase().includes(query)
+              const idMatch = String(e.id || '')
+                .toLowerCase()
+                .includes(query)
               const textMatch = typeof e.text === 'string' && e.text.toLowerCase().includes(query)
               const labelMatch =
                 e.label && typeof e.label.text === 'string' && e.label.text.toLowerCase().includes(query)
@@ -798,7 +828,10 @@ export function BoardEditor() {
           const ids = new Set<string>(operation.ids || [])
           const targetGroupId = operation.groupId as string | undefined
           next = next.map((el) => {
-            if (ids.has(el.id) || (targetGroupId && Array.isArray(el.groupIds) && el.groupIds.includes(targetGroupId))) {
+            if (
+              ids.has(el.id) ||
+              (targetGroupId && Array.isArray(el.groupIds) && el.groupIds.includes(targetGroupId))
+            ) {
               const groupIds = Array.isArray(el.groupIds)
                 ? targetGroupId
                   ? el.groupIds.filter((g: string) => g !== targetGroupId)
@@ -818,7 +851,7 @@ export function BoardEditor() {
               elements: elements as any,
               appState: {
                 exportBackground: operation.exportBackground ?? true,
-                exportWithDarkMode: operation.darkMode ?? (resolvedTheme === 'dark'),
+                exportWithDarkMode: operation.darkMode ?? resolvedTheme === 'dark',
                 theme: resolvedTheme,
               },
               files: null,
@@ -1077,12 +1110,17 @@ export function BoardEditor() {
       const task = saveChainRef.current.then(async () => {
         const document = documentRef.current
         if (document) {
-          const saved = await workspaceApi.saveBoard({ ...document, scene })
+          // If the document in local storage has been updated (e.g. by background sync or initial mount),
+          // refresh its revision so we don't hit a false revision conflict.
+          const latest = await workspaceApi.loadBoard(document.id)
+          const docToSave = latest ? { ...latest, name: document.name, scene } : { ...document, scene }
+          const saved = await workspaceApi.saveBoard(docToSave)
           documentRef.current = saved
           committedSignatureRef.current = getSceneSignature(scene)
           setBoardMeta((prev) => (prev ? { ...prev, updatedAt: saved.updatedAt } : prev))
           void sharingService.syncBoardSceneToShare(boardId, scene, saved.name)
           queryClient.invalidateQueries({ queryKey: ['workspace'] })
+          setState(isSharedBoard ? 'Synced' : statusLabel(saved.syncStatus))
           return
         }
 
@@ -1099,12 +1137,12 @@ export function BoardEditor() {
       saveChainRef.current = task.catch(() => {})
       return task
     },
-    [boardId, queryClient],
+    [boardId, isSharedBoard, queryClient],
   )
 
   const handleSaveFailure = useCallback((scene: BoardScene, error: unknown) => {
     pendingSceneRef.current ??= scene
-    if (!documentRef.current) console.error('Failed to sync shared scene:', error)
+    console.error('Failed to save scene:', error)
     setState(documentRef.current ? 'Local save failed' : 'Sync failed')
   }, [])
 
@@ -1128,37 +1166,62 @@ export function BoardEditor() {
   // Task 1: Auto-downgrade & state persistence when room membership changes
   const prevLazyActiveRef = useRef(false)
   const hasEstablishedSoloRef = useRef(false)
+  const transitionTimerRef = useRef<number | null>(null)
 
   // Track established solo mode: only trigger the "Connecting to live collaboration..." transition
-  // banner if the user was actively working in solo mode and another collaborator joins
+  // banner if the user was actively working in solo mode and another collaborator joins.
+  // Never trigger on initial page load / refresh.
   useEffect(() => {
+    if (!initialData) return
     if (!isLazyCollabActive) {
-      hasEstablishedSoloRef.current = true
+      const timer = window.setTimeout(() => {
+        hasEstablishedSoloRef.current = true
+      }, 1000)
+      return () => window.clearTimeout(timer)
+    } else {
+      hasEstablishedSoloRef.current = false
     }
-  }, [isLazyCollabActive])
+  }, [initialData, isLazyCollabActive])
+
+  // Cleanup transition timer on unmount
+  useEffect(() => {
+    return () => {
+      if (transitionTimerRef.current) {
+        window.clearTimeout(transitionTimerRef.current)
+      }
+    }
+  }, [])
 
   useEffect(() => {
     if (isLazyCollabActive && !prevLazyActiveRef.current) {
+      prevLazyActiveRef.current = true
+
       // Flipping from individual to collab mode:
       // 1. Temporarily put board in read-only mode so user cannot make edits in between,
       //    ONLY if the user was already established in solo mode.
       if (hasEstablishedSoloRef.current) {
         setIsTransitioningCollab(true)
+        if (transitionTimerRef.current) {
+          window.clearTimeout(transitionTimerRef.current)
+        }
+        transitionTimerRef.current = window.setTimeout(() => {
+          setIsTransitioningCollab(false)
+          transitionTimerRef.current = null
+        }, 700)
       }
 
       // 2. Flush any pending local save so peers get latest state
       if (pendingSceneRef.current) {
         void flushSave()
       }
-
-      // 3. Keep read-only until RTDB connection & element listeners stabilize
-      const timer = window.setTimeout(() => {
-        setIsTransitioningCollab(false)
-      }, 700)
-
-      prevLazyActiveRef.current = isLazyCollabActive
-      return () => window.clearTimeout(timer)
     } else if (!isLazyCollabActive && prevLazyActiveRef.current) {
+      prevLazyActiveRef.current = false
+      if (transitionTimerRef.current) {
+        window.clearTimeout(transitionTimerRef.current)
+        transitionTimerRef.current = null
+      }
+      setIsTransitioningCollab(false)
+
       // Transitioning back to solo: flush the collab scene to storage so it is persisted
       if (elementsRef.current && elementsRef.current.length > 0) {
         const scene: BoardScene = {
@@ -1172,35 +1235,8 @@ export function BoardEditor() {
         }
         void enqueueSceneSave(scene)
       }
-      void clearBoardElements(boardId)
     }
-    prevLazyActiveRef.current = isLazyCollabActive
-  }, [isLazyCollabActive, flushSave, enqueueSceneSave, boardId, clearBoardElements])
-
-  // Ghost session self-healing: if lazy collab is activated but no peers connect to RTDB
-  // within 4 seconds, prune any lingering remote sessions from Firestore so the board
-  // auto-downgrades cleanly to solo mode.
-  useEffect(() => {
-    if (!isLazyCollabActive || !boardId) return
-
-    const timer = window.setTimeout(() => {
-      if (activeCollaborators.length === 0) {
-        const now = Date.now()
-        // Only prune sessions that are at least 8 seconds old so we don't prune peers in the middle of page load
-        const ghostSessions = activeSessions.filter(
-          (s) => s.sessionId !== sessionIdRef.current && now - (s.lastSeen || s.joinedAt) > 8000,
-        )
-        if (ghostSessions.length > 0) {
-          console.info('[Collab] Detected ghost activeSessions with 0 RTDB peers, auto-pruning:', ghostSessions)
-          for (const ghost of ghostSessions) {
-            void sharingService.removeActiveSession(boardId, ghost.sessionId)
-          }
-        }
-      }
-    }, 4000)
-
-    return () => window.clearTimeout(timer)
-  }, [isLazyCollabActive, activeCollaborators.length, activeSessions, boardId])
+  }, [isLazyCollabActive, flushSave, enqueueSceneSave])
 
   const scheduleSave = useCallback(
     (scene: BoardScene) => {
@@ -1283,11 +1319,8 @@ export function BoardEditor() {
           saveTimer.current = undefined
         }
         pendingSceneRef.current = null
-        setState('Synced')
-      } else if (!isLazyCollabActive) {
-        scheduleSave(scene)
       } else {
-        pendingSceneRef.current = scene
+        scheduleSave(scene)
       }
       if (!operationRef.current) sendScene([...elements])
     },
@@ -1578,6 +1611,8 @@ export function BoardEditor() {
                   createdAt={boardMeta?.createdAt}
                   updatedAt={boardMeta?.updatedAt}
                   projectOwnerId={boardMeta?.projectOwnerId}
+                  projectOwnerName={boardMeta?.projectOwnerName}
+                  projectOwnerEmail={boardMeta?.projectOwnerEmail}
                   getSceneSize={getSceneSize}
                 />
               </>
@@ -1591,6 +1626,8 @@ export function BoardEditor() {
                   createdAt={boardMeta?.createdAt || documentRef.current?.createdAt}
                   updatedAt={boardMeta?.updatedAt || documentRef.current?.updatedAt}
                   projectOwnerId={boardMeta?.projectOwnerId}
+                  projectOwnerName={boardMeta?.projectOwnerName}
+                  projectOwnerEmail={boardMeta?.projectOwnerEmail}
                   version={documentRef.current?.revision}
                   getSceneSize={getSceneSize}
                 />
@@ -1753,6 +1790,7 @@ export function BoardEditor() {
         <ShareModal
           open={isShareModalOpen}
           onOpenChange={setIsShareModalOpen}
+          onShareConfigSaved={() => setIsSharedBoard(true)}
           boardId={boardId}
           boardName={boardMeta.boardName}
           ownerId={boardMeta.projectOwnerId}

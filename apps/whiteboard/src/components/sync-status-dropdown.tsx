@@ -31,6 +31,8 @@ export interface SyncStatusDropdownProps {
   createdAt?: string
   updatedAt?: string
   projectOwnerId?: string
+  projectOwnerName?: string
+  projectOwnerEmail?: string
   version?: number
   getSceneSize: () => { bytes: number; elementsCount: number }
 }
@@ -145,6 +147,8 @@ export function SyncStatusDropdown({
   createdAt,
   updatedAt,
   projectOwnerId,
+  projectOwnerName,
+  projectOwnerEmail,
   version,
   getSceneSize,
 }: SyncStatusDropdownProps) {
@@ -167,11 +171,17 @@ export function SyncStatusDropdown({
     return trimmed.toLowerCase().endsWith('.excalidraw') ? trimmed : `${trimmed}.excalidraw`
   }, [boardName])
 
-  const isCurrentOwner = !projectOwnerId || projectOwnerId === 'local-user' || projectOwnerId === authUser?.uid
+  const isCurrentOwner =
+    Boolean(authUser) && (!projectOwnerId || projectOwnerId === 'local-user' || projectOwnerId === authUser?.uid)
 
-  const ownerName = isCurrentOwner ? `${fullName || authUser?.displayName || 'User'} (You)` : projectOwnerId
+  const ownerName = isCurrentOwner
+    ? `${authUser?.displayName || fullName || 'User'} (You)`
+    : projectOwnerName || (projectOwnerEmail ? projectOwnerEmail.split('@')[0] : undefined)
 
-  const ownerEmail = isCurrentOwner ? user?.email || authUser?.email : undefined
+  const ownerEmail = isCurrentOwner ? authUser?.email || user?.email : projectOwnerEmail
+
+  // Owner row should not be shown for a not-logged-in user
+  const shouldShowOwner = Boolean(authUser) && Boolean(ownerName)
   const updatedTime = useMemo(() => formatTimestamp(updatedAt), [updatedAt])
   const createdTime = useMemo(() => formatTimestamp(createdAt), [createdAt])
 
@@ -296,23 +306,25 @@ export function SyncStatusDropdown({
               </div>
             )}
 
-            {/* Owner */}
-            <div className="board-info-item">
-              <div className="board-info-item-label">
-                <User size={13} className="board-info-item-icon" />
-                <span>Owner</span>
-              </div>
-              <div className="board-info-item-value-wrap board-info-item-value-wrap--stacked">
-                <span className="board-info-item-value" title={ownerName}>
-                  {ownerName}
-                </span>
-                {ownerEmail && (
-                  <span className="board-info-item-subtext" title={ownerEmail}>
-                    {ownerEmail}
+            {/* Owner - only shown for logged in users */}
+            {shouldShowOwner && (
+              <div className="board-info-item">
+                <div className="board-info-item-label">
+                  <User size={13} className="board-info-item-icon" />
+                  <span>Owner</span>
+                </div>
+                <div className="board-info-item-value-wrap board-info-item-value-wrap--stacked">
+                  <span className="board-info-item-value" title={ownerName}>
+                    {ownerName}
                   </span>
-                )}
+                  {ownerEmail && (
+                    <span className="board-info-item-subtext" title={ownerEmail}>
+                      {ownerEmail}
+                    </span>
+                  )}
+                </div>
               </div>
-            </div>
+            )}
 
             {/* Last updated */}
             <div className="board-info-item">
