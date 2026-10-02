@@ -203,3 +203,9 @@ Deletion retains private documents, share policy tombstones, history and assets;
 Run `pnpm test:e2e:projects` with Firebase CLI, Java and Chrome installed (`CHROME_PATH` can override the executable). The runner compiles Functions, creates/restores local demo region parameters and uses the demo-projects Auth, Firestore, RTDB, Storage and Functions emulators on dedicated ports. Production Firebase requests are blocked in the browser. Puppeteer exercises UI interactions and real network requests; Admin SDK assertions inspect stored policies and retained records. Results, captured network responses and failure screenshots are written under `logs/projects-e2e/`.
 
 Validation passed: 19 Puppeteer browser/network scenarios via Firebase CLI, `pnpm build`, `pnpm check`, `pnpm lint` (four pre-existing warnings), 17 collaboration edge-case tests, the existing project dropdown E2E and local image persistence/reload. The local image test used a separate port because another task occupied its default port. The emulator runner isolates both ports and temporary Storage files from concurrent tasks.
+
+### Dev preview deployment
+
+On 2026-10-03, the feature Functions and Firestore/Storage/RTDB rules were deployed to `open-excalidraw-dev-2`; production remains unchanged. The manual preview runs on `http://localhost:5174` with the existing ignored dev configuration and real Google sign-in. The public discovery callable smoke check returned successfully.
+
+The dev backfill inspected 61 existing board-share records: five were bound to private project/board documents, while 56 had no matching private parent and were preserved without inventing ownership bindings. Their direct grants remain projected; management through the new owner-validated callables requires a genuine private parent. Backups and migration diagnostics are kept in ignored local logs. These legacy records need separate data cleanup before claiming the entire dev dataset has valid ownership links.
