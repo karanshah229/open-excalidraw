@@ -21,6 +21,14 @@ service firebase.storage {
           && boardData.collaborators[request.auth.token.email].role == 'editor');
     }
 
+    // Private workspace boards do not require a boardShares document.
+    match /users/{userId}/boards/{boardId}/assets/{fileId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if request.auth != null && request.auth.uid == userId
+        && request.resource.size < 10 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+
     match /boards/{boardId}/assets/{fileId} {
       allow read: if canRead(board(boardId));
       // Allow upload up to 10MB per image

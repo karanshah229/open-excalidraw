@@ -1,5 +1,6 @@
 import { memo, useEffect, useState } from 'react'
 import { Link } from '@tanstack/react-router'
+import type { BinaryFiles } from '@excalidraw/excalidraw/types'
 import { exportToSvg } from '@excalidraw/excalidraw'
 import { Share2, Trash2 } from 'lucide-react'
 import { useTheme } from '../../lib/theme-context'
@@ -12,7 +13,7 @@ const statusCopy = {
   conflict: 'Conflict',
 } as const
 
-const PREVIEW_CACHE_VERSION = 'v4'
+const PREVIEW_CACHE_VERSION = 'v5'
 const previewSvgCache = new Map<string, string>()
 
 function isColorDark(hexColor: string | undefined): boolean {
@@ -83,7 +84,7 @@ export const BoardPreview = memo(function BoardPreview({
         exportWithDarkMode: isDark,
         theme: resolvedTheme,
       },
-      files: null,
+      files: (board.scene?.files ?? {}) as BinaryFiles,
       exportPadding: 16,
       skipInliningFonts: true,
       renderEmbeddables: false,

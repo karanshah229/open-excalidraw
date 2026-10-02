@@ -2,6 +2,7 @@ import { RxDbWorkspaceStore } from '@agentic-whiteboard/storage'
 import type { Board, BoardDocument, Project } from '@agentic-whiteboard/storage'
 import { collection, doc, getDoc, getDocs, onSnapshot, query, runTransaction, setDoc, where } from 'firebase/firestore'
 import { getFirestoreDb } from '../../lib/firebase'
+import { restoreSceneAssets, storeSceneAssets } from '../assets/scene-assets'
 import { reconcileElementsLWW } from '../collaboration/reconcile'
 
 export type WorkspaceBoard = Board & { project: Project }
@@ -129,6 +130,8 @@ async function syncWorkspace(userId: string) {
         const current = await workspaceStore.loadBoard(board.id)
         if (!current || (current.syncStatus !== 'local-only' && current.syncStatus !== 'sync-failed')) return
         const ref = doc(db, 'users', userId, 'projects', current.projectId, 'boards', current.id)
+        const assetRoot = `users/${userId}/boards/${current.id}/assets`
+        const cloudScene = await storeSceneAssets(current.scene, assetRoot)
         let resolvedBoard = current
         await runTransaction(db, async (transaction) => {
           const remoteSnapshot = await transaction.get(ref)
@@ -136,6 +139,7 @@ async function syncWorkspace(userId: string) {
             const remoteData = workspaceValue(remoteSnapshot.data()) as BoardDocument
             const remoteRevision = Number(remoteData.revision ?? 0)
             if (remoteRevision !== current.baseRevision) {
+              remoteData.scene = await restoreSceneAssets(remoteData.scene, current.scene.files)
               // Element-level LWW reconciliation
               const mergedElements = reconcileElementsLWW(
                 current.scene?.elements ?? [],
@@ -149,14 +153,16 @@ async function syncWorkspace(userId: string) {
                 scene: {
                   ...current.scene,
                   elements: mergedElements,
+                  files: { ...remoteData.scene.files, ...current.scene.files },
                 },
                 updatedAt: new Date().toISOString(),
               }
-              transaction.set(ref, firestoreValue(cloudBoard(resolvedBoard)))
+              const mergedScene = await storeSceneAssets(resolvedBoard.scene, assetRoot)
+              transaction.set(ref, firestoreValue(cloudBoard({ ...resolvedBoard, scene: mergedScene })))
               return
             }
           }
-          transaction.set(ref, firestoreValue(cloudBoard(current)))
+          transaction.set(ref, firestoreValue(cloudBoard({ ...current, scene: cloudScene })))
         })
         if (resolvedBoard !== current) {
           await workspaceStore.upsertBoard(resolvedBoard)
@@ -195,6 +201,8 @@ async function downloadWorkspace(userId: string) {
       await Promise.all(
         boardSnapshots.docs.map(async (boardSnapshot) => {
           const remote = cloudBoard(workspaceValue(boardSnapshot.data()) as BoardDocument)
+          const known = await workspaceStore.loadBoard(remote.id)
+          remote.scene = await restoreSceneAssets(remote.scene, known?.scene.files)
           const local = await workspaceStore.loadBoard(remote.id)
           if (local?.syncStatus === 'local-only' || local?.syncStatus === 'sync-failed') {
             if (matchesCommittedVersion(local, remote)) {
@@ -208,6 +216,7 @@ async function downloadWorkspace(userId: string) {
                 scene: {
                   ...local.scene,
                   elements: mergedElements,
+                  files: { ...remote.scene.files, ...local.scene.files },
                 },
               }
               await workspaceStore.upsertBoard(mergedBoard)
@@ -242,8 +251,10 @@ function subscribeToRemoteWorkspace(userId: string) {
                 active: change.type === 'removed' ? false : true,
               }
               void (async () => {
-                const local = await workspaceStore.loadBoard(remote.id)
                 const normalized = cloudBoard(remote)
+                const known = await workspaceStore.loadBoard(remote.id)
+                normalized.scene = await restoreSceneAssets(normalized.scene, known?.scene.files)
+                const local = await workspaceStore.loadBoard(remote.id)
                 if (local?.syncStatus === 'local-only' || local?.syncStatus === 'sync-failed') {
                   if (normalized.revision !== local.baseRevision && normalized.revision !== local.revision) {
                     // Element-level LWW reconciliation
@@ -257,6 +268,7 @@ function subscribeToRemoteWorkspace(userId: string) {
                       scene: {
                         ...local.scene,
                         elements: mergedElements,
+                        files: { ...normalized.scene.files, ...local.scene.files },
                       },
                     }
                     await workspaceStore.upsertBoard(mergedBoard)
@@ -266,7 +278,10 @@ function subscribeToRemoteWorkspace(userId: string) {
                   await workspaceStore.upsertBoard(normalized)
                   await updateSyncStatus(remote.id, 'synced')
                 }
-              })()
+              })().catch((error) => {
+                console.error(`Failed to restore cloud board ${remote.id}:`, error)
+                window.dispatchEvent(new CustomEvent(`board-sync:${remote.id}`, { detail: 'sync-failed' }))
+              })
             }
           },
         ),

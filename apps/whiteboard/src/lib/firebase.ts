@@ -39,7 +39,7 @@ let auth: Auth | undefined
 let firestore: Firestore | undefined
 let rtdb: Database | undefined
 let storage: FirebaseStorage | undefined
-let emulatorsConnected = false
+const connectedEmulators = new Set<string>()
 
 export function initAppCheck(firebaseApp: FirebaseApp): AppCheck | undefined {
   if (appCheckInitialized) return appCheck
@@ -96,21 +96,32 @@ export function getFirebaseApp(): FirebaseApp | undefined {
 }
 
 function setupEmulators(_currentApp: FirebaseApp) {
-  if (emulatorsConnected || env.VITE_USE_FIREBASE_EMULATOR !== 'true') return
-  emulatorsConnected = true
+  if (env.VITE_USE_FIREBASE_EMULATOR !== 'true') return
   const host = typeof window !== 'undefined' && window.location?.hostname ? window.location.hostname : '127.0.0.1'
 
-  if (auth) connectAuthEmulator(auth, `http://${host}:9099`, { disableWarnings: true })
-  if (firestore) connectFirestoreEmulator(firestore, host, 8080)
-  if (rtdb) connectDatabaseEmulator(rtdb, host, 9000)
-  if (storage) connectStorageEmulator(storage, host, 9199)
+  if (auth && !connectedEmulators.has('auth')) {
+    connectAuthEmulator(auth, `http://${host}:9099`, { disableWarnings: true })
+    connectedEmulators.add('auth')
+  }
+  if (firestore && !connectedEmulators.has('firestore')) {
+    connectFirestoreEmulator(firestore, host, 8080)
+    connectedEmulators.add('firestore')
+  }
+  if (rtdb && !connectedEmulators.has('rtdb')) {
+    connectDatabaseEmulator(rtdb, host, 9000)
+    connectedEmulators.add('rtdb')
+  }
+  if (storage && !connectedEmulators.has('storage')) {
+    connectStorageEmulator(storage, host, 9199)
+    connectedEmulators.add('storage')
+  }
 }
 
 export function getFirebaseAuth() {
   const currentApp = getFirebaseApp()
   if (!currentApp) return undefined
   auth ??= getAuth(currentApp)
-  if (env.VITE_USE_FIREBASE_EMULATOR === 'true' && !emulatorsConnected) {
+  if (env.VITE_USE_FIREBASE_EMULATOR === 'true') {
     setupEmulators(currentApp)
   }
   return auth
@@ -122,7 +133,7 @@ export function getFirestoreDb() {
   firestore ??= initializeFirestore(currentApp, {
     localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
   })
-  if (env.VITE_USE_FIREBASE_EMULATOR === 'true' && !emulatorsConnected) {
+  if (env.VITE_USE_FIREBASE_EMULATOR === 'true') {
     setupEmulators(currentApp)
   }
   return firestore
@@ -132,7 +143,7 @@ export function getFirebaseRtdb() {
   const currentApp = getFirebaseApp()
   if (!currentApp) return undefined
   rtdb ??= getDatabase(currentApp)
-  if (env.VITE_USE_FIREBASE_EMULATOR === 'true' && !emulatorsConnected) {
+  if (env.VITE_USE_FIREBASE_EMULATOR === 'true') {
     setupEmulators(currentApp)
   }
   return rtdb
@@ -142,7 +153,7 @@ export function getFirebaseStorage() {
   const currentApp = getFirebaseApp()
   if (!currentApp) return undefined
   storage ??= getStorage(currentApp)
-  if (env.VITE_USE_FIREBASE_EMULATOR === 'true' && !emulatorsConnected) {
+  if (env.VITE_USE_FIREBASE_EMULATOR === 'true') {
     setupEmulators(currentApp)
   }
   return storage

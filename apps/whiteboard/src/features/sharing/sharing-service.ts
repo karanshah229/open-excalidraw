@@ -8,6 +8,7 @@ import {
   getFirestoreDb,
   getSyncAccessFunctionRegion,
 } from '../../lib/firebase'
+import { restoreSceneAssets, storeSceneAssets } from '../assets/scene-assets'
 import { firestoreValue, workspaceStore, workspaceValue } from '../workspace/workspace-api'
 import type { BoardScene } from '@agentic-whiteboard/storage'
 import type { ActiveSessionRecord } from '../collaboration/types'
@@ -80,6 +81,7 @@ export const sharingService = {
           ) {
             data.scene = fallback.scene
           }
+          if (data.scene) data.scene = await restoreSceneAssets(data.scene)
           return data
         }
       } catch {
@@ -136,9 +138,14 @@ export const sharingService = {
     const db = getFirestoreDb()
     if (db) {
       const ref = doc(db, 'boardShares', config.boardId)
-      await withFirestoreWriteTimeout(
-        setDoc(ref, firestoreValue(normalizedConfig) as Record<string, unknown>, { merge: true }),
-      )
+      // Establish access policy before uploading a new shared board's assets.
+      // Keep an existing scene intact until every file has uploaded successfully.
+      const { scene: _scene, ...metadata } = normalizedConfig
+      await withFirestoreWriteTimeout(setDoc(ref, firestoreValue(metadata) as Record<string, unknown>, { merge: true }))
+      if (resolvedScene) {
+        const cloudScene = await storeSceneAssets(resolvedScene, `boards/${config.boardId}/assets`)
+        await withFirestoreWriteTimeout(updateDoc(ref, { scene: firestoreValue(cloudScene) }))
+      }
 
       // RTDB rules cannot consult Firestore. Make the authorization mirror
       // synchronous for a newly shared board instead of waiting for an
@@ -162,14 +169,16 @@ export const sharingService = {
     if (db) {
       try {
         const ref = doc(db, 'boardShares', boardId)
+        if (!(await getDoc(ref)).exists()) return
         const updatePayload: Record<string, unknown> = {
-          scene: firestoreValue(scene),
+          scene: firestoreValue(await storeSceneAssets(scene, `boards/${boardId}/assets`)),
           updatedAt: new Date().toISOString(),
         }
         if (boardName) updatePayload.boardName = boardName
         await withFirestoreWriteTimeout(updateDoc(ref, updatePayload))
-      } catch {
-        // Document may not exist yet if the board has never been shared; ignore silently
+      } catch (error: any) {
+        // An unshared board has no share document. Surface actual upload failures.
+        if (error?.code !== 'not-found' && error?.code !== 'permission-denied') throw error
       }
     }
   },
@@ -180,7 +189,7 @@ export const sharingService = {
       const ref = doc(db, 'boardShares', boardId)
       await withFirestoreWriteTimeout(
         updateDoc(ref, {
-          scene: firestoreValue(scene),
+          scene: firestoreValue(await storeSceneAssets(scene, `boards/${boardId}/assets`)),
           updatedAt: new Date().toISOString(),
         }),
       )
@@ -195,20 +204,32 @@ export const sharingService = {
     const db = getFirestoreDb()
     if (!db) return () => {}
     const ref = doc(db, 'boardShares', boardId)
-    return onSnapshot(
+    let generation = 0
+    let knownFiles: BoardScene['files'] = {}
+    const unsubscribe = onSnapshot(
       ref,
       (snap) => {
         if (snap.exists()) {
           const data = workspaceValue(snap.data()) as BoardShareConfig
-          onUpdate(data)
+          const current = ++generation
+          void (async () => {
+            if (data.scene) data.scene = await restoreSceneAssets(data.scene, knownFiles)
+            if (current === generation) {
+              knownFiles = data.scene?.files ?? {}
+              onUpdate(data)
+            }
+          })().catch((error) => onError?.(error))
         }
       },
       (error) => {
-        if (onError) {
-          onError(error)
-        }
+        generation += 1
+        onError?.(error)
       },
     )
+    return () => {
+      generation += 1
+      unsubscribe()
+    }
   },
 
   async getSharedBoard(
@@ -239,19 +260,24 @@ export const sharingService = {
       return { status: 'not-found' }
     }
 
+    const allowed = async () => {
+      if (remoteData!.scene) remoteData!.scene = await restoreSceneAssets(remoteData!.scene)
+      return { status: 'allowed' as const, config: remoteData! }
+    }
+
     // Permission checks
     if (remoteData.generalAccess === 'anyone_with_link') {
-      return { status: 'allowed', config: remoteData }
+      return allowed()
     }
 
     if (currentUserId && remoteData.ownerId === currentUserId) {
-      return { status: 'allowed', config: remoteData }
+      return allowed()
     }
 
     if (currentUserEmail) {
       const normalizedEmail = currentUserEmail.trim().toLowerCase()
       if (remoteData.invitedEmails.some((e) => e.toLowerCase() === normalizedEmail)) {
-        return { status: 'allowed', config: remoteData }
+        return allowed()
       }
     }
 

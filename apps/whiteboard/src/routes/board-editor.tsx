@@ -4,7 +4,7 @@ import { Link, useNavigate, useParams, useBlocker } from '@tanstack/react-router
 import { useQueryClient } from '@tanstack/react-query'
 import { Check, Copy, Eye, Loader2, Lock, Pencil, Share2 } from 'lucide-react'
 import { convertToExcalidrawElements, Excalidraw, MainMenu, exportToSvg } from '@excalidraw/excalidraw'
-import type { ExcalidrawImperativeAPI } from '@excalidraw/excalidraw/types'
+import type { BinaryFiles, ExcalidrawImperativeAPI } from '@excalidraw/excalidraw/types'
 import type { BoardDocument, BoardScene, BoardSyncStatus } from '@agentic-whiteboard/storage'
 import { workspaceApi } from '../features/workspace/workspace-api'
 import {
@@ -110,7 +110,9 @@ async function copyToClipboard(text: string): Promise<boolean> {
   }
 }
 
-function getSceneSignature(scene?: { elements?: readonly any[]; appState?: any } | null): string {
+function getSceneSignature(
+  scene?: { elements?: readonly any[]; appState?: any; files?: BoardScene['files'] } | null,
+): string {
   if (!scene) return ''
   const normalizedAppState = {
     theme: scene.appState?.theme,
@@ -122,6 +124,13 @@ function getSceneSignature(scene?: { elements?: readonly any[]; appState?: any }
     {
       elements: scene.elements || [],
       appState: normalizedAppState,
+      // File IDs identify immutable content; avoid serializing image bytes on every change.
+      files: Object.keys(scene.files ?? {})
+        .sort()
+        .map((id) => {
+          const file = scene.files![id]
+          return [id, file.mimeType, Boolean(file.dataURL)]
+        }),
     },
     (key, value) => (key === 'updated' || key === 'versionNonce' ? undefined : value),
   )
@@ -149,6 +158,7 @@ export function BoardEditor() {
   const apiRef = useRef<ExcalidrawImperativeAPI | null>(null)
   const documentRef = useRef<BoardDocument | null>(null)
   const elementsRef = useRef<any[]>([])
+  const filesRef = useRef<BinaryFiles>({})
   const appStateRef = useRef<Record<string, unknown>>({})
   const socketRef = useRef<WebSocket | null>(null)
   const operationRef = useRef<string | null>(null)
@@ -397,7 +407,7 @@ export function BoardEditor() {
       if (saved) {
         documentRef.current = saved
         setBoardMeta((prev) => (prev ? { ...prev, updatedAt: saved.updatedAt } : prev))
-        void sharingService.syncBoardSceneToShare(boardId, saved.scene, trimmed)
+        void sharingService.syncBoardSceneToShare(boardId, saved.scene, trimmed).catch(console.error)
       }
       queryClient.invalidateQueries({ queryKey: ['workspace'] })
     } catch {
@@ -440,6 +450,7 @@ export function BoardEditor() {
   const [initialData, setInitialData] = useState<{
     elements: any[]
     appState: any
+    files?: BinaryFiles
     libraryItems: Promise<any[]>
     scrollToContent?: boolean
   } | null>(null)
@@ -487,6 +498,7 @@ export function BoardEditor() {
             finalScene = {
               ...cloudScene,
               elements: mergedElements,
+              files: { ...cloudScene.files, ...details.document.scene.files },
             }
           }
 
@@ -503,6 +515,7 @@ export function BoardEditor() {
           awaitingInitialSceneRef.current = true
           savedSignature.current = getSceneSignature(finalScene)
           committedSignatureRef.current = savedSignature.current
+          filesRef.current = (finalScene.files ?? {}) as BinaryFiles
           elementsRef.current = finalScene.elements
           appStateRef.current = finalScene.appState
 
@@ -536,6 +549,7 @@ export function BoardEditor() {
 
           setInitialData({
             elements: prepareInitialElements(finalScene.elements),
+            files: (finalScene.files ?? {}) as BinaryFiles,
             appState: {
               ...finalScene.appState,
               theme: resolvedTheme,
@@ -552,6 +566,7 @@ export function BoardEditor() {
         if (details) {
           const { document, project } = details
           documentRef.current = document
+          filesRef.current = (document.scene.files ?? {}) as BinaryFiles
           elementsRef.current = document.scene.elements
           appStateRef.current = document.scene.appState
           savedSignature.current = getSceneSignature(document.scene)
@@ -569,6 +584,7 @@ export function BoardEditor() {
 
           setInitialData({
             elements: prepareInitialElements(document.scene.elements),
+            files: (document.scene.files ?? {}) as BinaryFiles,
             appState: {
               ...document.scene.appState,
               theme: resolvedTheme,
@@ -578,7 +594,7 @@ export function BoardEditor() {
           })
           triggerAutoCenter()
           setState(statusLabel(document.syncStatus))
-          void sharingService.syncBoardSceneToShare(boardId, document.scene, document.name)
+          void sharingService.syncBoardSceneToShare(boardId, document.scene, document.name).catch(console.error)
           return
         }
 
@@ -628,16 +644,26 @@ export function BoardEditor() {
             : prev,
         )
 
+        // Image bytes arrive through durable snapshots even during live element sync.
+        if (updatedConfig.scene?.files) {
+          filesRef.current = { ...filesRef.current, ...updatedConfig.scene.files } as BinaryFiles
+          apiRef.current?.addFiles(Object.values(filesRef.current))
+        }
         if (updatedConfig.scene && !pendingSceneRef.current && !isLazyCollabActiveRef.current) {
           // Firestore is a durable snapshot, not an authority allowed to roll
           // back newer local elements. Reconcile per element before rendering.
           const reconciledElements = reconcileElementsLWW(elementsRef.current, updatedConfig.scene.elements ?? [])
-          const reconciledScene = { ...updatedConfig.scene, elements: reconciledElements }
+          const reconciledScene = {
+            ...updatedConfig.scene,
+            elements: reconciledElements,
+            files: { ...filesRef.current, ...updatedConfig.scene.files },
+          }
           const newSignature = getSceneSignature(reconciledScene)
           if (newSignature !== savedSignature.current) {
             savedSignature.current = newSignature
             committedSignatureRef.current = newSignature
             elementsRef.current = reconciledElements
+            filesRef.current = (reconciledScene.files ?? {}) as BinaryFiles
             appStateRef.current = updatedConfig.scene.appState
             apiRef.current?.updateScene({
               elements: reconciledElements as any,
@@ -854,7 +880,7 @@ export function BoardEditor() {
                 exportWithDarkMode: operation.darkMode ?? resolvedTheme === 'dark',
                 theme: resolvedTheme,
               },
-              files: null,
+              files: filesRef.current,
               exportPadding: operation.exportPadding ?? 16,
               skipInliningFonts: true,
               renderEmbeddables: false,
@@ -1118,7 +1144,7 @@ export function BoardEditor() {
           documentRef.current = saved
           committedSignatureRef.current = getSceneSignature(scene)
           setBoardMeta((prev) => (prev ? { ...prev, updatedAt: saved.updatedAt } : prev))
-          void sharingService.syncBoardSceneToShare(boardId, scene, saved.name)
+          await sharingService.syncBoardSceneToShare(boardId, scene, saved.name)
           queryClient.invalidateQueries({ queryKey: ['workspace'] })
           setState(isSharedBoard ? 'Synced' : statusLabel(saved.syncStatus))
           return
@@ -1226,6 +1252,7 @@ export function BoardEditor() {
       if (elementsRef.current && elementsRef.current.length > 0) {
         const scene: BoardScene = {
           elements: elementsRef.current,
+          files: filesRef.current,
           appState: {
             theme: appStateRef.current.theme,
             viewBackgroundColor: appStateRef.current.viewBackgroundColor,
@@ -1261,6 +1288,7 @@ export function BoardEditor() {
     const elements = elementsRef.current.filter((e) => !e.isDeleted)
     const scene = {
       elements: elementsRef.current,
+      files: filesRef.current,
       appState: appStateRef.current,
     }
     const payload = documentRef.current ? { ...documentRef.current, scene } : scene
@@ -1272,12 +1300,18 @@ export function BoardEditor() {
   }, [])
 
   const onChange = useCallback(
-    (elements: readonly any[], appState: Record<string, any>) => {
+    (
+      elements: readonly any[],
+      appState: Record<string, any>,
+      files: BinaryFiles = apiRef.current?.getFiles() ?? {},
+    ) => {
       if (isReadOnly || isTransitioningCollab) return
       elementsRef.current = [...elements]
+      filesRef.current = files
       appStateRef.current = { ...appStateRef.current, selectedElementIds: appState.selectedElementIds }
       const scene = {
         elements: [...elements],
+        files,
         appState: {
           theme: appState.theme,
           viewBackgroundColor: appState.viewBackgroundColor,
@@ -1391,6 +1425,7 @@ export function BoardEditor() {
         ...newBoard,
         scene: {
           elements: elementsRef.current,
+          files: filesRef.current,
           appState: appStateRef.current,
         },
       })

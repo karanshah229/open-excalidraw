@@ -33,7 +33,20 @@ export type Board = {
   lastSyncError: string | null
   scene?: BoardScene
 }
-export type BoardScene = { elements: Record<string, unknown>[]; appState: Record<string, unknown> }
+export type BoardFile = {
+  id: string
+  dataURL: string
+  mimeType: string
+  created: number
+  lastRetrieved?: number
+  storagePath?: string
+}
+export type BoardScene = {
+  elements: Record<string, unknown>[]
+  appState: Record<string, unknown>
+  /** Includes deleted elements' assets so undo remains possible. */
+  files?: Record<string, BoardFile>
+}
 export type BoardDocument = Board & { scene: BoardScene; formatVersion: 1 }
 export type WorkspaceBootstrap = { project: Project | null; board: BoardDocument | null }
 

@@ -1,0 +1,16 @@
+{
+  "functions": { "source": "functions" },
+  "firestore": { "rules": "firestore.rules" },
+  "database": { "rules": "database.rules.json" },
+  "storage": { "rules": "storage.rules" },
+  "emulators": {
+    "auth": { "host": "127.0.0.1", "port": 19099 },
+    "firestore": { "host": "127.0.0.1", "port": 18080 },
+    "database": { "host": "127.0.0.1", "port": 19000 },
+    "storage": { "host": "127.0.0.1", "port": 19199 },
+    "functions": { "host": "127.0.0.1", "port": 15001 },
+    "ui": { "enabled": false },
+    "hub": { "host": "127.0.0.1", "port": 14400 },
+    "logging": { "host": "127.0.0.1", "port": 14500 }
+  }
+}
