@@ -38,7 +38,7 @@ export function ShareModal({
   const { user: authUser } = useAuth()
   const { fullName, user: localUser } = useUser()
 
-  const resolvedOwnerId = authUser?.uid || (ownerId && ownerId !== 'local-user' ? ownerId : 'local-user')
+  const resolvedOwnerId = ownerId && ownerId !== 'local-user' ? ownerId : (authUser?.uid ?? 'local-user')
   const resolvedOwnerName = ownerName || fullName || authUser?.displayName || 'User'
   const resolvedOwnerEmail = ownerEmail || authUser?.email || localUser?.email || ''
   const resolvedOwnerPhoto = ownerPhotoURL || authUser?.photoURL || undefined
@@ -48,12 +48,17 @@ export function ShareModal({
   const [emailError, setEmailError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
+  const [saveError, setSaveError] = useState('')
+  const [isLoading, setIsLoading] = useState(true)
   const [imgError, setImgError] = useState(false)
   const copyTimeoutRef = useRef<number>()
 
   // Load current sharing configuration when modal opens
   useEffect(() => {
     if (!open) return
+    setIsLoading(true)
+    setShareConfig(null)
+    setSaveError('')
     let active = true
 
     sharingService
@@ -68,6 +73,13 @@ export function ShareModal({
       .then((config) => {
         if (active) {
           setShareConfig(config)
+          setIsLoading(false)
+        }
+      })
+      .catch((error) => {
+        if (active) {
+          setSaveError(error.message)
+          setIsLoading(false)
         }
       })
 
@@ -81,7 +93,7 @@ export function ShareModal({
     if (shareConfig) {
       return {
         ...shareConfig,
-        ownerId: authUser?.uid || (shareConfig.ownerId !== 'local-user' ? shareConfig.ownerId : 'local-user'),
+        ownerId: shareConfig.ownerId !== 'local-user' ? shareConfig.ownerId : resolvedOwnerId,
         ownerName: shareConfig.ownerName || resolvedOwnerName,
         ownerEmail: shareConfig.ownerEmail || resolvedOwnerEmail,
         ownerPhotoURL: shareConfig.ownerPhotoURL || resolvedOwnerPhoto,
@@ -118,6 +130,20 @@ export function ShareModal({
     scene,
   ])
 
+  const persistShare = async (config: BoardShareConfig) => {
+    setIsSaving(true)
+    setSaveError('')
+    try {
+      await sharingService.saveShareConfig(config)
+    } catch (error) {
+      setShareConfig(effectiveConfig)
+      setSaveError(error instanceof Error ? error.message : 'Sharing could not be saved.')
+      throw error
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
   const handleGeneralAccessChange = async (nextAccess: ShareAccessLevel) => {
     if (effectiveConfig.generalAccess === nextAccess) return
     const updated: BoardShareConfig = {
@@ -127,7 +153,7 @@ export function ShareModal({
     }
     setShareConfig(updated)
     try {
-      await sharingService.saveShareConfig(updated)
+      await persistShare(updated)
       onShareConfigSaved?.()
     } catch (err) {
       console.error('Failed to update general access:', err)
@@ -143,7 +169,7 @@ export function ShareModal({
     }
     setShareConfig(updated)
     try {
-      await sharingService.saveShareConfig(updated)
+      await persistShare(updated)
       onShareConfigSaved?.()
     } catch (err) {
       console.error('Failed to update general role:', err)
@@ -171,7 +197,7 @@ export function ShareModal({
 
     setShareConfig(updated)
     try {
-      await sharingService.saveShareConfig(updated)
+      await persistShare(updated)
       onShareConfigSaved?.()
     } catch (err) {
       console.error('Failed to update collaborator role:', err)
@@ -214,7 +240,7 @@ export function ShareModal({
     setEmailInput('')
 
     try {
-      await sharingService.saveShareConfig(updated)
+      await persistShare(updated)
       onShareConfigSaved?.()
     } catch (err) {
       console.error('Failed to add collaborator:', err)
@@ -238,7 +264,7 @@ export function ShareModal({
     setShareConfig(updated)
 
     try {
-      await sharingService.saveShareConfig(updated)
+      await persistShare(updated)
       onShareConfigSaved?.()
     } catch (err) {
       console.error('Failed to remove collaborator:', err)
@@ -260,20 +286,22 @@ export function ShareModal({
   const handleDone = async () => {
     setIsSaving(true)
     try {
-      await sharingService.saveShareConfig({
+      await persistShare({
         ...effectiveConfig,
         scene: scene ?? effectiveConfig.scene,
       })
       onShareConfigSaved?.()
+      onOpenChange(false)
     } catch (err) {
       console.error('Failed to save share config on done:', err)
     } finally {
       setIsSaving(false)
-      onOpenChange(false)
     }
   }
 
   const collaboratorsList = Object.values(effectiveConfig.collaborators)
+
+  const controlsDisabled = isSaving || isLoading || !shareConfig
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -323,101 +351,254 @@ export function ShareModal({
             </div>
           </div>
 
-          {/* Add people input */}
-          <div className="google-share-input-section">
-            <div className="google-share-input-box">
-              <div className="google-share-input-row">
-                <input
-                  id="share-email-input"
-                  type="email"
-                  className="google-share-text-input"
-                  placeholder="Add people by email..."
-                  value={emailInput}
-                  onChange={(e) => {
-                    setEmailInput(e.target.value)
-                    if (emailError) setEmailError(null)
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault()
-                      handleAddEmail()
+          {saveError && <p role="alert">{saveError}</p>}
+          {isLoading && <p role="status">Loading permissions…</p>}
+          <fieldset disabled={controlsDisabled} style={{ border: 0, padding: 0, margin: 0 }}>
+            {effectiveConfig.projectId && (
+              <label className="project-owner-filter">
+                Project access
+                <select
+                  aria-label="Board project access"
+                  value={effectiveConfig.inheritProjectAccess === false ? 'custom' : 'inherit'}
+                  onChange={async (event) => {
+                    const updated = { ...effectiveConfig, inheritProjectAccess: event.target.value === 'inherit' }
+                    try {
+                      await persistShare(updated)
+                      setShareConfig(updated)
+                      onShareConfigSaved?.()
+                    } catch {
+                      /* Error is shown above. */
                     }
                   }}
-                />
-                {emailInput.trim() && (
-                  <button type="button" className="google-share-add-btn" onClick={handleAddEmail}>
-                    <Plus size={15} />
-                    <span>Add</span>
-                  </button>
-                )}
-              </div>
-            </div>
-            {emailError && <p className="google-share-error-message">{emailError}</p>}
-          </div>
-
-          {/* People with access */}
-          <div className="google-share-section">
-            <h3 className="google-share-section-title">People with access</h3>
-
-            <div className="google-share-list">
-              {/* Owner Row */}
-              <div className="google-share-user-row">
-                <div className="google-share-avatar-col">
-                  {resolvedOwnerPhoto && !imgError ? (
-                    <img
-                      src={resolvedOwnerPhoto}
-                      alt={resolvedOwnerName}
-                      className="google-share-avatar-img"
-                      referrerPolicy="no-referrer"
-                      onError={() => setImgError(true)}
-                    />
-                  ) : (
-                    <div className="google-share-avatar-placeholder">
-                      {resolvedOwnerName.charAt(0).toUpperCase() || <UserIcon size={16} />}
-                    </div>
+                >
+                  <option value="inherit">Use project access</option>
+                  <option value="custom">Custom board access</option>
+                </select>
+              </label>
+            )}
+            {/* Add people input */}
+            <div className="google-share-input-section">
+              <div className="google-share-input-box">
+                <div className="google-share-input-row">
+                  <input
+                    id="share-email-input"
+                    type="email"
+                    className="google-share-text-input"
+                    placeholder="Add people by email..."
+                    value={emailInput}
+                    onChange={(e) => {
+                      setEmailInput(e.target.value)
+                      if (emailError) setEmailError(null)
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault()
+                        handleAddEmail()
+                      }
+                    }}
+                  />
+                  {emailInput.trim() && (
+                    <button type="button" className="google-share-add-btn" onClick={handleAddEmail}>
+                      <Plus size={15} />
+                      <span>Add</span>
+                    </button>
                   )}
                 </div>
-
-                <div className="google-share-user-info">
-                  <div className="google-share-user-name">
-                    {resolvedOwnerName} <span className="google-share-you-tag">(you)</span>
-                  </div>
-                  {resolvedOwnerEmail && <div className="google-share-user-email">{resolvedOwnerEmail}</div>}
-                </div>
-
-                <div className="google-share-role-col">
-                  <span className="google-share-owner-badge">Owner</span>
-                </div>
               </div>
+              {emailError && <p className="google-share-error-message">{emailError}</p>}
+            </div>
 
-              {/* Invited Collaborators */}
-              {collaboratorsList.map((collab) => (
-                <div className="google-share-user-row" key={collab.email}>
+            {/* People with access */}
+            <div className="google-share-section">
+              <h3 className="google-share-section-title">People with access</h3>
+
+              <div className="google-share-list">
+                {/* Owner Row */}
+                <div className="google-share-user-row">
                   <div className="google-share-avatar-col">
-                    <div className="google-share-avatar-placeholder google-share-avatar-collaborator">
-                      {collab.email.charAt(0).toUpperCase()}
-                    </div>
+                    {resolvedOwnerPhoto && !imgError ? (
+                      <img
+                        src={resolvedOwnerPhoto}
+                        alt={resolvedOwnerName}
+                        className="google-share-avatar-img"
+                        referrerPolicy="no-referrer"
+                        onError={() => setImgError(true)}
+                      />
+                    ) : (
+                      <div className="google-share-avatar-placeholder">
+                        {resolvedOwnerName.charAt(0).toUpperCase() || <UserIcon size={16} />}
+                      </div>
+                    )}
                   </div>
 
                   <div className="google-share-user-info">
-                    <div className="google-share-user-name">{collab.email}</div>
+                    <div className="google-share-user-name">
+                      {resolvedOwnerName} <span className="google-share-you-tag">(you)</span>
+                    </div>
+                    {resolvedOwnerEmail && <div className="google-share-user-email">{resolvedOwnerEmail}</div>}
                   </div>
 
                   <div className="google-share-role-col">
+                    <span className="google-share-owner-badge">Owner</span>
+                  </div>
+                </div>
+
+                {/* Invited Collaborators */}
+                {collaboratorsList.map((collab) => (
+                  <div className="google-share-user-row" key={collab.email}>
+                    <div className="google-share-avatar-col">
+                      <div className="google-share-avatar-placeholder google-share-avatar-collaborator">
+                        {collab.email.charAt(0).toUpperCase()}
+                      </div>
+                    </div>
+
+                    <div className="google-share-user-info">
+                      <div className="google-share-user-name">{collab.email}</div>
+                    </div>
+
+                    <div className="google-share-role-col">
+                      <DropdownMenu.Root>
+                        <DropdownMenu.Trigger asChild>
+                          <button type="button" className="google-share-role-trigger" aria-label="Change permission">
+                            <span>{collab.role === 'editor' ? 'Editor' : 'Viewer'}</span>
+                            <ChevronDown size={14} />
+                          </button>
+                        </DropdownMenu.Trigger>
+                        <DropdownMenu.Portal>
+                          <DropdownMenu.Content className="google-share-dropdown-menu" sideOffset={4} align="end">
+                            <DropdownMenu.Item
+                              disabled={controlsDisabled}
+                              className={`google-share-dropdown-item ${collab.role === 'viewer' ? 'selected' : ''}`}
+                              onSelect={() => handleCollaboratorRoleChange(collab.email, 'viewer')}
+                            >
+                              {collab.role === 'viewer' ? (
+                                <Check size={16} className="google-share-check-icon" />
+                              ) : (
+                                <span className="google-share-empty-check" />
+                              )}
+                              <span>Viewer</span>
+                            </DropdownMenu.Item>
+                            <DropdownMenu.Item
+                              disabled={controlsDisabled}
+                              className={`google-share-dropdown-item ${collab.role === 'editor' ? 'selected' : ''}`}
+                              onSelect={() => handleCollaboratorRoleChange(collab.email, 'editor')}
+                            >
+                              {collab.role === 'editor' ? (
+                                <Check size={16} className="google-share-check-icon" />
+                              ) : (
+                                <span className="google-share-empty-check" />
+                              )}
+                              <span>Editor</span>
+                            </DropdownMenu.Item>
+                            <DropdownMenu.Separator className="google-share-dropdown-separator" />
+                            <DropdownMenu.Item
+                              disabled={controlsDisabled}
+                              className="google-share-dropdown-item google-share-dropdown-danger"
+                              onSelect={() => handleRemoveCollaborator(collab.email)}
+                            >
+                              <Trash2 size={15} className="google-share-trash-icon" />
+                              <span>Remove access</span>
+                            </DropdownMenu.Item>
+                          </DropdownMenu.Content>
+                        </DropdownMenu.Portal>
+                      </DropdownMenu.Root>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* General access */}
+            <div className="google-share-section">
+              <h3 className="google-share-section-title">General access</h3>
+
+              <div className="google-share-general-row">
+                <div
+                  className={`google-share-access-icon-badge ${
+                    effectiveConfig.generalAccess === 'anyone_with_link' ? 'anyone-link' : 'restricted'
+                  }`}
+                >
+                  {effectiveConfig.generalAccess === 'anyone_with_link' ? <Globe size={18} /> : <Lock size={18} />}
+                </div>
+
+                <div className="google-share-general-info">
+                  <DropdownMenu.Root>
+                    <DropdownMenu.Trigger asChild>
+                      <button
+                        type="button"
+                        className="google-share-general-select-btn"
+                        aria-label="General access setting"
+                      >
+                        <span>
+                          {effectiveConfig.generalAccess === 'anyone_with_link' ? 'Anyone with the link' : 'Restricted'}
+                        </span>
+                        <ChevronDown size={14} className="google-share-select-chevron" />
+                      </button>
+                    </DropdownMenu.Trigger>
+
+                    <DropdownMenu.Portal>
+                      <DropdownMenu.Content className="google-share-dropdown-menu" sideOffset={4} align="start">
+                        <DropdownMenu.Item
+                          disabled={controlsDisabled}
+                          className={`google-share-dropdown-item ${
+                            effectiveConfig.generalAccess === 'restricted' ? 'selected' : ''
+                          }`}
+                          onSelect={() => handleGeneralAccessChange('restricted')}
+                        >
+                          {effectiveConfig.generalAccess === 'restricted' ? (
+                            <Check size={16} className="google-share-check-icon" />
+                          ) : (
+                            <span className="google-share-empty-check" />
+                          )}
+                          <span>Restricted</span>
+                        </DropdownMenu.Item>
+
+                        <DropdownMenu.Item
+                          disabled={controlsDisabled}
+                          className={`google-share-dropdown-item ${
+                            effectiveConfig.generalAccess === 'anyone_with_link' ? 'selected' : ''
+                          }`}
+                          onSelect={() => handleGeneralAccessChange('anyone_with_link')}
+                        >
+                          {effectiveConfig.generalAccess === 'anyone_with_link' ? (
+                            <Check size={16} className="google-share-check-icon" />
+                          ) : (
+                            <span className="google-share-empty-check" />
+                          )}
+                          <span>Anyone with the link</span>
+                        </DropdownMenu.Item>
+                      </DropdownMenu.Content>
+                    </DropdownMenu.Portal>
+                  </DropdownMenu.Root>
+
+                  <p className="google-share-general-desc">
+                    {effectiveConfig.generalAccess === 'anyone_with_link'
+                      ? effectiveConfig.generalRole === 'editor'
+                        ? 'Anyone on the internet with the link can edit'
+                        : 'Anyone on the internet with the link can view'
+                      : 'Only people with access can open with the link'}
+                  </p>
+                </div>
+
+                {effectiveConfig.generalAccess === 'anyone_with_link' && (
+                  <div className="google-share-general-role-col">
                     <DropdownMenu.Root>
                       <DropdownMenu.Trigger asChild>
-                        <button type="button" className="google-share-role-trigger" aria-label="Change permission">
-                          <span>{collab.role === 'editor' ? 'Editor' : 'Viewer'}</span>
+                        <button type="button" className="google-share-role-trigger" aria-label="General access role">
+                          <span>{effectiveConfig.generalRole === 'editor' ? 'Editor' : 'Viewer'}</span>
                           <ChevronDown size={14} />
                         </button>
                       </DropdownMenu.Trigger>
                       <DropdownMenu.Portal>
                         <DropdownMenu.Content className="google-share-dropdown-menu" sideOffset={4} align="end">
                           <DropdownMenu.Item
-                            className={`google-share-dropdown-item ${collab.role === 'viewer' ? 'selected' : ''}`}
-                            onSelect={() => handleCollaboratorRoleChange(collab.email, 'viewer')}
+                            disabled={controlsDisabled}
+                            className={`google-share-dropdown-item ${
+                              effectiveConfig.generalRole === 'viewer' ? 'selected' : ''
+                            }`}
+                            onSelect={() => handleGeneralRoleChange('viewer')}
                           >
-                            {collab.role === 'viewer' ? (
+                            {effectiveConfig.generalRole === 'viewer' ? (
                               <Check size={16} className="google-share-check-icon" />
                             ) : (
                               <span className="google-share-empty-check" />
@@ -425,148 +606,27 @@ export function ShareModal({
                             <span>Viewer</span>
                           </DropdownMenu.Item>
                           <DropdownMenu.Item
-                            className={`google-share-dropdown-item ${collab.role === 'editor' ? 'selected' : ''}`}
-                            onSelect={() => handleCollaboratorRoleChange(collab.email, 'editor')}
+                            disabled={controlsDisabled}
+                            className={`google-share-dropdown-item ${
+                              effectiveConfig.generalRole === 'editor' ? 'selected' : ''
+                            }`}
+                            onSelect={() => handleGeneralRoleChange('editor')}
                           >
-                            {collab.role === 'editor' ? (
+                            {effectiveConfig.generalRole === 'editor' ? (
                               <Check size={16} className="google-share-check-icon" />
                             ) : (
                               <span className="google-share-empty-check" />
                             )}
                             <span>Editor</span>
                           </DropdownMenu.Item>
-                          <DropdownMenu.Separator className="google-share-dropdown-separator" />
-                          <DropdownMenu.Item
-                            className="google-share-dropdown-item google-share-dropdown-danger"
-                            onSelect={() => handleRemoveCollaborator(collab.email)}
-                          >
-                            <Trash2 size={15} className="google-share-trash-icon" />
-                            <span>Remove access</span>
-                          </DropdownMenu.Item>
                         </DropdownMenu.Content>
                       </DropdownMenu.Portal>
                     </DropdownMenu.Root>
                   </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* General access */}
-          <div className="google-share-section">
-            <h3 className="google-share-section-title">General access</h3>
-
-            <div className="google-share-general-row">
-              <div
-                className={`google-share-access-icon-badge ${
-                  effectiveConfig.generalAccess === 'anyone_with_link' ? 'anyone-link' : 'restricted'
-                }`}
-              >
-                {effectiveConfig.generalAccess === 'anyone_with_link' ? <Globe size={18} /> : <Lock size={18} />}
+                )}
               </div>
-
-              <div className="google-share-general-info">
-                <DropdownMenu.Root>
-                  <DropdownMenu.Trigger asChild>
-                    <button
-                      type="button"
-                      className="google-share-general-select-btn"
-                      aria-label="General access setting"
-                    >
-                      <span>
-                        {effectiveConfig.generalAccess === 'anyone_with_link' ? 'Anyone with the link' : 'Restricted'}
-                      </span>
-                      <ChevronDown size={14} className="google-share-select-chevron" />
-                    </button>
-                  </DropdownMenu.Trigger>
-
-                  <DropdownMenu.Portal>
-                    <DropdownMenu.Content className="google-share-dropdown-menu" sideOffset={4} align="start">
-                      <DropdownMenu.Item
-                        className={`google-share-dropdown-item ${
-                          effectiveConfig.generalAccess === 'restricted' ? 'selected' : ''
-                        }`}
-                        onSelect={() => handleGeneralAccessChange('restricted')}
-                      >
-                        {effectiveConfig.generalAccess === 'restricted' ? (
-                          <Check size={16} className="google-share-check-icon" />
-                        ) : (
-                          <span className="google-share-empty-check" />
-                        )}
-                        <span>Restricted</span>
-                      </DropdownMenu.Item>
-
-                      <DropdownMenu.Item
-                        className={`google-share-dropdown-item ${
-                          effectiveConfig.generalAccess === 'anyone_with_link' ? 'selected' : ''
-                        }`}
-                        onSelect={() => handleGeneralAccessChange('anyone_with_link')}
-                      >
-                        {effectiveConfig.generalAccess === 'anyone_with_link' ? (
-                          <Check size={16} className="google-share-check-icon" />
-                        ) : (
-                          <span className="google-share-empty-check" />
-                        )}
-                        <span>Anyone with the link</span>
-                      </DropdownMenu.Item>
-                    </DropdownMenu.Content>
-                  </DropdownMenu.Portal>
-                </DropdownMenu.Root>
-
-                <p className="google-share-general-desc">
-                  {effectiveConfig.generalAccess === 'anyone_with_link'
-                    ? effectiveConfig.generalRole === 'editor'
-                      ? 'Anyone on the internet with the link can edit'
-                      : 'Anyone on the internet with the link can view'
-                    : 'Only people with access can open with the link'}
-                </p>
-              </div>
-
-              {effectiveConfig.generalAccess === 'anyone_with_link' && (
-                <div className="google-share-general-role-col">
-                  <DropdownMenu.Root>
-                    <DropdownMenu.Trigger asChild>
-                      <button type="button" className="google-share-role-trigger" aria-label="General access role">
-                        <span>{effectiveConfig.generalRole === 'editor' ? 'Editor' : 'Viewer'}</span>
-                        <ChevronDown size={14} />
-                      </button>
-                    </DropdownMenu.Trigger>
-                    <DropdownMenu.Portal>
-                      <DropdownMenu.Content className="google-share-dropdown-menu" sideOffset={4} align="end">
-                        <DropdownMenu.Item
-                          className={`google-share-dropdown-item ${
-                            effectiveConfig.generalRole === 'viewer' ? 'selected' : ''
-                          }`}
-                          onSelect={() => handleGeneralRoleChange('viewer')}
-                        >
-                          {effectiveConfig.generalRole === 'viewer' ? (
-                            <Check size={16} className="google-share-check-icon" />
-                          ) : (
-                            <span className="google-share-empty-check" />
-                          )}
-                          <span>Viewer</span>
-                        </DropdownMenu.Item>
-                        <DropdownMenu.Item
-                          className={`google-share-dropdown-item ${
-                            effectiveConfig.generalRole === 'editor' ? 'selected' : ''
-                          }`}
-                          onSelect={() => handleGeneralRoleChange('editor')}
-                        >
-                          {effectiveConfig.generalRole === 'editor' ? (
-                            <Check size={16} className="google-share-check-icon" />
-                          ) : (
-                            <span className="google-share-empty-check" />
-                          )}
-                          <span>Editor</span>
-                        </DropdownMenu.Item>
-                      </DropdownMenu.Content>
-                    </DropdownMenu.Portal>
-                  </DropdownMenu.Root>
-                </div>
-              )}
             </div>
-          </div>
-
+          </fieldset>
           {/* Footer actions */}
           <div className="google-share-footer">
             <button
@@ -578,7 +638,7 @@ export function ShareModal({
               <span>{copied ? 'Link copied' : 'Copy link'}</span>
             </button>
 
-            <button type="button" className="google-share-done-btn" onClick={handleDone} disabled={isSaving}>
+            <button type="button" className="google-share-done-btn" onClick={handleDone} disabled={controlsDisabled}>
               Done
             </button>
           </div>

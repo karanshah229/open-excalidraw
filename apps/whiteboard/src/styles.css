@@ -3863,3 +3863,111 @@ button {
   width: 100%;
   justify-content: center;
 }
+
+.group-header-toggle {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: inherit;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  padding: 4px 0;
+}
+.group-header-title,
+.group-header-meta {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.group-header-title {
+  flex-wrap: wrap;
+  text-align: left;
+}
+.project-menu-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  border-radius: 6px;
+}
+.project-menu-trigger:hover {
+  background: var(--bg-surface-hover);
+}
+.project-share-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border: 0;
+  padding: 16px 0;
+}
+.project-share-fields label,
+.project-owner-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.project-share-fields select,
+.project-owner-filter select {
+  padding: 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-surface);
+  color: inherit;
+}
+.project-person {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.project-person span {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+.board-private-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  background: var(--bg-surface);
+  padding: 4px 6px;
+  border-radius: 6px;
+}
+.board-card:focus-within .board-card-share-btn,
+.board-card:focus-within .board-card-delete-btn {
+  opacity: 1;
+}
+.export-failures {
+  max-height: 180px;
+  overflow: auto;
+  padding-left: 20px;
+}
+@media (hover: none) {
+  .board-card-share-btn,
+  .board-card-delete-btn {
+    opacity: 1;
+  }
+}
+@media (max-width: 600px) {
+  .group-header-toggle {
+    align-items: flex-start;
+  }
+  .group-header-meta {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  .edited-badge {
+    font-size: 10px;
+  }
+}

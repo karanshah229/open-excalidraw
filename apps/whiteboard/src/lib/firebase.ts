@@ -100,19 +100,21 @@ function setupEmulators(_currentApp: FirebaseApp) {
   const host = typeof window !== 'undefined' && window.location?.hostname ? window.location.hostname : '127.0.0.1'
 
   if (auth && !connectedEmulators.has('auth')) {
-    connectAuthEmulator(auth, `http://${host}:9099`, { disableWarnings: true })
+    connectAuthEmulator(auth, `http://${host}:${Number(env.VITE_FIREBASE_AUTH_EMULATOR_PORT || 9099)}`, {
+      disableWarnings: true,
+    })
     connectedEmulators.add('auth')
   }
   if (firestore && !connectedEmulators.has('firestore')) {
-    connectFirestoreEmulator(firestore, host, 8080)
+    connectFirestoreEmulator(firestore, host, Number(env.VITE_FIREBASE_FIRESTORE_EMULATOR_PORT || 8080))
     connectedEmulators.add('firestore')
   }
   if (rtdb && !connectedEmulators.has('rtdb')) {
-    connectDatabaseEmulator(rtdb, host, 9000)
+    connectDatabaseEmulator(rtdb, host, Number(env.VITE_FIREBASE_DATABASE_EMULATOR_PORT || 9000))
     connectedEmulators.add('rtdb')
   }
   if (storage && !connectedEmulators.has('storage')) {
-    connectStorageEmulator(storage, host, 9199)
+    connectStorageEmulator(storage, host, Number(env.VITE_FIREBASE_STORAGE_EMULATOR_PORT || 9199))
     connectedEmulators.add('storage')
   }
 }

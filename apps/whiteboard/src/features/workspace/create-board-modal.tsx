@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
 import * as Popover from '@radix-ui/react-popover'
 import { Check, ChevronDown, Plus, Search, X } from 'lucide-react'
@@ -29,9 +29,10 @@ export function CreateBoardModal({
   const [isDropdownOpen, setIsDropdownOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
 
-  // Reset form whenever modal opens
+  const wasOpen = useRef(false)
+  // Refreshes must not reset a form the user is already editing.
   useEffect(() => {
-    if (open) {
+    if (open && !wasOpen.current) {
       setBoardName(initialBoardName || '')
       setSelectedProjectId(defaultProjectId || (projects[0]?.id ?? ''))
       setIsCreatingProject(projects.length === 0)
@@ -40,6 +41,7 @@ export function CreateBoardModal({
       setIsDropdownOpen(false)
       setSearchQuery('')
     }
+    wasOpen.current = open
   }, [open, projects, defaultProjectId, initialBoardName])
 
   const selectedProject = projects.find((p) => p.id === selectedProjectId)
@@ -184,11 +186,7 @@ export function CreateBoardModal({
                       )}
                     </div>
 
-                    <div
-                      className="project-dropdown-list"
-                      role="listbox"
-                      onWheel={(e) => e.stopPropagation()}
-                    >
+                    <div className="project-dropdown-list" role="listbox" onWheel={(e) => e.stopPropagation()}>
                       {filteredProjects.length > 0 ? (
                         filteredProjects.map((project) => {
                           const isSelected = !isCreatingProject && selectedProjectId === project.id

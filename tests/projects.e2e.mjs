@@ -1,0 +1,777 @@
+import assert from 'node:assert/strict'
+import { createRequire } from 'node:module'
+import { fileURLToPath } from 'node:url'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import puppeteer from 'puppeteer-core'
+
+const require = createRequire(new URL('../functions/package.json', import.meta.url))
+const webRequire = createRequire(new URL('../apps/whiteboard/package.json', import.meta.url))
+const { initializeApp } = require('firebase-admin/app')
+const { getAuth } = require('firebase-admin/auth')
+const { getFirestore } = require('firebase-admin/firestore')
+const { getDatabase } = require('firebase-admin/database')
+const projectId = 'demo-projects'
+Object.assign(process.env, {
+  FIREBASE_AUTH_EMULATOR_HOST: '127.0.0.1:29099',
+  FIRESTORE_EMULATOR_HOST: '127.0.0.1:28080',
+  FIREBASE_DATABASE_EMULATOR_HOST: '127.0.0.1:29000',
+  VITE_FIREBASE_API_KEY: 'emulator-only',
+  VITE_FIREBASE_AUTH_DOMAIN: `${projectId}.firebaseapp.com`,
+  VITE_FIREBASE_PROJECT_ID: projectId,
+  VITE_FIREBASE_APP_ID: 'emulator-only',
+  VITE_FIREBASE_STORAGE_BUCKET: `${projectId}.appspot.com`,
+  VITE_FIREBASE_DATABASE_URL: `http://127.0.0.1:29000?ns=${projectId}`,
+  VITE_FIREBASE_AUTH_EMULATOR_PORT: '29099',
+  VITE_FIREBASE_FIRESTORE_EMULATOR_PORT: '28080',
+  VITE_FIREBASE_DATABASE_EMULATOR_PORT: '29000',
+  VITE_FIREBASE_STORAGE_EMULATOR_PORT: '29199',
+  VITE_FIREBASE_FUNCTIONS_EMULATOR_PORT: '25001',
+  VITE_USE_FIREBASE_EMULATOR: 'true',
+  VITE_FIREBASE_SYNC_ACCESS_FUNCTION_REGION: 'us-central1',
+  VITE_RECAPTCHA_SITE_KEY: '',
+  VITE_FIREBASE_APPCHECK_KEY: '',
+})
+const admin = initializeApp({ projectId, databaseURL: `http://127.0.0.1:29000?ns=${projectId}` }, 'projects-tests')
+const db = getFirestore(admin),
+  rtdb = getDatabase(admin)
+const rules = await readFile(new URL('../database.rules.json', import.meta.url), 'utf8')
+const installed = await fetch(`http://127.0.0.1:29000/.settings/rules.json?ns=${projectId}`, {
+  method: 'PUT',
+  headers: { Authorization: 'Bearer owner' },
+  body: rules,
+})
+assert.equal(installed.status, 200, 'Repository RTDB rules must compile and install')
+const imageData =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aOioAAAAASUVORK5CYII='
+const password = 'Project-fixture-123!'
+const identities = {}
+for (const role of ['owner', 'editor', 'viewer', 'outsider']) {
+  const user = await getAuth(admin).createUser({
+    email: `${role}@projects.test`,
+    password,
+    emailVerified: true,
+    displayName: role,
+  })
+  identities[role] = user
+}
+const { createServer } = await import(webRequire.resolve('vite'))
+const server = await createServer({
+  root: fileURLToPath(new URL('../apps/whiteboard', import.meta.url)),
+  server: { host: '127.0.0.1', port: 15186, strictPort: true },
+  plugins: [
+    {
+      name: 'projects-test-entry',
+      transformIndexHtml: {
+        order: 'pre',
+        handler: (html) => html.replace('/src/main.tsx', '/tests/projects-bootstrap.ts'),
+      },
+    },
+  ],
+})
+await server.listen()
+const browser = await puppeteer.launch({
+  executablePath: process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  headless: true,
+})
+const base = 'http://127.0.0.1:15186',
+  requests = [],
+  failures = [],
+  results = []
+const out = fileURLToPath(new URL('../logs/projects-e2e/', import.meta.url))
+await mkdir(out, { recursive: true })
+async function page(role) {
+  const context = await browser.createBrowserContext(),
+    page = await context.newPage()
+  await page.setViewport({ width: 1400, height: 1000 })
+  page.on('pageerror', (error) => failures.push({ role, error: error.message }))
+  page.on('response', (response) => {
+    if (/127\.0\.0\.1:(25001|28080|29099|29199)/.test(response.url()))
+      requests.push({ role, status: response.status(), url: response.url() })
+  })
+  await page.setRequestInterception(true)
+  page.on('request', (request) => {
+    // Test identities and data must never reach production Firebase endpoints.
+    if (/googleapis\.com|firebaseio\.com|cloudfunctions\.net/.test(new URL(request.url()).hostname))
+      void request.abort()
+    else if (page.failFunction && request.method() === 'POST' && request.url().includes(`/${page.failFunction}`))
+      void request.respond({
+        status: 503,
+        headers: { 'Access-Control-Allow-Origin': base, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ error: { status: 'UNAVAILABLE', message: 'Injected service failure' } }),
+      })
+    else void request.continue()
+  })
+  await page.goto(base, { waitUntil: 'domcontentloaded' })
+  await page.waitForFunction(() => Boolean(window.__projectsTest))
+  if (role) {
+    await page.evaluate(
+      async ({ email, password }) => {
+        const t = window.__projectsTest
+        await t.auth.signInWithEmailAndPassword(t.firebase.getFirebaseAuth(), email, password)
+      },
+      { email: identities[role].email, password },
+    )
+    await page.waitForSelector('.workspace-intro')
+  }
+  return page
+}
+async function clickText(page, text, selector = 'button,[role="menuitem"]') {
+  await page.waitForFunction(
+    (text, selector) =>
+      [...document.querySelectorAll(selector)].some(
+        (node) => node.textContent.trim() === text && !node.matches(':disabled'),
+      ),
+    {},
+    text,
+    selector,
+  )
+  await page.evaluate(
+    (text, selector) =>
+      [...document.querySelectorAll(selector)]
+        .find((node) => node.textContent.trim() === text && !node.matches(':disabled'))
+        .click(),
+    text,
+    selector,
+  )
+}
+async function menu(page, name, action) {
+  await page.click(`[aria-label="Project actions for ${name}"]`)
+  await clickText(page, action, '[role="menuitem"]')
+}
+async function until(check, label) {
+  for (let index = 0; index < 100; index++) {
+    if (await check()) return
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+  throw new Error(`Timed out: ${label}`)
+}
+async function record(name, fn) {
+  await fn()
+  results.push(name)
+  console.log(`PASS: ${name}`)
+}
+let owner, editor, viewer, outsider, anonymous, project, boardId, createdByEditor
+try {
+  owner = await page('owner')
+  await record('Create project and board through the UI; real Firestore sync', async () => {
+    await clickText(owner, 'New board')
+    await owner.type('#board-name-input', 'Original board')
+    await owner.type('#new-project-name', 'Project Alpha')
+    await clickText(owner, 'Create board')
+    await owner.waitForFunction(() => location.pathname.startsWith('/boards/'))
+    boardId = new URL(owner.url()).pathname.split('/').pop()
+    await until(
+      async () => !(await db.collection(`users/${identities.owner.uid}/projects`).get()).empty,
+      'project uploaded',
+    )
+    project = (await db.collection(`users/${identities.owner.uid}/projects`).get()).docs[0]
+    await until(async () => (await project.ref.collection('boards').doc(boardId).get()).exists, 'board uploaded')
+    await owner.waitForFunction(() => Boolean(window.__excalidrawAPI))
+    await owner.evaluate((dataURL) => {
+      const t = window.__projectsTest,
+        api = window.__excalidrawAPI
+      window.__setUserInteracted()
+      api.addFiles([{ id: 'fixture-image', mimeType: 'image/png', dataURL, created: 1 }])
+      api.updateScene({
+        elements: t.excalidraw.convertToExcalidrawElements(
+          [
+            {
+              id: 'fixture-image-element',
+              type: 'image',
+              fileId: 'fixture-image',
+              status: 'saved',
+              x: 0,
+              y: 0,
+              width: 100,
+              height: 100,
+            },
+          ],
+          { regenerateIds: false },
+        ),
+      })
+    }, imageData)
+    await until(
+      async () =>
+        (await project.ref.collection('boards').doc(boardId).get()).data()?.scene?.files?.['fixture-image']
+          ?.storagePath,
+      'image uploaded through Storage network',
+    )
+    await owner.goto(base)
+    await owner.waitForSelector('[aria-label="Project actions for Project Alpha"]')
+  })
+  await record('Project menu preserves accordion; rename survives reload', async () => {
+    const before = await owner.$eval('.group-header-toggle', (node) => node.getAttribute('aria-expanded'))
+    await menu(owner, 'Project Alpha', 'Rename')
+    assert.equal(await owner.$eval('.group-header-toggle', (node) => node.getAttribute('aria-expanded')), before)
+    await owner.$eval('[aria-label="Project name"]', (node) => node.select())
+    await owner.type('[aria-label="Project name"]', 'Project Beta')
+    await clickText(owner, 'Save')
+    await owner.waitForFunction(() => !document.querySelector('[role="dialog"]'))
+    await owner.reload()
+    await owner.waitForSelector('[aria-label="Project actions for Project Beta"]')
+    assert.equal((await project.ref.get()).data().name, 'Project Beta')
+  })
+  await record('Project sharing provisions existing boards; verified email membership', async () => {
+    await menu(owner, 'Project Beta', 'Share')
+    await owner.waitForFunction(
+      () => !document.querySelector('[aria-label="Project collaborator email"]').matches(':disabled'),
+    )
+    for (const role of ['editor', 'viewer']) {
+      await owner.type('[aria-label="Project collaborator email"]', identities[role].email)
+      await clickText(owner, 'Add person')
+    }
+    await owner.waitForSelector(`[aria-label="Role for ${identities.editor.email}"]`)
+    await owner.select(`[aria-label="Role for ${identities.editor.email}"]`, 'editor')
+    await clickText(owner, 'Save')
+    await owner.waitForFunction(() => !document.querySelector('[role="dialog"]'), { timeout: 60000 })
+    const config = (await db.doc(`projectShares/${project.id}`).get()).data()
+    assert.deepEqual(config.invitedEmails.sort(), [identities.editor.email, identities.viewer.email].sort())
+    editor = await page('editor')
+    viewer = await page('viewer')
+    outsider = await page('outsider')
+    await editor.waitForSelector(`[data-board-id="${boardId}"]`)
+    await viewer.waitForSelector(`[data-board-id="${boardId}"]`)
+    assert.match(
+      await editor.$eval(
+        '[aria-label="Project actions for Project Beta"]',
+        (node) => node.closest('.group-header').textContent,
+      ),
+      /Shared.*Editor/,
+    )
+    assert.equal(await viewer.$('[aria-label="Delete board"]'), null)
+    assert.equal(await editor.$('[aria-label="Make private"]'), null)
+    assert.equal(await outsider.$(`[data-board-id="${boardId}"]`), null)
+  })
+  await record('Editor creates inherited board owned by project owner; viewer create denied', async () => {
+    await clickText(editor, 'New board')
+    await editor.type('#board-name-input', 'Editor board')
+    await clickText(editor, 'Create board')
+    await editor.waitForFunction(() => location.pathname.startsWith('/boards/'))
+    createdByEditor = new URL(editor.url()).pathname.split('/').pop()
+    assert.equal(
+      (await project.ref.collection('boards').doc(createdByEditor).get()).data().creatorId,
+      identities.editor.uid,
+    )
+    assert.equal((await db.doc(`boardShares/${createdByEditor}`).get()).data().ownerId, identities.owner.uid)
+    const denied = await viewer.evaluate(async (id) => {
+      try {
+        await window.__projectsTest.projects.projectService.createBoard(id, 'Forbidden')
+        return false
+      } catch {
+        return true
+      }
+    }, project.id)
+    assert.equal(denied, true)
+  })
+  await record('Shared editor rename persists and visible cards load authorized previews', async () => {
+    await editor.waitForSelector('button[aria-label="Edit board name"]')
+    await editor.click('button[aria-label="Edit board name"]')
+    await editor.waitForFunction(() => {
+      const input = document.querySelector('input[aria-label="Edit board name"]')
+      return input === document.activeElement && input.selectionStart === 0 && input.selectionEnd === input.value.length
+    })
+    await editor.type('input[aria-label="Edit board name"]', 'Renamed by editor')
+    await editor.keyboard.press('Enter')
+    await until(
+      async () => (await db.doc(`boardShares/${createdByEditor}`).get()).data().boardName === 'Renamed by editor',
+      'editor rename persisted',
+    )
+    await viewer.waitForSelector(`[data-board-id="${boardId}"] .board-preview-svg`)
+  })
+  await record('Inherited editors publish live canvas changes; viewers cannot write RTDB deltas', async () => {
+    await owner.goto(`${base}/boards/${createdByEditor}`)
+    await owner.waitForFunction(() => Boolean(window.__excalidrawAPI))
+    await until(
+      async () => Object.keys((await rtdb.ref(`activeSessions/${createdByEditor}`).get()).val() ?? {}).length >= 2,
+      'two collaborating sessions registered',
+    )
+    await editor.waitForFunction(() => Boolean(window.__excalidrawAPI))
+    await editor.evaluate(() => {
+      window.__setUserInteracted()
+      window.__excalidrawAPI.updateScene({
+        elements: window.__projectsTest.excalidraw.convertToExcalidrawElements(
+          [{ id: 'inherited-edit', type: 'rectangle', x: 20, y: 30, width: 100, height: 60 }],
+          { regenerateIds: false },
+        ),
+      })
+    })
+    await until(
+      async () => (await rtdb.ref(`boards/${createdByEditor}/elements/inherited-edit`).get()).exists(),
+      'inherited canvas delta uploaded',
+    )
+    assert.equal(
+      await viewer.evaluate(async (id) => {
+        const t = window.__projectsTest,
+          uid = t.firebase.getFirebaseAuth().currentUser.uid
+        try {
+          await t.database.set(t.database.ref(t.firebase.getFirebaseRtdb(), `boards/${id}/elements/viewer-edit`), {
+            id: 'viewer-edit',
+            version: 1,
+            versionNonce: 1,
+            lastModifiedBy: uid,
+            data: '{}',
+          })
+          return false
+        } catch {
+          return true
+        }
+      }, createdByEditor),
+      true,
+    )
+  })
+  await owner.goto(base)
+  await owner.waitForSelector('[aria-label="Project actions for Project Beta"]')
+  await record('Recipient cannot spoof ownership or manage project/board permissions', async () => {
+    const rejected = await editor.evaluate(
+      async ({ projectId, boardId }) => {
+        const service = window.__projectsTest.projects.projectService
+        const attempts = [
+          () => service.manage(projectId, 'delete'),
+          () => service.boardAccess(boardId, projectId, 'private'),
+        ]
+        return Promise.all(
+          attempts.map(async (attempt) => {
+            try {
+              await attempt()
+              return false
+            } catch {
+              return true
+            }
+          }),
+        )
+      },
+      { projectId: project.id, boardId },
+    )
+    assert.deepEqual(rejected, [true, true])
+    assert.equal((await db.doc(`boardShares/${boardId}`).get()).data().inheritProjectAccess, true)
+  })
+  await record('Direct board sharing survives inheritance; collaborator removal revokes all stores', async () => {
+    await owner.evaluate(
+      async ({ boardId, projectId, outsider, viewer }) => {
+        const t = window.__projectsTest,
+          config = await t.sharing.sharingService.getShareConfig(boardId)
+        config.projectId = projectId
+        config.collaborators = {
+          [outsider]: { email: outsider, role: 'editor', addedAt: new Date().toISOString() },
+          [viewer]: { email: viewer, role: 'viewer', addedAt: new Date().toISOString() },
+        }
+        await t.sharing.sharingService.saveShareConfig(config)
+      },
+      { boardId, projectId: project.id, outsider: identities.outsider.email, viewer: identities.viewer.email },
+    )
+    assert.equal(
+      await outsider.evaluate(
+        async (id) =>
+          (
+            await window.__projectsTest.sharing.sharingService.getSharedBoard(
+              id,
+              window.__projectsTest.firebase.getFirebaseAuth().currentUser.email,
+              window.__projectsTest.firebase.getFirebaseAuth().currentUser.uid,
+            )
+          ).status,
+        boardId,
+      ),
+      'allowed',
+    )
+    const fetchedImage = await viewer.evaluate(
+      async (id) =>
+        (
+          await window.__projectsTest.sharing.sharingService.getSharedBoard(
+            id,
+            window.__projectsTest.firebase.getFirebaseAuth().currentUser.email,
+            window.__projectsTest.firebase.getFirebaseAuth().currentUser.uid,
+          )
+        ).config.scene.files['fixture-image'].dataURL,
+      boardId,
+    )
+    assert.equal(fetchedImage, imageData, 'Inherited viewers can fetch private-root image assets')
+    await owner.evaluate(
+      async ({ boardId, email }) => {
+        const t = window.__projectsTest,
+          config = await t.sharing.sharingService.getShareConfig(boardId)
+        delete config.collaborators[email]
+        config.invitedEmails = config.invitedEmails.filter((item) => item !== email)
+        await t.sharing.sharingService.saveShareConfig(config)
+      },
+      { boardId, email: identities.outsider.email },
+    )
+    assert.equal(
+      (await db.doc(`boardShares/${boardId}`).get()).data().collaborators[identities.outsider.email],
+      undefined,
+    )
+    const token = await outsider.evaluate(() =>
+      window.__projectsTest.firebase.getFirebaseAuth().currentUser.getIdToken(),
+    )
+    assert.equal(
+      (await fetch(`http://127.0.0.1:29000/boards/${boardId}.json?ns=${projectId}&auth=${encodeURIComponent(token)}`))
+        .status,
+      401,
+    )
+  })
+  await record('Unverified email cannot claim project or board invitations', async () => {
+    await getAuth(admin).updateUser(identities.viewer.uid, { emailVerified: false })
+    await viewer.evaluate(async () => {
+      const t = window.__projectsTest,
+        user = t.firebase.getFirebaseAuth().currentUser
+      await t.auth.reload(user)
+      await user.getIdToken(true)
+    })
+    const access = await viewer.evaluate(
+      async ({ projectId, boardId }) => {
+        const t = window.__projectsTest
+        const projects = await t.projects.projectService.list(projectId)
+        let readable = true
+        try {
+          await t.firestore.getDocFromServer(t.firestore.doc(t.firebase.getFirestoreDb(), 'boardShares', boardId))
+        } catch {
+          readable = false
+        }
+        return { count: projects.projects.length, readable }
+      },
+      { projectId: project.id, boardId },
+    )
+    assert.deepEqual(access, { count: 0, readable: false })
+    await getAuth(admin).updateUser(identities.viewer.uid, { emailVerified: true })
+    await viewer.evaluate(async () => {
+      const t = window.__projectsTest,
+        user = t.firebase.getFirebaseAuth().currentUser
+      await t.auth.reload(user)
+      await user.getIdToken(true)
+    })
+  })
+  await record('Custom board access restricts project editors and preserves direct grants on restore', async () => {
+    await owner.evaluate(async (id) => {
+      const t = window.__projectsTest,
+        config = await t.sharing.sharingService.getShareConfig(id)
+      await t.sharing.sharingService.saveShareConfig({ ...config, inheritProjectAccess: false })
+    }, boardId)
+    assert.equal(
+      await editor.evaluate(
+        async (id) => (await window.__projectsTest.sharing.sharingService.getSharedBoard(id)).status,
+        boardId,
+      ),
+      'restricted',
+    )
+    const listed = await editor.evaluate(
+      async (id) => window.__projectsTest.projects.projectService.list(id),
+      project.id,
+    )
+    assert.equal(
+      listed.boards.some((board) => board.id === boardId),
+      false,
+    )
+    assert.equal(
+      await viewer.evaluate(async (id) => {
+        const t = window.__projectsTest,
+          user = t.firebase.getFirebaseAuth().currentUser
+        return (await t.sharing.sharingService.getSharedBoard(id, user.email, user.uid)).config.effectiveRole
+      }, boardId),
+      'viewer',
+    )
+    await owner.evaluate(
+      async ({ boardId, projectId }) =>
+        window.__projectsTest.projects.projectService.boardAccess(boardId, projectId, 'inherit'),
+      { boardId, projectId: project.id },
+    )
+    assert.ok((await db.doc(`boardShares/${boardId}`).get()).data().collaborators[identities.viewer.email])
+  })
+  await record('Owner makes board private with confirmation; no recipient metadata leaks', async () => {
+    await owner.reload()
+    await owner.waitForSelector(`[data-board-id="${boardId}"]`)
+    await owner.$eval(`[data-board-id="${boardId}"] [aria-label="Make private"]`, (node) => node.click())
+    await owner.waitForSelector('[role="dialog"]')
+    assert.match(
+      await owner.$eval('[role="dialog"]', (node) => node.textContent),
+      /individual invitations.*public links/,
+    )
+    await clickText(owner, 'Make private')
+    await owner.waitForFunction(() => !document.querySelector('[role="dialog"]'))
+    const config = (await db.doc(`boardShares/${boardId}`).get()).data()
+    assert.equal(config.inheritProjectAccess, false)
+    assert.deepEqual(config.invitedEmails, [])
+    assert.equal(config.generalAccess, 'restricted')
+    await viewer.reload()
+    await viewer.waitForSelector('.workspace-intro')
+    await until(
+      async () =>
+        new Set(await viewer.$$eval('[data-board-id]', (nodes) => nodes.map((node) => node.dataset.boardId))).size ===
+        1,
+      'recipient listing excludes private board',
+    )
+    assert.equal(await viewer.$(`[data-board-id="${boardId}"]`), null)
+    const networkDenied = await viewer.evaluate(async (id) => {
+      const t = window.__projectsTest
+      try {
+        await t.firestore.getDocFromServer(t.firestore.doc(t.firebase.getFirestoreDb(), 'boardShares', id))
+        return false
+      } catch {
+        return true
+      }
+    }, boardId)
+    assert.equal(networkDenied, true)
+    const storagePath = (await db.doc(`boardShares/${boardId}`).get()).data().scene.files['fixture-image'].storagePath
+    assert.equal(
+      await viewer.evaluate(async (path) => {
+        const t = window.__projectsTest
+        try {
+          await t.storage.getBytes(t.storage.ref(t.firebase.getFirebaseStorage(), path))
+          return false
+        } catch {
+          return true
+        }
+      }, storagePath),
+      true,
+      'Storage access must also be revoked',
+    )
+
+    const listed = await viewer.evaluate(
+      async (id) => window.__projectsTest.projects.projectService.list(id),
+      project.id,
+    )
+    assert.equal(
+      listed.boards.some((board) => board.id === boardId),
+      false,
+    )
+    const token = await viewer.evaluate(() => window.__projectsTest.firebase.getFirebaseAuth().currentUser.getIdToken())
+    const response = await fetch(
+      `http://127.0.0.1:29000/boards/${boardId}.json?ns=${projectId}&auth=${encodeURIComponent(token)}`,
+    )
+    assert.equal(response.status, 401, 'RTDB must reject inherited access after privacy change')
+  })
+  await record('Restore inheritance and preserve existing board IDs', async () => {
+    await owner.$eval(`[data-board-id="${boardId}"] [aria-label="Use project access"]`, (node) => node.click())
+    await until(
+      async () => (await db.doc(`boardShares/${boardId}`).get()).data().inheritProjectAccess === true,
+      'restored inheritance',
+    )
+    await viewer.reload()
+    await viewer.waitForSelector(`[data-board-id="${boardId}"]`)
+  })
+  await record('Failed privacy network request leaves committed access unchanged and shows an error', async () => {
+    owner.failFunction = 'manageBoardAccess'
+    await owner.$eval(`[data-board-id="${boardId}"] [aria-label="Make private"]`, (node) => node.click())
+    await clickText(owner, 'Make private')
+    await owner.waitForSelector('[role="dialog"] [role="alert"]')
+    assert.equal((await db.doc(`boardShares/${boardId}`).get()).data().inheritProjectAccess, true)
+    await clickText(owner, 'Cancel')
+    owner.failFunction = null
+  })
+  await record('Archive is personal; shared project remains available to others', async () => {
+    await menu(viewer, 'Project Beta', 'Archive')
+    await until(
+      async () => (await viewer.$('[aria-label="Project actions for Project Beta"]')) === null,
+      'archived hidden',
+    )
+    await owner.reload()
+    await owner.waitForSelector('[aria-label="Project actions for Project Beta"]')
+    assert.equal(
+      (await db.doc(`users/${identities.viewer.uid}/projectPreferences/${project.id}`).get()).data().archived,
+      true,
+    )
+    assert.equal((await db.doc(`projectShares/${project.id}`).get()).data().archived, undefined)
+    await viewer.click('[aria-label="Filter boards"]')
+    await clickText(viewer, 'Archived projects', 'label')
+    await viewer.keyboard.press('Escape')
+    await viewer.waitForSelector('[aria-label="Project actions for Project Beta"]')
+    await menu(viewer, 'Project Beta', 'Unarchive')
+  })
+  await record('Public project links open the filtered homepage without sign-in', async () => {
+    await menu(owner, 'Project Beta', 'Share')
+    await owner.waitForFunction(
+      () => !document.querySelector('[aria-label="Project general access"]').matches(':disabled'),
+    )
+    await owner.select('[aria-label="Project general access"]', 'anyone_with_link')
+    await clickText(owner, 'Save')
+    await owner.waitForFunction(() => !document.querySelector('[role="dialog"]'), { timeout: 60000 })
+    anonymous = await page(null)
+    await anonymous.goto(`${base}/?projectId=${project.id}`)
+    await anonymous.waitForSelector(`[data-board-id="${boardId}"]`)
+    assert.equal(new URL(anonymous.url()).pathname, '/')
+    assert.equal(new URL(anonymous.url()).searchParams.get('projectId'), project.id)
+  })
+  await record('Project download offers multiple formats and produces a ZIP', async () => {
+    const downloads = `${out}/downloads-${Date.now()}`
+    await mkdir(downloads, { recursive: true })
+    await owner
+      .createCDPSession()
+      .then((session) => session.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: downloads }))
+    await menu(owner, 'Project Beta', 'Download')
+    await owner.click('[aria-label="Download formats"]')
+    await clickText(owner, 'SVG', '[role="menuitemcheckbox"]')
+    await clickText(owner, 'PNG', '[role="menuitemcheckbox"]')
+    await owner.keyboard.press('Escape')
+    await clickText(owner, 'Download ZIP')
+    await owner.waitForFunction(
+      () => document.querySelector('[role="dialog"]')?.textContent.includes('files downloaded.'),
+      { timeout: 60000 },
+    )
+    assert.match(await owner.$eval('[role="dialog"]', (node) => node.textContent), /0 failed/)
+    const { readdir } = await import('node:fs/promises')
+    await until(async () => (await readdir(downloads)).some((name) => name.endsWith('.zip')), 'ZIP downloaded')
+    const { unzipSync, strFromU8 } = webRequire('fflate')
+    const archive = unzipSync(
+      await readFile(`${downloads}/${(await readdir(downloads)).find((name) => name.endsWith('.zip'))}`),
+    )
+    assert.equal(Object.keys(archive).filter((name) => name.endsWith('.excalidraw')).length, 2)
+    assert.equal(Object.keys(archive).filter((name) => name.endsWith('.svg')).length, 2)
+    assert.equal(Object.keys(archive).filter((name) => name.endsWith('.png')).length, 2)
+    const editable = Object.entries(archive).find(([name]) => name.includes(boardId) && name.endsWith('.excalidraw'))[1]
+    assert.equal(
+      JSON.parse(strFromU8(editable)).files['fixture-image'].dataURL,
+      imageData,
+      'Editable export embeds authorized image bytes',
+    )
+    assert.equal(JSON.parse(strFromU8(archive['manifest.json'])).failures.length, 0)
+    await clickText(owner, 'Close')
+  })
+  await record(
+    'Account download excludes received boards, includes local edits, and retries partial failures',
+    async () => {
+      await viewer.goto(`${base}/settings?tab=account`)
+      await viewer.waitForSelector('h2')
+      await clickText(viewer, 'Download all boards')
+      await clickText(viewer, 'Download ZIP')
+      await viewer.waitForFunction(() =>
+        document.querySelector('[role="dialog"]')?.textContent.includes('0 files downloaded. 0 failed.'),
+      )
+      await clickText(viewer, 'Close')
+      await owner.goto(`${base}/settings?tab=account`)
+      await owner.waitForSelector('h2')
+      const brokenId = await owner.evaluate(async (uid) => {
+        const t = window.__projectsTest,
+          store = t.workspace.workspaceStore
+        const localProject = await store.createProject('Local backup', uid)
+        await store.createBoard(localProject.id, 'Unsynced local board')
+        const broken = await store.createBoard(localProject.id, 'Missing image board')
+        broken.scene = {
+          elements: t.excalidraw.convertToExcalidrawElements(
+            [
+              {
+                id: 'missing-element',
+                type: 'image',
+                fileId: 'missing-image',
+                status: 'saved',
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 100,
+              },
+            ],
+            { regenerateIds: false },
+          ),
+          appState: {},
+          files: {
+            'missing-image': {
+              id: 'missing-image',
+              mimeType: 'image/png',
+              created: 1,
+              dataURL: '',
+              storagePath: `users/${uid}/boards/${broken.id}/assets/missing-image`,
+            },
+          },
+        }
+        await store.saveBoard(broken)
+        return broken.id
+      }, identities.owner.uid)
+      await clickText(owner, 'Download all boards')
+      await clickText(owner, 'Download ZIP')
+      await owner.waitForFunction(
+        () => document.querySelector('[role="dialog"]')?.textContent.includes('3 files downloaded. 1 failed.'),
+        { timeout: 60000 },
+      )
+      assert.match(await owner.$eval('.export-failures', (node) => node.textContent), /Missing image board/)
+      await owner.evaluate(
+        async ({ id, dataURL }) => {
+          const store = window.__projectsTest.workspace.workspaceStore,
+            board = await store.loadBoard(id)
+          board.scene.files['missing-image'].dataURL = dataURL
+          await store.saveBoard(board)
+        },
+        { id: brokenId, dataURL: imageData },
+      )
+      await clickText(owner, 'Retry failed exports')
+      await owner.waitForFunction(
+        () => document.querySelector('[role="dialog"]')?.textContent.includes('4 files downloaded. 0 failed.'),
+        { timeout: 60000 },
+      )
+      await clickText(owner, 'Close')
+      await owner.goto(base)
+      await owner.waitForSelector('[aria-label="Project actions for Project Beta"]')
+    },
+  )
+  await record('Soft delete blocks direct links and stale scene saves; data retained', async () => {
+    await menu(owner, 'Project Beta', 'Delete')
+    await clickText(owner, 'Delete project')
+    await owner.waitForFunction(() => !document.querySelector('[role="dialog"]'), { timeout: 60000 })
+    assert.ok((await project.ref.get()).data().deletedAt)
+    assert.equal((await project.ref.collection('boards').get()).size, 2)
+    const rejected = await editor.evaluate(async (id) => {
+      const t = window.__projectsTest
+      try {
+        await t.firestore.updateDoc(t.firestore.doc(t.firebase.getFirestoreDb(), 'boardShares', id), {
+          scene: { elements: [], appState: {} },
+        })
+        return false
+      } catch {
+        return true
+      }
+    }, boardId)
+    assert.equal(rejected, true)
+    await anonymous.goto(`${base}/boards/${boardId}`)
+    await anonymous.waitForFunction(() => /access|restricted|permission/i.test(document.body.textContent))
+    const mirror = (await rtdb.ref(`projectAccess/${project.id}`).get()).val()
+    assert.equal(mirror.blocked, true)
+  })
+  await record('Account switch isolates cached owned projects and boards', async () => {
+    await owner.evaluate(
+      async ({ email, password }) => {
+        const t = window.__projectsTest,
+          auth = t.firebase.getFirebaseAuth()
+        await t.auth.signOut(auth)
+        await t.auth.signInWithEmailAndPassword(auth, email, password)
+      },
+      { email: identities.viewer.email, password },
+    )
+    await owner.waitForSelector('.workspace-intro')
+    await owner.waitForFunction(
+      async () => (await window.__projectsTest.workspace.workspaceStore.listProjects()).length === 0,
+    )
+    const data = await owner.evaluate(() => window.__projectsTest.workspace.workspaceApi.listWorkspace())
+    assert.equal(data.projects.length, 0)
+    assert.equal(data.boards.length, 0)
+  })
+  assert.ok(
+    requests.some((request) => request.url.includes('/manageProject') && request.status === 200),
+    'Must exercise real Functions network calls',
+  )
+  assert.ok(
+    requests.some((request) => request.url.includes(':28080/')),
+    'Must exercise Firestore network calls',
+  )
+  assert.ok(
+    requests.some((request) => request.url.includes(':29199/')),
+    'Must exercise authorized Storage network calls',
+  )
+  assert.deepEqual(failures, [], 'No uncaught browser errors')
+  console.log(`PASS: ${results.length} browser/network scenarios; Firebase rules and Functions exercised`)
+} catch (error) {
+  if (anonymous) {
+    await anonymous.screenshot({ path: `${out}/anonymous-failure.png`, fullPage: true })
+    await writeFile(`${out}/anonymous-failure.html`, await anonymous.content())
+    console.log('Anonymous URL:', anonymous.url())
+    console.log('Anonymous body:', await anonymous.$eval('body', (node) => node.textContent.slice(0, 2000)))
+  }
+  if (editor) await editor.screenshot({ path: `${out}/editor-failure.png`, fullPage: true })
+  if (viewer) await viewer.screenshot({ path: `${out}/viewer-failure.png`, fullPage: true })
+  if (owner) {
+    await owner.screenshot({ path: `${out}/failure.png`, fullPage: true })
+    await writeFile(`${out}/failure.html`, await owner.content())
+  }
+  throw error
+} finally {
+  await writeFile(`${out}/results.json`, JSON.stringify({ results, requests, failures }, null, 2))
+  await browser.close()
+  await server.close()
+  await db.terminate()
+  await admin.delete()
+}

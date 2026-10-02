@@ -30,11 +30,18 @@ function AuthenticatedApp() {
       workspaceApi.deactivateCloudWorkspace()
       return
     }
-    void workspaceApi.activateCloudWorkspace(user.uid)
+    void workspaceApi
+      .activateCloudWorkspace(user.uid)
+      .catch((error) => console.error('Workspace activation failed:', error))
   }, [user])
 
   if (isLoading) return <main className="workspace-loading workspace-loading--full">Checking your account…</main>
-  if ((!user || user.isAnonymous) && !isBoard) return <SignInScreen />
+  if (
+    (!user || user.isAnonymous) &&
+    !isBoard &&
+    !(location.pathname === '/' && new URLSearchParams(location.searchStr).has('projectId'))
+  )
+    return <SignInScreen />
 
   return (
     <UserProvider>

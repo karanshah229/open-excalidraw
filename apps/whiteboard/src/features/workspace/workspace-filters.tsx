@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import * as Checkbox from '@radix-ui/react-checkbox'
 import * as Popover from '@radix-ui/react-popover'
@@ -15,6 +16,10 @@ const sortOptions: Array<{ value: SortOrder; label: string }> = [
 ]
 
 type FilterProps = {
+  archived?: boolean
+  onArchivedChange?: (value: boolean) => void
+  ownership?: 'all' | 'owned' | 'shared'
+  onOwnershipChange?: (value: 'all' | 'owned' | 'shared') => void
   projects: Project[]
   query: string
   onQueryChange: (value: string) => void
@@ -32,7 +37,10 @@ export function WorkspaceFilters(props: FilterProps) {
     const query = projectSearch.trim().toLocaleLowerCase()
     return query ? props.projects.filter((project) => project.name.toLocaleLowerCase().includes(query)) : props.projects
   }, [projectSearch, props.projects])
-  const activeFilterCount = props.selectedProjectIds.size > 0 ? 1 : 0
+  const activeFilterCount =
+    (props.selectedProjectIds.size > 0 ? 1 : 0) +
+    (props.archived ? 1 : 0) +
+    (props.ownership && props.ownership !== 'all' ? 1 : 0)
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -118,6 +126,27 @@ export function WorkspaceFilters(props: FilterProps) {
         <Popover.Portal>
           <Popover.Content className="filter-popover animate-fade-in" align="end" sideOffset={8}>
             <div className="filter-popover-body">
+              {props.onArchivedChange && (
+                <FilterCheck
+                  label="Archived projects"
+                  checked={Boolean(props.archived)}
+                  onCheckedChange={() => props.onArchivedChange?.(!props.archived)}
+                />
+              )}
+              {props.onOwnershipChange && (
+                <label className="project-owner-filter">
+                  Projects
+                  <select
+                    aria-label="Project ownership"
+                    value={props.ownership}
+                    onChange={(event) => props.onOwnershipChange?.(event.target.value as 'all' | 'owned' | 'shared')}
+                  >
+                    <option value="all">All projects</option>
+                    <option value="owned">Owned by me</option>
+                    <option value="shared">Shared with me</option>
+                  </select>
+                </label>
+              )}
               <div className="filter-header-row">
                 <span className="filter-section-title">Project</span>
                 {props.selectedProjectIds.size > 0 && (
@@ -210,25 +239,34 @@ export function GroupHeader({
   newest,
   isOpen = true,
   onToggle,
+  badge,
+  actions,
 }: {
   name: string
   count: number
   newest?: string
   isOpen?: boolean
   onToggle?: () => void
+  badge?: string
+  actions?: ReactNode
 }) {
   return (
-    <button type="button" className="group-header" onClick={onToggle} aria-expanded={isOpen}>
-      <div>
-        <i /> <strong>{name}</strong>
-      </div>
-      <div>
-        {newest ? <span className="edited-badge">Last edited {newest}</span> : null}
-        <span className="count-badge">
-          {count} {count === 1 ? 'board' : 'boards'}
+    <div className="group-header">
+      <button type="button" className="group-header-toggle" onClick={onToggle} aria-expanded={isOpen}>
+        <span className="group-header-title">
+          <i />
+          <strong>{name}</strong>
+          <span className="count-badge">
+            {count} {count === 1 ? 'board' : 'boards'}
+          </span>
+          {badge && <span className="count-badge">{badge}</span>}
         </span>
-        <ChevronDown size={16} className={`group-header-chevron ${!isOpen ? 'group-header-chevron--closed' : ''}`} />
-      </div>
-    </button>
+        <span className="group-header-meta">
+          {newest ? <span className="edited-badge">Last edited {newest}</span> : null}
+          <ChevronDown size={16} className={`group-header-chevron ${!isOpen ? 'group-header-chevron--closed' : ''}`} />
+        </span>
+      </button>
+      {actions}
+    </div>
   )
 }

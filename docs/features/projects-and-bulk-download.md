@@ -1,6 +1,6 @@
 # First-class projects and bulk board download
 
-Date: 2026-10-03. Status: requirements captured; architecture proposed; implementation not started.
+Date: 2026-10-03. Status: implemented and validated in the worktree; production deployment pending.
 
 ## Confirmed user requirements
 
@@ -182,4 +182,24 @@ Validate before release using Firebase emulators plus browser/MCP integration co
 - Reloaded pending project changes, two-device rename/delete races, account switches, local claims, and migration of existing/legacy databases.
 - Multi-format export with local-only/cloud/unsynced/live scenes, duplicate names, embedded images, missing assets, failed formats, partial results, retries, cancellation, large projects, and permission changes mid-export.
 
-No application code or deployed data was changed during this planning pass.
+The architecture sections above preserve the original planning analysis. The implementation and release requirements are recorded below.
+
+## Implementation and release requirements
+
+Implemented the existing accordion menu, shared/owned role badges and filters, personal archive preferences, owner-only privacy controls, shared editor creation/editing, project links on the homepage, and soft deletion. Board count stays next to the name; last edited remains on the right. Existing direct grants compose with project access unless a board explicitly disables inheritance. Making private clears all direct grants with confirmation.
+
+Account download is under Settings → Account → Your data. Both scopes use the same read-only export pipeline with `.excalidraw`, SVG and PNG checkboxes, embedded image bytes, live RTDB changes, local pending edits, cancellation, per-format failures and retry. ZIP output includes capture times and failures in a manifest. Exports are consistent per board, not an atomic workspace snapshot; they cannot include unsynced edits from another device. Rendering is serial, PNG dimensions are capped at 8192, and uncompressed archive content is limited to 256 MB.
+
+Policies are managed by owner-validated callables. Firestore policy revisions and pending gates coordinate monotonic RTDB projections; Firestore and Storage evaluate the current parent policy directly. Deleted policies remain tombstones. A failed sharing read disables saving; cloud policy mutations require connectivity. Recipient scenes are fetched only for visible previews and opened/exported boards, never included in project listings or imported as owned local data. Local queries and preview caches are scoped to the current identity.
+
+### Deployment order
+
+This change has **not** been deployed to production. Deploy the new Functions using the configured `SYNC_ACCESS_FUNCTION_REGION` and `FIRESTORE_FUNCTION_REGION` first. Build Functions and run `pnpm --filter @agentic-whiteboard/functions backfill:access` against the intended Firebase project with explicit Admin credentials/database configuration before switching RTDB rules. The backfill binds legacy board shares to verified private parents and upgrades access projections. Check unbound legacy shares manually; do not infer ownership from a client-supplied project ID. Then deploy all three rule sets and the frontend together. Old clients cannot create or mutate sharing policy under the new rules; prompt an app refresh during rollout.
+
+Deletion retains private documents, share policy tombstones, history and assets; no retention purge or restore UI is introduced. Shared-home metadata currently refreshes every ten seconds. Listing and initial publication process all boards in a project; very large workspaces need pagination/checkpointed publication before claiming support at scale. Do not delete policy tombstones with an administrative cleanup job.
+
+### Repeatable validation
+
+Run `pnpm test:e2e:projects` with Firebase CLI, Java and Chrome installed (`CHROME_PATH` can override the executable). The runner compiles Functions, creates/restores local demo region parameters and uses the demo-projects Auth, Firestore, RTDB, Storage and Functions emulators on dedicated ports. Production Firebase requests are blocked in the browser. Puppeteer exercises UI interactions and real network requests; Admin SDK assertions inspect stored policies and retained records. Results, captured network responses and failure screenshots are written under `logs/projects-e2e/`.
+
+Validation passed: 19 Puppeteer browser/network scenarios via Firebase CLI, `pnpm build`, `pnpm check`, `pnpm lint` (four pre-existing warnings), 17 collaboration edge-case tests, the existing project dropdown E2E and local image persistence/reload. The local image test used a separate port because another task occupied its default port. The emulator runner isolates both ports and temporary Storage files from concurrent tasks.

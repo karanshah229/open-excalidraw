@@ -1,13 +1,7 @@
-import { doc, getDoc, onSnapshot, setDoc, updateDoc } from 'firebase/firestore'
+import { doc, getDoc, onSnapshot, updateDoc } from 'firebase/firestore'
 import { onDisconnect, onValue, ref, remove, set } from 'firebase/database'
-import { getFunctions, httpsCallable } from 'firebase/functions'
-import {
-  getFirebaseApp,
-  getFirebaseAuth,
-  getFirebaseRtdb,
-  getFirestoreDb,
-  getSyncAccessFunctionRegion,
-} from '../../lib/firebase'
+import { projectService } from './project-service'
+import { getFirebaseAuth, getFirebaseRtdb, getFirestoreDb } from '../../lib/firebase'
 import { restoreSceneAssets, storeSceneAssets } from '../assets/scene-assets'
 import { firestoreValue, workspaceStore, workspaceValue } from '../workspace/workspace-api'
 import type { BoardScene } from '@agentic-whiteboard/storage'
@@ -24,6 +18,9 @@ export interface BoardCollaborator {
 
 export interface BoardShareConfig {
   boardId: string
+  projectId?: string
+  inheritProjectAccess?: boolean
+  effectiveRole?: 'owner' | ShareRole | null
   boardName: string
   ownerId: string
   ownerName: string
@@ -70,22 +67,18 @@ export const sharingService = {
   ): Promise<BoardShareConfig> {
     const db = getFirestoreDb()
     if (db) {
-      try {
-        const snap = await getDocWithTimeout<any>(doc(db, 'boardShares', boardId))
-        if (snap.exists()) {
-          const data = workspaceValue(snap.data()) as BoardShareConfig
-          if (
-            (!data.scene?.elements || data.scene.elements.length === 0) &&
-            fallback?.scene?.elements &&
-            fallback.scene.elements.length > 0
-          ) {
-            data.scene = fallback.scene
-          }
-          if (data.scene) data.scene = await restoreSceneAssets(data.scene)
-          return data
+      const snap = await getDocWithTimeout<any>(doc(db, 'boardShares', boardId))
+      if (snap.exists()) {
+        const data = workspaceValue(snap.data()) as BoardShareConfig
+        if (
+          (!data.scene?.elements || data.scene.elements.length === 0) &&
+          fallback?.scene?.elements &&
+          fallback.scene.elements.length > 0
+        ) {
+          data.scene = fallback.scene
         }
-      } catch {
-        // Fall through to default if Firestore lookup fails
+        if (data.scene) data.scene = await restoreSceneAssets(data.scene)
+        return data
       }
     }
 
@@ -137,30 +130,13 @@ export const sharingService = {
 
     const db = getFirestoreDb()
     if (db) {
-      const ref = doc(db, 'boardShares', config.boardId)
-      // Establish access policy before uploading a new shared board's assets.
-      // Keep an existing scene intact until every file has uploaded successfully.
-      const { scene: _scene, ...metadata } = normalizedConfig
-      await withFirestoreWriteTimeout(setDoc(ref, firestoreValue(metadata) as Record<string, unknown>, { merge: true }))
-      if (resolvedScene) {
-        const cloudScene = await storeSceneAssets(resolvedScene, `boards/${config.boardId}/assets`)
-        await withFirestoreWriteTimeout(updateDoc(ref, { scene: firestoreValue(cloudScene) }))
-      }
-
-      // RTDB rules cannot consult Firestore. Make the authorization mirror
-      // synchronous for a newly shared board instead of waiting for an
-      // eventually delivered Firestore/Eventarc trigger.
-      const app = getFirebaseApp()
-      const functionRegion = getSyncAccessFunctionRegion()
-      if (app && functionRegion) {
-        const syncAccess = httpsCallable<{ boardId: string }, { mirrored: boolean }>(
-          getFunctions(app, functionRegion),
-          'syncBoardAccessToRtdb',
-        )
-        await syncAccess({ boardId: config.boardId })
-      } else if (app) {
-        throw new Error('VITE_FIREBASE_SYNC_ACCESS_FUNCTION_REGION is required to share a cloud board.')
-      }
+      const local = await workspaceStore.loadBoard(config.boardId)
+      const projectId = config.projectId ?? local?.projectId
+      if (!projectId) throw new Error('Board ownership could not be verified. Reload the board.')
+      const { workspaceApi } = await import('../workspace/workspace-api')
+      await workspaceApi.flushCloud()
+      await projectService.boardAccess(config.boardId, projectId, 'share', normalizedConfig)
+      // Policy changes must never overwrite a newer scene with the modal's snapshot.
     }
   },
 
@@ -178,7 +154,7 @@ export const sharingService = {
         await withFirestoreWriteTimeout(updateDoc(ref, updatePayload))
       } catch (error: any) {
         // An unshared board has no share document. Surface actual upload failures.
-        if (error?.code !== 'not-found' && error?.code !== 'permission-denied') throw error
+        if (error?.code !== 'not-found') throw error
       }
     }
   },
@@ -206,29 +182,37 @@ export const sharingService = {
     const ref = doc(db, 'boardShares', boardId)
     let generation = 0
     let knownFiles: BoardScene['files'] = {}
-    const unsubscribe = onSnapshot(
-      ref,
-      (snap) => {
-        if (snap.exists()) {
-          const data = workspaceValue(snap.data()) as BoardShareConfig
-          const current = ++generation
-          void (async () => {
-            if (data.scene) data.scene = await restoreSceneAssets(data.scene, knownFiles)
-            if (current === generation) {
-              knownFiles = data.scene?.files ?? {}
-              onUpdate(data)
-            }
-          })().catch((error) => onError?.(error))
-        }
-      },
-      (error) => {
-        generation += 1
-        onError?.(error)
-      },
-    )
+    let parentUnsubscribe: (() => void) | undefined
+    let parentId: string | undefined
+    const refresh = () => {
+      const current = ++generation
+      const user = getFirebaseAuth()?.currentUser
+      void sharingService
+        .getSharedBoard(boardId, user?.email, user?.uid)
+        .then((result) => {
+          if (current !== generation) return
+          if (result.status !== 'allowed' || !result.config) {
+            onError?.({ code: 'permission-denied' })
+            return
+          }
+          knownFiles = result.config.scene?.files ?? knownFiles
+          onUpdate(result.config)
+          if (result.config.projectId && parentId !== result.config.projectId) {
+            parentUnsubscribe?.()
+            parentId = result.config.projectId
+            parentUnsubscribe = onSnapshot(doc(db, 'projectShares', parentId), refresh, () => refresh())
+          }
+        })
+        .catch((error) => onError?.(error))
+    }
+    const unsubscribe = onSnapshot(ref, refresh, (error) => {
+      generation++
+      onError?.(error)
+    })
     return () => {
-      generation += 1
+      generation++
       unsubscribe()
+      parentUnsubscribe?.()
     }
   },
 
@@ -253,6 +237,7 @@ export const sharingService = {
         if (err?.code === 'permission-denied') {
           return { status: 'restricted' }
         }
+        throw err
       }
     }
 
@@ -265,23 +250,34 @@ export const sharingService = {
       return { status: 'allowed' as const, config: remoteData! }
     }
 
-    // Permission checks
-    if (remoteData.generalAccess === 'anyone_with_link') {
-      return allowed()
-    }
-
-    if (currentUserId && remoteData.ownerId === currentUserId) {
-      return allowed()
-    }
-
-    if (currentUserEmail) {
-      const normalizedEmail = currentUserEmail.trim().toLowerCase()
-      if (remoteData.invitedEmails.some((e) => e.toLowerCase() === normalizedEmail)) {
-        return allowed()
+    let inheritedRole: ShareRole | 'owner' | null = null
+    if (remoteData.projectId && remoteData.inheritProjectAccess !== false && db) {
+      const parent = await getDoc(doc(db, 'projectShares', remoteData.projectId)).catch(() => null)
+      if (parent?.exists()) {
+        const policy = parent.data()
+        const email = getFirebaseAuth()?.currentUser?.emailVerified ? currentUserEmail?.toLowerCase() : null
+        inheritedRole =
+          policy.ownerId === currentUserId
+            ? 'owner'
+            : policy.generalAccess === 'anyone_with_link' && policy.generalRole === 'editor'
+              ? 'editor'
+              : email && policy.collaborators?.[email]?.role === 'editor'
+                ? 'editor'
+                : 'viewer'
       }
     }
-
-    return { status: 'restricted', config: remoteData }
+    const email = getFirebaseAuth()?.currentUser?.emailVerified ? currentUserEmail?.toLowerCase() : null
+    remoteData.effectiveRole =
+      remoteData.ownerId === currentUserId
+        ? 'owner'
+        : remoteData.generalAccess === 'anyone_with_link' && remoteData.generalRole === 'editor'
+          ? 'editor'
+          : email && remoteData.invitedEmails?.includes(email) && remoteData.collaborators?.[email]?.role === 'editor'
+            ? 'editor'
+            : inheritedRole === 'editor' || inheritedRole === 'owner'
+              ? inheritedRole
+              : 'viewer'
+    return allowed()
   },
 
   async registerActiveSession(boardId: string, sessionId: string, userId: string): Promise<() => void> {

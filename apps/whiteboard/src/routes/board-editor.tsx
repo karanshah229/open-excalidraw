@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { doc, getDoc, updateDoc } from 'firebase/firestore'
 import { createPortal } from 'react-dom'
 import { Link, useNavigate, useParams, useBlocker } from '@tanstack/react-router'
 import { useQueryClient } from '@tanstack/react-query'
@@ -26,7 +27,7 @@ import {
   type ActiveSessionRecord,
 } from '../features/collaboration'
 import { reconcileElementsLWW } from '../features/collaboration/reconcile'
-import { getFirebaseAuth, isFirebaseConfigured } from '../lib/firebase'
+import { getFirebaseAuth, getFirestoreDb, isFirebaseConfigured } from '../lib/firebase'
 
 const LIBRARY_STORAGE_KEY = 'agentic-whiteboard:library:v1'
 const starterLibraries = [
@@ -408,6 +409,10 @@ export function BoardEditor() {
         documentRef.current = saved
         setBoardMeta((prev) => (prev ? { ...prev, updatedAt: saved.updatedAt } : prev))
         void sharingService.syncBoardSceneToShare(boardId, saved.scene, trimmed).catch(console.error)
+      } else {
+        const db = getFirestoreDb()
+        if (!db) throw new Error('Cloud board is unavailable.')
+        await updateDoc(doc(db, 'boardShares', boardId), { boardName: trimmed, updatedAt: new Date().toISOString() })
       }
       queryClient.invalidateQueries({ queryKey: ['workspace'] })
     } catch {
@@ -458,6 +463,7 @@ export function BoardEditor() {
   useEffect(() => {
     hasAutoZoomedRef.current = false
     setInitialData(null)
+    documentRef.current = null
     setIsSharedBoard(false)
     setAccessDenied(false)
     setBoardNotFound(false)
@@ -486,6 +492,10 @@ export function BoardEditor() {
         // Case 1: Board exists in Firebase (authoritative single source of truth)
         if (shared.status === 'allowed' && shared.config) {
           const config = shared.config
+          const db = getFirestoreDb()
+          const parent =
+            config.projectId && db ? await getDoc(doc(db, 'projectShares', config.projectId)).catch(() => null) : null
+          if (!active) return
           const cloudScene = config.scene ?? {
             elements: [],
             appState: { viewBackgroundColor: 'transparent' },
@@ -509,7 +519,9 @@ export function BoardEditor() {
           const isGeneralEditor = config.generalAccess === 'anyone_with_link' && config.generalRole === 'editor'
           const userEmail = authUser?.email?.trim().toLowerCase()
           const isCollabEditor = Boolean(userEmail && config.collaborators?.[userEmail]?.role === 'editor')
-          const canEdit = isOwner || isGeneralEditor || isCollabEditor
+          const canEdit = config.effectiveRole
+            ? config.effectiveRole === 'owner' || config.effectiveRole === 'editor'
+            : isOwner || isGeneralEditor || isCollabEditor
 
           setIsReadOnly(!canEdit)
           awaitingInitialSceneRef.current = true
@@ -538,8 +550,8 @@ export function BoardEditor() {
 
           setBoardMeta({
             boardName: config.boardName,
-            projectId: details?.project.id ?? '',
-            projectName: details?.project.name ?? 'Shared board',
+            projectId: details?.project.id ?? config.projectId ?? '',
+            projectName: details?.project.name ?? parent?.data()?.name ?? 'Shared board',
             projectOwnerId: config.ownerId,
             projectOwnerName: config.ownerName,
             projectOwnerEmail: config.ownerEmail,
@@ -613,9 +625,11 @@ export function BoardEditor() {
     const unsubscribe = sharingService.subscribeToSharedBoard(
       boardId,
       (updatedConfig) => {
+        setAccessDenied(false)
         const userEmail = authUser?.email?.trim().toLowerCase()
         const userUid = authUser?.uid
         const stillAllowed =
+          Boolean(updatedConfig.effectiveRole) ||
           updatedConfig.generalAccess === 'anyone_with_link' ||
           (userUid && updatedConfig.ownerId === userUid) ||
           (userEmail && updatedConfig.invitedEmails?.map((e) => e.toLowerCase()).includes(userEmail))
@@ -629,7 +643,9 @@ export function BoardEditor() {
         const isGeneralEditor =
           updatedConfig.generalAccess === 'anyone_with_link' && updatedConfig.generalRole === 'editor'
         const isCollabEditor = Boolean(userEmail && updatedConfig.collaborators?.[userEmail]?.role === 'editor')
-        const canEdit = isOwner || isGeneralEditor || isCollabEditor
+        const canEdit = updatedConfig.effectiveRole
+          ? updatedConfig.effectiveRole === 'owner' || updatedConfig.effectiveRole === 'editor'
+          : isOwner || isGeneralEditor || isCollabEditor
         setIsReadOnly(!canEdit)
 
         setBoardMeta((prev) =>
@@ -1548,8 +1564,8 @@ export function BoardEditor() {
               ) : (
                 <>
                   <Link
-                    to="/projects/$projectId"
-                    params={{ projectId: boardMeta.projectId }}
+                    to="/"
+                    search={{ projectId: boardMeta.projectId || undefined }}
                     className="breadcrumb-item breadcrumb-link"
                     title={`Filter by ${boardMeta.projectName}`}
                   >
