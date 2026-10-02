@@ -95,8 +95,23 @@ export function WorkspaceHome() {
     return () => window.removeEventListener('workspace-changed', refresh)
   }, [queryClient])
 
-  const complete = () => {
-    void queryClient.invalidateQueries({ queryKey: workspaceQueryKey })
+  const complete = (patch?: Partial<VisibleProject>, refresh = true) => {
+    if (patch?.id)
+      queryClient.setQueriesData<{ projects: VisibleProject[]; boards: WorkspaceBoard[] }>(
+        { queryKey: workspaceQueryKey },
+        (previous) =>
+          previous
+            ? {
+                projects: previous.projects.map((project) =>
+                  project.id === patch.id ? { ...project, ...patch } : project,
+                ),
+                boards: previous.boards.map((board) =>
+                  board.projectId === patch.id ? { ...board, project: { ...board.project, ...patch } } : board,
+                ),
+              }
+            : previous,
+      )
+    if (refresh) void queryClient.invalidateQueries({ queryKey: workspaceQueryKey })
   }
   const handleProjectAction = async (project: VisibleProject, action: ProjectAction) => {
     setActionError('')
@@ -105,9 +120,11 @@ export function WorkspaceHome() {
       return
     }
     try {
+      complete({ id: project.id, archived: !project.archived }, false)
       await workspaceApi.archiveProject(project.id, !project.archived)
-      complete()
+      complete({ id: project.id, archived: !project.archived })
     } catch (error) {
+      complete({ id: project.id, archived: project.archived })
       setActionError(error instanceof Error ? error.message : 'Archive failed.')
     }
   }
@@ -267,7 +284,10 @@ export function WorkspaceHome() {
           <WorkspaceFilters
             projects={workspace.data.projects}
             archived={archiveFilter}
-            onArchivedChange={setArchiveFilter}
+            onArchivedChange={(value) => {
+              setArchiveFilter(value)
+              setProjectIds(new Set())
+            }}
             ownership={ownershipFilter}
             onOwnershipChange={setOwnershipFilter}
             query={search}

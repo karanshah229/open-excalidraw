@@ -51,9 +51,20 @@ function withFirestoreWriteTimeout<T>(operation: Promise<T>, timeoutMs = 15_000)
   ])
 }
 
+const policyCache = new Map<string, BoardShareConfig>()
+const policyUser = () => getFirebaseAuth()?.currentUser?.uid ?? 'local-user'
+const policyKey = (id: string, uid = policyUser()) => `${uid}:${id}`
 const activeSessionRefCount = new Map<string, number>()
 
 export const sharingService = {
+  cachedShareConfig(boardId: string) {
+    return policyCache.get(policyKey(boardId))
+  },
+  rememberShareConfig(config: BoardShareConfig, expectedUser = policyUser()) {
+    const { scene: _scene, ...policy } = config
+    if (expectedUser === policyUser()) policyCache.set(policyKey(config.boardId, expectedUser), policy)
+    return policy
+  },
   async getShareConfig(
     boardId: string,
     fallback?: {
@@ -65,6 +76,7 @@ export const sharingService = {
       scene?: BoardScene
     },
   ): Promise<BoardShareConfig> {
+    const requestUser = policyUser()
     const db = getFirestoreDb()
     if (db) {
       const snap = await getDocWithTimeout<any>(doc(db, 'boardShares', boardId))
@@ -77,8 +89,7 @@ export const sharingService = {
         ) {
           data.scene = fallback.scene
         }
-        if (data.scene) data.scene = await restoreSceneAssets(data.scene)
-        return data
+        return sharingService.rememberShareConfig(data, requestUser)
       }
     }
 
@@ -99,7 +110,7 @@ export const sharingService = {
       updatedAt: new Date().toISOString(),
     }
 
-    return defaultConfig
+    return sharingService.rememberShareConfig(defaultConfig, requestUser)
   },
 
   async saveShareConfig(config: BoardShareConfig): Promise<void> {
@@ -136,6 +147,7 @@ export const sharingService = {
       const { workspaceApi } = await import('../workspace/workspace-api')
       await workspaceApi.flushCloud()
       await projectService.boardAccess(config.boardId, projectId, 'share', normalizedConfig)
+      sharingService.rememberShareConfig(normalizedConfig, authenticatedOwnerId ?? 'local-user')
       // Policy changes must never overwrite a newer scene with the modal's snapshot.
     }
   },
@@ -225,6 +237,7 @@ export const sharingService = {
     config?: BoardShareConfig
   }> {
     const db = getFirestoreDb()
+    const requestUser = policyUser()
     let remoteData: BoardShareConfig | null = null
 
     if (db) {
@@ -246,6 +259,7 @@ export const sharingService = {
     }
 
     const allowed = async () => {
+      sharingService.rememberShareConfig(remoteData!, requestUser)
       if (remoteData!.scene) remoteData!.scene = await restoreSceneAssets(remoteData!.scene)
       return { status: 'allowed' as const, config: remoteData! }
     }

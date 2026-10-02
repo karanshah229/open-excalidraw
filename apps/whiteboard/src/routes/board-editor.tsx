@@ -577,6 +577,26 @@ export function BoardEditor() {
         // Case 2: Board only in local IndexedDB (freshly created prior to cloud sync)
         if (details) {
           const { document, project } = details
+          // The board read already established that no sharing document exists.
+          // Keep this verified default so opening Share needs no second read.
+          if (shared.status === 'not-found')
+            sharingService.rememberShareConfig(
+              {
+                boardId: document.id,
+                projectId: project.id,
+                boardName: document.name,
+                ownerId: project.ownerId,
+                ownerName: '',
+                generalAccess: 'restricted',
+                generalRole: 'viewer',
+                collaborators: {},
+                invitedEmails: [],
+                inheritProjectAccess: true,
+                createdAt: document.createdAt,
+                updatedAt: document.updatedAt,
+              },
+              authUser?.uid ?? 'local-user',
+            )
           documentRef.current = document
           filesRef.current = (document.scene.files ?? {}) as BinaryFiles
           elementsRef.current = document.scene.elements

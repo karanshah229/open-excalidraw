@@ -61,6 +61,14 @@ The sharing documents are the authority for access. Private workspace documents 
 
 Personal archive writes only the current user's preferences, with a localStorage cache. It changes homepage visibility without changing any project or board grants. Soft deletion retains content and a policy tombstone; every child board remains subject to the parent deletion gate, including boards with custom access.
 
+## Sharing dialogs and homepage updates
+
+Projects and boards use the same `ShareModal`; projects supply their save action and filtered homepage URL. The workspace retains project policies and account-scoped board policies from its Firestore reads. Board loading also retains either the authorized policy or a verified restricted default when no share document exists. Opening a known share dialog does not fetch permissions again or restore scene images. Explicit service reads remain fresh, and every mutation still runs through owner-validated backend callables.
+
+Sharing metadata lives in `projectShares` / `boardShares`, separately from private workspace documents. `boardShares` also contains the shared scene, so a Firestore document read still transfers that scene; caching the policy avoids a duplicate modal read but does not introduce a lightweight metadata projection. Images are not fetched to initialize the dialog. Account changes discard late policy reads rather than caching them under the new identity.
+
+Project menus use vertical dots and nonmodal dropdowns, allowing homepage scrolling. Rename patches the query cache after the committed save. Archive updates the personal view immediately, rolls back failed writes, and exposes Unarchive in the archived view. Rename and download dialogs reuse board-sharing typography and footer controls; format selection reuses the homepage filter checkboxes. Download status and retry occupy reserved space to avoid height changes. ZIP filenames include the project name and date. PNG/SVG use the saved canvas background, with opaque white for missing or transparent backgrounds; editable scene data retains its original background.
+
 ## How board access is decided
 
 ```mermaid

@@ -145,7 +145,15 @@ export async function exportBoards(options: {
             ])
       ) as any
       const files = (scene.files ?? {}) as any
-      const appState = { ...scene.appState, exportBackground: true, exportWithDarkMode: false }
+      const appState = {
+        ...scene.appState,
+        exportBackground: true,
+        exportWithDarkMode: false,
+        viewBackgroundColor:
+          !scene.appState.viewBackgroundColor || scene.appState.viewBackgroundColor === 'transparent'
+            ? '#ffffff'
+            : scene.appState.viewBackgroundColor,
+      }
       for (const format of formats) {
         try {
           ensureActive()
@@ -203,7 +211,7 @@ export async function exportBoards(options: {
   return result
 }
 
-export async function downloadExport(result: ExportResult, signal?: AbortSignal) {
+export async function downloadExport(result: ExportResult, signal?: AbortSignal, name = 'my-boards') {
   const { zip, strToU8 } = await import('fflate')
   const archive = await new Promise<Uint8Array>((resolve, reject) =>
     zip(
@@ -225,7 +233,7 @@ export async function downloadExport(result: ExportResult, signal?: AbortSignal)
   const url = URL.createObjectURL(new Blob([archive as Uint8Array<ArrayBuffer>], { type: 'application/zip' }))
   const link = document.createElement('a')
   link.href = url
-  link.download = `boards-${new Date().toISOString().slice(0, 10)}.zip`
+  link.download = `${safeName(name)}-${new Date().toISOString().slice(0, 10)}.zip`
   link.click()
   window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
 }

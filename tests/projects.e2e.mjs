@@ -79,7 +79,7 @@ const base = 'http://127.0.0.1:15186',
   results = []
 const out = fileURLToPath(new URL('../logs/projects-e2e/', import.meta.url))
 await mkdir(out, { recursive: true })
-async function page(role) {
+async function page(role, path = '') {
   const context = await browser.createBrowserContext(),
     page = await context.newPage()
   await page.setViewport({ width: 1400, height: 1000 })
@@ -101,7 +101,7 @@ async function page(role) {
       })
     else void request.continue()
   })
-  await page.goto(base, { waitUntil: 'domcontentloaded' })
+  await page.goto(`${base}${path}`, { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(() => Boolean(window.__projectsTest))
   if (role) {
     await page.evaluate(
@@ -167,6 +167,17 @@ try {
     project = (await db.collection(`users/${identities.owner.uid}/projects`).get()).docs[0]
     await until(async () => (await project.ref.collection('boards').doc(boardId).get()).exists, 'board uploaded')
     await owner.waitForFunction(() => Boolean(window.__excalidrawAPI))
+    await owner.click('button[title="Share board"]')
+    assert.equal(
+      await owner.$eval('.google-share-done-btn', (node) => node.disabled),
+      false,
+      'Board sharing uses policy from the initial board read',
+    )
+    assert.equal(
+      await owner.$eval('[role="dialog"]', (node) => node.textContent.includes('Loading permissions')),
+      false,
+    )
+    await owner.keyboard.press('Escape')
     await owner.evaluate((dataURL) => {
       const t = window.__projectsTest,
         api = window.__excalidrawAPI
@@ -201,28 +212,69 @@ try {
   })
   await record('Project menu preserves accordion; rename survives reload', async () => {
     const before = await owner.$eval('.group-header-toggle', (node) => node.getAttribute('aria-expanded'))
-    await menu(owner, 'Project Alpha', 'Rename')
+    await owner.click('[aria-label="Project actions for Project Alpha"]')
+    assert.equal(
+      await owner.evaluate(
+        () => document.body.hasAttribute('data-scroll-locked') || getComputedStyle(document.body).overflow === 'hidden',
+      ),
+      false,
+      'Project menu must not lock body scrolling',
+    )
+    await clickText(owner, 'Rename', '[role="menuitem"]')
+    await owner.waitForFunction(() =>
+      document
+        .querySelector('[role="dialog"]')
+        ?.getAnimations()
+        .every((animation) => animation.playState === 'finished'),
+    )
+    await owner.screenshot({ path: `${out}/rename-dialog.png` })
     assert.equal(await owner.$eval('.group-header-toggle', (node) => node.getAttribute('aria-expanded')), before)
     await owner.$eval('[aria-label="Project name"]', (node) => node.select())
     await owner.type('[aria-label="Project name"]', 'Project Beta')
     await clickText(owner, 'Save')
     await owner.waitForFunction(() => !document.querySelector('[role="dialog"]'))
+    assert.ok(
+      await owner.$('[aria-label="Project actions for Project Beta"]'),
+      'Rename must appear immediately when dialog closes',
+    )
     await owner.reload()
     await owner.waitForSelector('[aria-label="Project actions for Project Beta"]')
     assert.equal((await project.ref.get()).data().name, 'Project Beta')
   })
   await record('Project sharing provisions existing boards; verified email membership', async () => {
     await menu(owner, 'Project Beta', 'Share')
-    await owner.waitForFunction(
-      () => !document.querySelector('[aria-label="Project collaborator email"]').matches(':disabled'),
+    assert.equal(
+      await owner.$eval('[role="dialog"]', (node) => node.textContent.includes('Loading permissions')),
+      false,
     )
+    await owner.waitForFunction(() =>
+      document
+        .querySelector('[role="dialog"]')
+        ?.getAnimations()
+        .every((animation) => animation.playState === 'finished'),
+    )
+    await owner.screenshot({ path: `${out}/share-dialog.png` })
     for (const role of ['editor', 'viewer']) {
-      await owner.type('[aria-label="Project collaborator email"]', identities[role].email)
-      await clickText(owner, 'Add person')
+      await owner.type('input[placeholder="Add people by email..."]', identities[role].email)
+      await clickText(owner, 'Add')
+      await until(
+        async () =>
+          (await db.doc(`projectShares/${project.id}`).get()).data()?.invitedEmails.includes(identities[role].email),
+        'invite committed',
+      )
+      await owner.waitForFunction(() => !document.querySelector('.google-share-done-btn').disabled)
     }
-    await owner.waitForSelector(`[aria-label="Role for ${identities.editor.email}"]`)
-    await owner.select(`[aria-label="Role for ${identities.editor.email}"]`, 'editor')
-    await clickText(owner, 'Save')
+    const roleTrigger = await owner.evaluateHandle(
+      (email) =>
+        [...document.querySelectorAll('.google-share-user-row')]
+          .find((node) => node.textContent.includes(email))
+          .querySelector('[aria-label="Change permission"]'),
+      identities.editor.email,
+    )
+    await roleTrigger.asElement().click()
+    await clickText(owner, 'Editor', '[role="menuitem"]')
+    await owner.waitForFunction(() => !document.querySelector('.google-share-done-btn').disabled)
+    await clickText(owner, 'Done')
     await owner.waitForFunction(() => !document.querySelector('[role="dialog"]'), { timeout: 60000 })
     const config = (await db.doc(`projectShares/${project.id}`).get()).data()
     assert.deepEqual(config.invitedEmails.sort(), [identities.editor.email, identities.viewer.email].sort())
@@ -570,6 +622,13 @@ try {
     )
     assert.equal((await db.doc(`projectShares/${project.id}`).get()).data().archived, undefined)
     await viewer.click('[aria-label="Filter boards"]')
+    await viewer.waitForFunction(() =>
+      document
+        .querySelector('.filter-popover')
+        ?.getAnimations()
+        .every((animation) => animation.playState === 'finished'),
+    )
+    await viewer.screenshot({ path: `${out}/project-filter.png` })
     await clickText(viewer, 'Archived projects', 'label')
     await viewer.keyboard.press('Escape')
     await viewer.waitForSelector('[aria-label="Project actions for Project Beta"]')
@@ -577,14 +636,13 @@ try {
   })
   await record('Public project links open the filtered homepage without sign-in', async () => {
     await menu(owner, 'Project Beta', 'Share')
-    await owner.waitForFunction(
-      () => !document.querySelector('[aria-label="Project general access"]').matches(':disabled'),
-    )
-    await owner.select('[aria-label="Project general access"]', 'anyone_with_link')
-    await clickText(owner, 'Save')
+    await owner.click('[aria-label="General access setting"]')
+    await clickText(owner, 'Anyone with the link', '[role="menuitem"]')
+    await owner.waitForFunction(() => !document.querySelector('.google-share-done-btn').disabled)
+    await clickText(owner, 'Done')
     await owner.waitForFunction(() => !document.querySelector('[role="dialog"]'), { timeout: 60000 })
-    anonymous = await page(null)
-    await anonymous.goto(`${base}/?projectId=${project.id}`)
+    assert.equal((await db.doc(`projectShares/${project.id}`).get()).data().generalAccess, 'anyone_with_link')
+    anonymous = await page(null, `/?projectId=${project.id}`)
     await anonymous.waitForSelector(`[data-board-id="${boardId}"]`)
     assert.equal(new URL(anonymous.url()).pathname, '/')
     assert.equal(new URL(anonymous.url()).searchParams.get('projectId'), project.id)
@@ -595,10 +653,30 @@ try {
     await owner
       .createCDPSession()
       .then((session) => session.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: downloads }))
+    await owner.evaluate(async (id) => {
+      const store = window.__projectsTest.workspace.workspaceStore
+      const board = await store.loadBoard(id)
+      board.scene.appState.viewBackgroundColor = 'transparent'
+      board.scene.elements.push(
+        ...window.__projectsTest.excalidraw.convertToExcalidrawElements(
+          [{ id: 'export-rectangle', type: 'rectangle', x: 140, y: 0, width: 100, height: 80, strokeColor: '#000000' }],
+          { regenerateIds: false },
+        ),
+      )
+      await store.saveBoard(board)
+    }, boardId)
     await menu(owner, 'Project Beta', 'Download')
+    await owner.waitForFunction(() =>
+      document
+        .querySelector('[role="dialog"]')
+        ?.getAnimations()
+        .every((animation) => animation.playState === 'finished'),
+    )
+    const dialogHeight = await owner.$eval('[role="dialog"]', (node) => node.getBoundingClientRect().height)
+    await owner.screenshot({ path: `${out}/download-dialog.png` })
     await owner.click('[aria-label="Download formats"]')
-    await clickText(owner, 'SVG', '[role="menuitemcheckbox"]')
-    await clickText(owner, 'PNG', '[role="menuitemcheckbox"]')
+    await clickText(owner, 'SVG', 'label')
+    await clickText(owner, 'PNG', 'label')
     await owner.keyboard.press('Escape')
     await clickText(owner, 'Download ZIP')
     await owner.waitForFunction(
@@ -606,8 +684,17 @@ try {
       { timeout: 60000 },
     )
     assert.match(await owner.$eval('[role="dialog"]', (node) => node.textContent), /0 failed/)
+    assert.equal(
+      await owner.$eval('[role="dialog"]', (node) => node.getBoundingClientRect().height),
+      dialogHeight,
+      'Download result must not shift layout',
+    )
     const { readdir } = await import('node:fs/promises')
     await until(async () => (await readdir(downloads)).some((name) => name.endsWith('.zip')), 'ZIP downloaded')
+    assert.match(
+      (await readdir(downloads)).find((name) => name.endsWith('.zip')),
+      /^Project Beta-boards-\d{4}-\d{2}-\d{2}\.zip$/,
+    )
     const { unzipSync, strFromU8 } = webRequire('fflate')
     const archive = unzipSync(
       await readFile(`${downloads}/${(await readdir(downloads)).find((name) => name.endsWith('.zip'))}`),
@@ -622,6 +709,26 @@ try {
       'Editable export embeds authorized image bytes',
     )
     assert.equal(JSON.parse(strFromU8(archive['manifest.json'])).failures.length, 0)
+    const png = Object.entries(archive).find(([name]) => name.includes(boardId) && name.endsWith('.png'))[1]
+    const corner = await owner.evaluate(
+      async (bytes) => {
+        const bitmap = await createImageBitmap(new Blob([new Uint8Array(bytes)], { type: 'image/png' }))
+        const canvas = document.createElement('canvas')
+        canvas.width = bitmap.width
+        canvas.height = bitmap.height
+        const context = canvas.getContext('2d')
+        context.drawImage(bitmap, 0, 0)
+        const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data
+        let inkPixels = 0
+        for (let index = 0; index < pixels.length; index += 4)
+          if (pixels[index] < 100 && pixels[index + 1] < 100 && pixels[index + 2] < 100 && pixels[index + 3] > 200)
+            inkPixels++
+        return { corner: [...context.getImageData(0, 0, 1, 1).data], inkPixels }
+      },
+      [...png],
+    )
+    assert.deepEqual(corner.corner, [255, 255, 255, 255], 'Transparent canvas exports with opaque white background')
+    assert.ok(corner.inkPixels > 50, 'PNG must retain visible drawing strokes')
     await clickText(owner, 'Close')
   })
   await record(

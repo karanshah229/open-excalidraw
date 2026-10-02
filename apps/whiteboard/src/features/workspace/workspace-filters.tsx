@@ -126,27 +126,32 @@ export function WorkspaceFilters(props: FilterProps) {
         <Popover.Portal>
           <Popover.Content className="filter-popover animate-fade-in" align="end" sideOffset={8}>
             <div className="filter-popover-body">
-              {props.onArchivedChange && (
-                <FilterCheck
-                  label="Archived projects"
-                  checked={Boolean(props.archived)}
-                  onCheckedChange={() => props.onArchivedChange?.(!props.archived)}
-                />
-              )}
-              {props.onOwnershipChange && (
-                <label className="project-owner-filter">
-                  Projects
-                  <select
-                    aria-label="Project ownership"
-                    value={props.ownership}
-                    onChange={(event) => props.onOwnershipChange?.(event.target.value as 'all' | 'owned' | 'shared')}
-                  >
-                    <option value="all">All projects</option>
-                    <option value="owned">Owned by me</option>
-                    <option value="shared">Shared with me</option>
-                  </select>
-                </label>
-              )}
+              <div className="filter-header-row">
+                <span className="filter-section-title">Show projects</span>
+              </div>
+              <div className="project-filter-tabs" role="group" aria-label="Project ownership">
+                {props.onOwnershipChange &&
+                  (['all', 'owned', 'shared'] as const).map((value) => (
+                    <button
+                      type="button"
+                      key={value}
+                      aria-pressed={props.ownership === value}
+                      onClick={() => props.onOwnershipChange?.(value)}
+                    >
+                      {value === 'all' ? 'All' : value === 'owned' ? 'Owned' : 'Shared'}
+                    </button>
+                  ))}
+              </div>
+              <div className="project-archive-filter">
+                {props.onArchivedChange && (
+                  <FilterCheck
+                    label="Archived projects"
+                    checked={Boolean(props.archived)}
+                    onCheckedChange={() => props.onArchivedChange?.(!props.archived)}
+                  />
+                )}
+              </div>
+              <hr className="filter-divider" />
               <div className="filter-header-row">
                 <span className="filter-section-title">Project</span>
                 {props.selectedProjectIds.size > 0 && (
@@ -212,7 +217,7 @@ export function WorkspaceFilters(props: FilterProps) {
   )
 }
 
-function FilterCheck({
+export function FilterCheck({
   checked,
   onCheckedChange,
   label,

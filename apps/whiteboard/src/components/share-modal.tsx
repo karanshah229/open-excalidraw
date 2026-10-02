@@ -9,6 +9,10 @@ import { useUser } from '../lib/user-context'
 import type { BoardScene } from '@agentic-whiteboard/storage'
 
 export interface ShareModalProps {
+  initialConfig?: BoardShareConfig
+  onSaveConfig?: (config: BoardShareConfig) => Promise<void>
+  shareUrl?: string
+  resourceType?: 'board' | 'project'
   open: boolean
   onOpenChange: (open: boolean) => void
   onShareConfigSaved?: () => void
@@ -24,6 +28,10 @@ export interface ShareModalProps {
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
 export function ShareModal({
+  initialConfig,
+  onSaveConfig,
+  shareUrl,
+  resourceType = 'board',
   open,
   onOpenChange,
   onShareConfigSaved,
@@ -43,19 +51,32 @@ export function ShareModal({
   const resolvedOwnerEmail = ownerEmail || authUser?.email || localUser?.email || ''
   const resolvedOwnerPhoto = ownerPhotoURL || authUser?.photoURL || undefined
 
-  const [shareConfig, setShareConfig] = useState<BoardShareConfig | null>(null)
+  const [shareConfig, setShareConfig] = useState<BoardShareConfig | null>(
+    () => initialConfig ?? sharingService.cachedShareConfig(boardId) ?? null,
+  )
   const [emailInput, setEmailInput] = useState('')
   const [emailError, setEmailError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [saveError, setSaveError] = useState('')
-  const [isLoading, setIsLoading] = useState(true)
+  const [isLoading, setIsLoading] = useState(!initialConfig && !sharingService.cachedShareConfig(boardId))
   const [imgError, setImgError] = useState(false)
   const copyTimeoutRef = useRef<number>()
 
   // Load current sharing configuration when modal opens
   useEffect(() => {
     if (!open) return
+    const known = initialConfig ?? (resourceType === 'board' ? sharingService.cachedShareConfig(boardId) : undefined)
+    if (known) {
+      setShareConfig(known)
+      setIsLoading(false)
+      return
+    }
+    if (resourceType === 'project') {
+      setSaveError('Sharing settings are unavailable. Refresh the workspace.')
+      setIsLoading(false)
+      return
+    }
     setIsLoading(true)
     setShareConfig(null)
     setSaveError('')
@@ -87,7 +108,7 @@ export function ShareModal({
       active = false
       if (copyTimeoutRef.current) window.clearTimeout(copyTimeoutRef.current)
     }
-  }, [open, boardId, boardName, resolvedOwnerId, resolvedOwnerName, resolvedOwnerEmail, resolvedOwnerPhoto, scene])
+  }, [open, boardId, resourceType, initialConfig])
 
   const effectiveConfig = useMemo<BoardShareConfig>(() => {
     if (shareConfig) {
@@ -134,7 +155,8 @@ export function ShareModal({
     setIsSaving(true)
     setSaveError('')
     try {
-      await sharingService.saveShareConfig(config)
+      if (onSaveConfig) await onSaveConfig(config)
+      else await sharingService.saveShareConfig(config)
     } catch (error) {
       setShareConfig(effectiveConfig)
       setSaveError(error instanceof Error ? error.message : 'Sharing could not be saved.')
@@ -272,7 +294,7 @@ export function ShareModal({
   }
 
   const handleCopyLink = async () => {
-    const url = `${window.location.origin}/boards/${boardId}`
+    const url = shareUrl ?? `${window.location.origin}/boards/${boardId}`
     try {
       await navigator.clipboard.writeText(url)
       setCopied(true)
@@ -307,7 +329,13 @@ export function ShareModal({
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay animate-fade-in" />
-        <Dialog.Content className="dialog-content google-share-dialog animate-scale-in">
+        <Dialog.Content
+          className="dialog-content google-share-dialog animate-scale-in"
+          aria-describedby="share-description"
+        >
+          <Dialog.Description id="share-description" className="sr-only">
+            Manage access to this {resourceType}.
+          </Dialog.Description>
           {/* Header */}
           <div className="google-share-header">
             <Dialog.Title className="google-share-title" title={`Share '${boardName}'`}>
@@ -332,7 +360,7 @@ export function ShareModal({
                     <p className="google-share-popover-title">Sharing options</p>
                     <div className="google-share-faq-item">
                       <strong>Restricted</strong>
-                      <p>Only people added by email can access this board.</p>
+                      <p>Only people added by email can access this {resourceType}.</p>
                     </div>
                     <div className="google-share-faq-item">
                       <strong>Anyone with the link</strong>
@@ -352,9 +380,9 @@ export function ShareModal({
           </div>
 
           {saveError && <p role="alert">{saveError}</p>}
-          {isLoading && <p role="status">Loading permissions…</p>}
+
           <fieldset disabled={controlsDisabled} style={{ border: 0, padding: 0, margin: 0 }}>
-            {effectiveConfig.projectId && (
+            {resourceType === 'board' && effectiveConfig.projectId && (
               <label className="project-owner-filter">
                 Project access
                 <select
@@ -457,7 +485,7 @@ export function ShareModal({
                     </div>
 
                     <div className="google-share-role-col">
-                      <DropdownMenu.Root>
+                      <DropdownMenu.Root modal={false}>
                         <DropdownMenu.Trigger asChild>
                           <button type="button" className="google-share-role-trigger" aria-label="Change permission">
                             <span>{collab.role === 'editor' ? 'Editor' : 'Viewer'}</span>
@@ -522,7 +550,7 @@ export function ShareModal({
                 </div>
 
                 <div className="google-share-general-info">
-                  <DropdownMenu.Root>
+                  <DropdownMenu.Root modal={false}>
                     <DropdownMenu.Trigger asChild>
                       <button
                         type="button"
@@ -582,7 +610,7 @@ export function ShareModal({
 
                 {effectiveConfig.generalAccess === 'anyone_with_link' && (
                   <div className="google-share-general-role-col">
-                    <DropdownMenu.Root>
+                    <DropdownMenu.Root modal={false}>
                       <DropdownMenu.Trigger asChild>
                         <button type="button" className="google-share-role-trigger" aria-label="General access role">
                           <span>{effectiveConfig.generalRole === 'editor' ? 'Editor' : 'Viewer'}</span>

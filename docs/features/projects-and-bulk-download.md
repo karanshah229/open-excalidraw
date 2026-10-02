@@ -28,6 +28,15 @@ Follow-up decisions confirmed by the user:
 - Make private removes existing individual invitations and public links, with confirmation explaining the access loss.
 - Archive is a personal UI preference: it affects only the user archiving the project, including for received shared projects. It does not change project access, editability, or anyone else's homepage.
 
+UI review requirements, confirmed before manual sharing testing:
+
+- Use vertical three-dot triggers; dropdowns must allow app body scrolling.
+- Reuse the board sharing component for projects, with project actions and links. Retain fetched sharing policies so opening the modal does not reload permissions.
+- Polish Rename and Download to match sharing; reflect a saved project name immediately on the homepage.
+- Reuse homepage filter checkbox spacing for multiple export formats. Name the ZIP after its project and reserve status space to prevent download progress/results changing dialog height.
+- Include canvas background in image exports to prevent transparent PNGs appearing blank.
+- Polish the archived filter. Selecting it shows archived projects; their Archive action becomes Unarchive.
+
 Account-wide download answers, explicitly supplied by the user:
 
 1. Download boards the user owns; exclude boards merely shared with them. Do not assume projects already support sharing.

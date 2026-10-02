@@ -3,6 +3,7 @@ import type { Board, BoardDocument, Project } from '@agentic-whiteboard/storage'
 import { collection, doc, getDoc, getDocs, onSnapshot, query, runTransaction, setDoc, where } from 'firebase/firestore'
 import { getFirestoreDb } from '../../lib/firebase'
 import { restoreSceneAssets, storeSceneAssets } from '../assets/scene-assets'
+import { sharingService, type BoardShareConfig } from '../sharing/sharing-service'
 import { projectService, type VisibleProject } from '../sharing/project-service'
 import { reconcileElementsLWW } from '../collaboration/reconcile'
 
@@ -366,6 +367,10 @@ export const workspaceApi = {
       await Promise.all(
         projects.map(async (project) => {
           const policy = await getDoc(doc(db, 'projectShares', project.id)).catch(() => null)
+          if (policy)
+            project.sharePolicy = policy.exists()
+              ? (policy.data() as any)
+              : { generalAccess: 'restricted', generalRole: 'viewer', collaborators: {}, invitedEmails: [] }
           project.isShared = Boolean(
             policy?.exists() &&
             (policy.data().generalAccess === 'anyone_with_link' || policy.data().invitedEmails?.length),
@@ -380,10 +385,29 @@ export const workspaceApi = {
       )
       await Promise.all(
         boards.map(async (board) => {
-          if (!board.project.isShared) return
           const config = await getDoc(doc(db, 'boardShares', board.id)).catch(() => null)
           board.inheritProjectAccess = config?.data()?.inheritProjectAccess !== false
           const policy = config?.data()
+          if (config)
+            sharingService.rememberShareConfig(
+              config.exists()
+                ? (workspaceValue(config.data()) as BoardShareConfig)
+                : {
+                    boardId: board.id,
+                    projectId: board.projectId,
+                    boardName: board.name,
+                    ownerId: uid ?? 'local-user',
+                    ownerName: '',
+                    createdAt: board.createdAt,
+                    updatedAt: board.updatedAt,
+                    generalAccess: 'restricted',
+                    generalRole: 'viewer',
+                    collaborators: {},
+                    invitedEmails: [],
+                    inheritProjectAccess: true,
+                  },
+              uid ?? 'local-user',
+            )
           board.isPrivate =
             policy?.inheritProjectAccess === false &&
             policy.generalAccess === 'restricted' &&
@@ -418,7 +442,8 @@ export const workspaceApi = {
     const project = (await workspaceStore.listProjects()).find((project) => project.id === projectId)
     if (!project || !isOwnerProject(project)) throw new Error('Only the owner can rename a project.')
     if (getFirestoreDb()) {
-      await workspaceApi.flushCloud()
+      const parent = await getDoc(doc(getFirestoreDb()!, 'users', activeUserId!, 'projects', projectId))
+      if (!parent.exists()) await workspaceApi.flushCloud()
       await projectService.manage(projectId, 'rename', { name })
     }
     await workspaceStore.upsertProject({ ...project, name: name.trim(), updatedAt: new Date().toISOString() })
@@ -431,8 +456,15 @@ export const workspaceApi = {
     localStorage.setItem(archiveKey(activeUserId), JSON.stringify({ ...preferences, [projectId]: archived }))
     const pending = setDoc(doc(db, 'users', activeUserId, 'projectPreferences', projectId), { archived })
     emitWorkspaceChange()
-    if (navigator.onLine) await pending
-    else void pending.catch((error) => console.error('Archive preference sync failed:', error))
+    if (navigator.onLine) {
+      try {
+        await pending
+      } catch (error) {
+        localStorage.setItem(archiveKey(activeUserId), JSON.stringify(preferences))
+        emitWorkspaceChange()
+        throw error
+      }
+    } else void pending.catch((error) => console.error('Archive preference sync failed:', error))
   },
   async deleteProject(projectId: string) {
     const project = (await workspaceStore.listProjects()).find((project) => project.id === projectId)

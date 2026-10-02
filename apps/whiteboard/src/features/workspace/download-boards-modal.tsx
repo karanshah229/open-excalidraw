@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
-import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
-import { ChevronDown, Check } from 'lucide-react'
+import * as Popover from '@radix-ui/react-popover'
+import { FilterCheck } from './workspace-filters'
+import { ChevronDown } from 'lucide-react'
 import { exportFormats, type ExportFormat, type ExportResult } from './export-boards'
 
 export function DownloadBoardsModal({
@@ -34,7 +35,7 @@ export function DownloadBoardsModal({
         onProgress: (done, total) => setProgress(`Preparing ${done} of ${total} boards…`),
       })
       controller.current.signal.throwIfAborted()
-      await downloadExport(next, controller.current.signal)
+      await downloadExport(next, controller.current.signal, projectId ? `${name}-boards` : 'my-boards')
       setResult(next)
     } catch (error) {
       setError(error instanceof Error ? error.message : 'Download failed.')
@@ -56,70 +57,97 @@ export function DownloadBoardsModal({
     >
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content className="dialog-content" aria-describedby="download-desc">
-          <Dialog.Title>Download {name}</Dialog.Title>
-          <Dialog.Description id="download-desc">
-            Download a ZIP of your selected formats, including images and unsynced edits.
+        <Dialog.Content
+          className="dialog-content google-share-dialog download-boards-dialog"
+          aria-describedby="download-desc"
+        >
+          <div className="google-share-header">
+            <Dialog.Title className="google-share-title">Download {name}</Dialog.Title>
+          </div>
+          <Dialog.Description id="download-desc" className="project-dialog-description">
+            Download a ZIP with your boards, images, and unsynced edits.
           </Dialog.Description>
-          <DropdownMenu.Root>
-            <DropdownMenu.Trigger
-              className="ui-button ui-button--outline"
-              disabled={Boolean(progress)}
-              aria-label="Download formats"
-            >
-              Formats: {formats.join(', ') || 'Choose formats'} <ChevronDown size={14} />
-            </DropdownMenu.Trigger>
-            <DropdownMenu.Portal>
-              <DropdownMenu.Content className="google-share-dropdown-menu" sideOffset={6}>
-                {exportFormats.map((format) => (
-                  <DropdownMenu.CheckboxItem
-                    key={format}
-                    className="google-share-dropdown-item"
-                    checked={formats.includes(format)}
-                    onSelect={(event) => event.preventDefault()}
-                    onCheckedChange={(checked) => {
-                      setResult(null)
-                      setFormats((previous) =>
-                        checked ? [...previous, format] : previous.filter((item) => item !== format),
-                      )
-                    }}
-                  >
-                    <DropdownMenu.ItemIndicator>
-                      <Check size={14} />
-                    </DropdownMenu.ItemIndicator>
-                    {format === 'excalidraw' ? 'Excalidraw (editable)' : format.toUpperCase()}
-                  </DropdownMenu.CheckboxItem>
+          <div className="download-format-field">
+            <span className="download-field-label">File formats</span>
+            <Popover.Root>
+              <Popover.Trigger
+                className="download-format-trigger"
+                disabled={Boolean(progress)}
+                aria-label="Download formats"
+              >
+                <span>
+                  {formats
+                    .map((format) => (format === 'excalidraw' ? 'Excalidraw' : format.toUpperCase()))
+                    .join(', ') || 'Choose formats'}
+                </span>
+                <ChevronDown size={16} />
+              </Popover.Trigger>
+              <Popover.Portal>
+                <Popover.Content className="filter-popover download-format-popover" align="start" sideOffset={8}>
+                  <div className="filter-popover-body">
+                    <span className="filter-section-title">Include formats</span>
+                    <div className="filter-options">
+                      {exportFormats.map((format) => (
+                        <FilterCheck
+                          key={format}
+                          label={format === 'excalidraw' ? 'Excalidraw (editable)' : format.toUpperCase()}
+                          checked={formats.includes(format)}
+                          onCheckedChange={() => {
+                            setResult(null)
+                            setFormats((previous) =>
+                              previous.includes(format)
+                                ? previous.filter((item) => item !== format)
+                                : [...previous, format],
+                            )
+                          }}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                </Popover.Content>
+              </Popover.Portal>
+            </Popover.Root>
+          </div>
+          <div className="download-status-area" aria-live="polite">
+            {progress ? (
+              <p role="status">{progress}</p>
+            ) : error ? (
+              <p role="alert" className="download-error">
+                {error}
+              </p>
+            ) : result ? (
+              <p role="status">
+                {Object.keys(result.files).length} files downloaded. {result.failures.length} failed.
+              </p>
+            ) : (
+              <p className="download-hint">Select one or more formats. PNG and SVG include the canvas background.</p>
+            )}
+            {result?.failures.length ? (
+              <ul className="export-failures">
+                {result.failures.map((failure) => (
+                  <li key={`${failure.boardId}-${failure.format}`}>
+                    {failure.boardName} ({failure.format}): {failure.message}
+                  </li>
                 ))}
-              </DropdownMenu.Content>
-            </DropdownMenu.Portal>
-          </DropdownMenu.Root>
-          {progress && <p role="status">{progress}</p>}
-          {error && <p role="alert">{error}</p>}
-          {result && (
-            <p role="status">
-              {Object.keys(result.files).length} files downloaded. {result.failures.length} failed.
-            </p>
-          )}
-          {result?.failures.length ? (
-            <ul className="export-failures">
-              {result.failures.map((failure) => (
-                <li key={`${failure.boardId}-${failure.format}`}>
-                  {failure.boardName} ({failure.format}): {failure.message}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-          <div className="modal-actions">
-            <button className="modal-btn-cancel" onClick={close}>
+              </ul>
+            ) : null}
+          </div>
+          <div className="download-retry-row">
+            <button
+              className="google-share-copy-btn"
+              style={{ visibility: result?.failures.length ? 'visible' : 'hidden' }}
+              disabled={!result?.failures.length || Boolean(progress)}
+              onClick={() => void run(true)}
+            >
+              Retry failed exports
+            </button>
+          </div>
+          <div className="google-share-footer">
+            <button className="google-share-copy-btn" onClick={close}>
               {progress ? 'Cancel' : 'Close'}
             </button>
-            {result?.failures.length ? (
-              <button className="modal-btn-create" disabled={Boolean(progress)} onClick={() => void run(true)}>
-                Retry failed exports
-              </button>
-            ) : null}
             <button
-              className="modal-btn-create"
+              className="google-share-done-btn"
               disabled={!formats.length || Boolean(progress)}
               onClick={() => void run()}
             >

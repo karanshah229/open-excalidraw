@@ -1,11 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import * as Dialog from '@radix-ui/react-dialog'
-import { MoreHorizontal } from 'lucide-react'
-import { doc, getDoc } from 'firebase/firestore'
-import { getFirestoreDb } from '../../lib/firebase'
-import { projectService, type ProjectPolicy, type VisibleProject } from '../sharing/project-service'
-import { sharingService } from '../sharing/sharing-service'
+import { MoreVertical } from 'lucide-react'
+import { projectService, type VisibleProject } from '../sharing/project-service'
+import { sharingService, type BoardShareConfig } from '../sharing/sharing-service'
+import { ShareModal } from '../../components/share-modal'
 import { workspaceApi, workspaceStore } from './workspace-api'
 
 export type ProjectAction = 'share' | 'rename' | 'download' | 'archive' | 'delete'
@@ -19,10 +18,10 @@ export function ProjectMenu({
   onAction: (action: ProjectAction) => void
 }) {
   return (
-    <DropdownMenu.Root>
+    <DropdownMenu.Root modal={false}>
       <DropdownMenu.Trigger asChild>
         <button className="project-menu-trigger" type="button" aria-label={`Project actions for ${project.name}`}>
-          <MoreHorizontal size={18} />
+          <MoreVertical size={18} />
         </button>
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
@@ -42,12 +41,6 @@ export function ProjectMenu({
   )
 }
 
-const emptyPolicy: ProjectPolicy = {
-  generalAccess: 'restricted',
-  generalRole: 'viewer',
-  collaborators: {},
-  invitedEmails: [],
-}
 export function ProjectActionModal({
   project,
   action,
@@ -57,86 +50,75 @@ export function ProjectActionModal({
   project: VisibleProject
   action: Exclude<ProjectAction, 'download' | 'archive'>
   onClose: () => void
-  onComplete: () => void
+  onComplete: (patch?: Partial<VisibleProject>) => void
 }) {
   const [name, setName] = useState(project.name)
-  const [policy, setPolicy] = useState<ProjectPolicy>(emptyPolicy)
-  const [email, setEmail] = useState('')
   const [busy, setBusy] = useState(false)
-  const [loaded, setLoaded] = useState(action !== 'share')
-  const [loading, setLoading] = useState(action === 'share')
   const [error, setError] = useState('')
-  useEffect(() => {
-    if (action !== 'share') return
-    let live = true
-    const db = getFirestoreDb()
-    if (!db) {
-      setError('Sharing requires cloud configuration.')
-      setLoading(false)
-      return
-    }
-    void getDoc(doc(db, 'projectShares', project.id))
-      .then((snapshot) => {
-        if (live) {
-          setPolicy(snapshot.exists() ? (snapshot.data() as ProjectPolicy) : emptyPolicy)
-          setLoading(false)
-          setLoaded(true)
-        }
-      })
-      .catch((error) => {
-        if (live) {
-          setError(error.message)
-          setLoading(false)
-          setLoaded(false)
-        }
-      })
-    return () => {
-      live = false
-    }
-  }, [action, project.id])
+  const prepared = useRef(false)
+  const initialConfig = useMemo<BoardShareConfig | undefined>(
+    () =>
+      project.sharePolicy
+        ? {
+            ...project.sharePolicy,
+            boardId: project.id,
+            boardName: project.name,
+            ownerId: project.ownerId,
+            ownerName: project.ownerName ?? '',
+            createdAt: project.createdAt,
+            updatedAt: project.updatedAt,
+          }
+        : undefined,
+    [project],
+  )
+  if (action === 'share')
+    return (
+      <ShareModal
+        open
+        onOpenChange={(open) => {
+          if (!open) onClose()
+        }}
+        boardId={project.id}
+        boardName={project.name}
+        ownerId={project.ownerId}
+        resourceType="project"
+        initialConfig={initialConfig}
+        shareUrl={`${location.origin}/?projectId=${project.id}`}
+        onShareConfigSaved={() => onComplete()}
+        onSaveConfig={async (config) => {
+          if (!prepared.current) {
+            await workspaceApi.flushCloud()
+            for (const board of await workspaceStore.listBoards(project.id)) {
+              const policy = await sharingService.getShareConfig(board.id, {
+                boardName: board.name,
+                ownerId: project.ownerId,
+              })
+              await sharingService.saveShareConfig({ ...policy, projectId: project.id })
+            }
+            prepared.current = true
+          }
+          await projectService.manage(project.id, 'share', { policy: config })
+        }}
+      />
+    )
   const save = async () => {
-    if (busy || loading || !loaded) return
+    if (busy) return
     setBusy(true)
     setError('')
     try {
-      if (action === 'rename') await workspaceApi.renameProject(project.id, name)
-      if (action === 'delete') await workspaceApi.deleteProject(project.id)
-      if (action === 'share') {
-        await workspaceApi.flushCloud()
-        // Provision every existing board before granting project access. Preserve direct policies and exceptions.
-        const boards = await workspaceStore.listBoards(project.id)
-        for (const board of boards) {
-          const config = await sharingService.getShareConfig(board.id, {
-            boardName: board.name,
-            ownerId: project.ownerId,
-          })
-          await sharingService.saveShareConfig({ ...config, projectId: project.id })
-        }
-        await projectService.manage(project.id, 'share', { policy })
+      if (action === 'rename') {
+        await workspaceApi.renameProject(project.id, name)
+        onComplete({ id: project.id, name: name.trim() })
+      } else {
+        await workspaceApi.deleteProject(project.id)
+        onComplete()
       }
-      onComplete()
       onClose()
     } catch (error) {
       setError(error instanceof Error ? error.message : 'Project could not be updated.')
     } finally {
       setBusy(false)
     }
-  }
-  const add = () => {
-    const normalized = email.trim().toLowerCase()
-    if (!/^[^\s@|]+@[^\s@|]+\.[^\s@|]+$/.test(normalized)) {
-      setError('Enter a valid email address.')
-      return
-    }
-    setPolicy((previous) => ({
-      ...previous,
-      collaborators: {
-        ...previous.collaborators,
-        [normalized]: { email: normalized, role: 'viewer', addedAt: new Date().toISOString() },
-      },
-    }))
-    setEmail('')
-    setError('')
   }
   return (
     <Dialog.Root
@@ -146,133 +128,54 @@ export function ProjectActionModal({
       }}
     >
       <Dialog.Portal>
-        <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content className="dialog-content" aria-describedby="project-action-desc">
-          <Dialog.Title>{action[0].toUpperCase() + action.slice(1)} project</Dialog.Title>
-          <Dialog.Description id="project-action-desc">
+        <Dialog.Overlay className="dialog-overlay animate-fade-in" />
+        <Dialog.Content
+          className="dialog-content google-share-dialog project-edit-dialog animate-scale-in"
+          aria-describedby="project-action-desc"
+        >
+          <div className="google-share-header">
+            <Dialog.Title className="google-share-title">
+              {action === 'rename' ? 'Rename project' : 'Delete project'}
+            </Dialog.Title>
+          </div>
+          <Dialog.Description id="project-action-desc" className="project-dialog-description">
             {action === 'delete'
-              ? `Delete “${project.name}”? All contained board links will stop working. Stored content will be retained.`
-              : action === 'share'
-                ? 'Share existing and future boards. Boards with custom access keep their own permissions.'
-                : 'Update this project’s name.'}
+              ? `Delete “${project.name}”? All board links in this project will stop working.`
+              : 'Give this project a name that’s easy to recognize.'}
           </Dialog.Description>
           {action === 'rename' && (
-            <label className="modal-field">
-              Project name
-              <input
-                className="modal-input"
-                aria-label="Project name"
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-                disabled={busy}
-              />
-            </label>
-          )}
-          {action === 'share' && (
-            <fieldset disabled={busy || loading || !loaded} className="project-share-fields">
-              <label>
-                General access
-                <select
-                  aria-label="Project general access"
-                  value={policy.generalAccess}
-                  onChange={(event) =>
-                    setPolicy((previous) => ({
-                      ...previous,
-                      generalAccess: event.target.value as ProjectPolicy['generalAccess'],
-                    }))
-                  }
-                >
-                  <option value="restricted">Restricted</option>
-                  <option value="anyone_with_link">Anyone with the link</option>
-                </select>
-              </label>
-              {policy.generalAccess === 'anyone_with_link' && (
-                <label>
-                  Link role
-                  <select
-                    aria-label="Project link role"
-                    value={policy.generalRole}
-                    onChange={(event) =>
-                      setPolicy((previous) => ({
-                        ...previous,
-                        generalRole: event.target.value as ProjectPolicy['generalRole'],
-                      }))
-                    }
-                  >
-                    <option value="viewer">Viewer</option>
-                    <option value="editor">Editor</option>
-                  </select>
-                </label>
-              )}
-              <label>
-                Add people by email
+            <form
+              id="rename-project-form"
+              onSubmit={(event) => {
+                event.preventDefault()
+                void save()
+              }}
+            >
+              <label className="project-name-field">
+                Project name
                 <input
-                  className="modal-input"
-                  aria-label="Project collaborator email"
-                  value={email}
-                  onChange={(event) => setEmail(event.target.value)}
+                  className="google-share-text-input project-name-input"
+                  aria-label="Project name"
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                  maxLength={200}
+                  disabled={busy}
+                  autoFocus
+                  onFocus={(event) => event.target.select()}
                 />
               </label>
-              <button type="button" className="ui-button ui-button--outline" onClick={add}>
-                Add person
-              </button>
-              {Object.values(policy.collaborators ?? {}).map((person) => (
-                <div className="project-person" key={person.email}>
-                  <span>{person.email}</span>
-                  <select
-                    aria-label={`Role for ${person.email}`}
-                    value={person.role}
-                    onChange={(event) =>
-                      setPolicy((previous) => ({
-                        ...previous,
-                        collaborators: {
-                          ...previous.collaborators,
-                          [person.email]: { ...person, role: event.target.value as 'editor' | 'viewer' },
-                        },
-                      }))
-                    }
-                  >
-                    <option value="viewer">Viewer</option>
-                    <option value="editor">Editor</option>
-                  </select>
-                  <button
-                    aria-label={`Remove ${person.email}`}
-                    type="button"
-                    onClick={() =>
-                      setPolicy((previous) => ({
-                        ...previous,
-                        collaborators: Object.fromEntries(
-                          Object.entries(previous.collaborators).filter(([key]) => key !== person.email),
-                        ),
-                      }))
-                    }
-                  >
-                    Remove
-                  </button>
-                </div>
-              ))}
-              <button
-                className="ui-button ui-button--outline"
-                type="button"
-                onClick={() => {
-                  void navigator.clipboard
-                    .writeText(`${location.origin}/?projectId=${project.id}`)
-                    .catch((error) => setError(error.message))
-                }}
-              >
-                Copy project link
-              </button>
-            </fieldset>
+            </form>
           )}
-          {loading && <p role="status">Loading sharing settings…</p>}
-          {error && <p role="alert">{error}</p>}
-          <div className="modal-actions">
-            <button className="modal-btn-cancel" disabled={busy} onClick={onClose}>
+          <div className="project-form-status" role="alert">
+            {error}
+          </div>
+          <div className="google-share-footer">
+            <button className="google-share-copy-btn" disabled={busy} onClick={onClose}>
               Cancel
             </button>
             <button
-              className={action === 'delete' ? 'modal-btn-danger' : 'modal-btn-create'}
-              disabled={busy || loading || !loaded || (action === 'rename' && !name.trim())}
+              className={action === 'delete' ? 'modal-btn-danger' : 'google-share-done-btn'}
+              disabled={busy || !name.trim()}
               onClick={() => void save()}
             >
               {busy ? 'Saving…' : action === 'delete' ? 'Delete project' : 'Save'}

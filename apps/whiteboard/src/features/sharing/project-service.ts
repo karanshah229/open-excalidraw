@@ -15,6 +15,7 @@ export type VisibleProject = Project & {
   isShared?: boolean
   ownerName?: string
   archived?: boolean
+  sharePolicy?: ProjectPolicy
 }
 export type VisibleBoard = BoardDocument & { inheritProjectAccess?: boolean; role?: 'owner' | ShareRole }
 let functions: ReturnType<typeof getFunctions> | undefined
