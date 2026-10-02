@@ -31,6 +31,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const settle = (nextUser: User | null) => {
       if (nextUser && !nextUser.isAnonymous) {
         setUser(nextUser)
+      } else if (import.meta.env.DEV) {
+        const devUser = localStorage.getItem('agentic-whiteboard:e2e-user')
+        if (devUser) {
+          try {
+            setUser(JSON.parse(devUser))
+          } catch {
+            setUser(null)
+          }
+        } else {
+          setUser(null)
+        }
       } else {
         setUser(null)
       }

@@ -134,6 +134,7 @@ export function CreateBoardModal({
                 <strong>Project</strong>
               </label>
               <Popover.Root
+                modal={true}
                 open={isDropdownOpen}
                 onOpenChange={(openState) => {
                   setIsDropdownOpen(openState)
@@ -154,7 +155,12 @@ export function CreateBoardModal({
                 </Popover.Trigger>
 
                 <Popover.Portal>
-                  <Popover.Content className="project-dropdown-popover" align="start" sideOffset={5}>
+                  <Popover.Content
+                    className="project-dropdown-popover"
+                    align="start"
+                    sideOffset={5}
+                    onWheel={(e) => e.stopPropagation()}
+                  >
                     <div className="project-dropdown-search-wrap">
                       <Search size={14} className="project-dropdown-search-icon" />
                       <input
@@ -178,7 +184,11 @@ export function CreateBoardModal({
                       )}
                     </div>
 
-                    <div className="project-dropdown-list" role="listbox">
+                    <div
+                      className="project-dropdown-list"
+                      role="listbox"
+                      onWheel={(e) => e.stopPropagation()}
+                    >
                       {filteredProjects.length > 0 ? (
                         filteredProjects.map((project) => {
                           const isSelected = !isCreatingProject && selectedProjectId === project.id

@@ -1917,6 +1917,23 @@ button {
   flex-direction: column;
   gap: 2px;
   overscroll-behavior: contain;
+  touch-action: pan-y;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-color) transparent;
+}
+.project-dropdown-list::-webkit-scrollbar {
+  width: 6px;
+}
+.project-dropdown-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+.project-dropdown-list::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 9999px;
+}
+.project-dropdown-list::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
 }
 .project-dropdown-item {
   display: flex;
@@ -1932,6 +1949,7 @@ button {
   font-size: 13.5px;
   text-align: left;
   cursor: pointer;
+  flex-shrink: 0;
   transition:
     background-color 0.1s ease,
     color 0.1s ease;
