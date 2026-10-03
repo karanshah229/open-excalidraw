@@ -1094,7 +1094,7 @@ try {
     async () => {
       await viewer.goto(`${base}/settings?tab=account`)
       await viewer.waitForSelector('h2')
-      await clickText(viewer, 'Download all boards')
+      await clickText(viewer, 'Download')
       await clickText(viewer, 'Download ZIP')
       await viewer.waitForFunction(() =>
         document.querySelector('[role="dialog"]')?.textContent.includes('0 files downloaded. 0 failed.'),
@@ -1138,7 +1138,7 @@ try {
         await store.saveBoard(broken)
         return broken.id
       }, identities.owner.uid)
-      await clickText(owner, 'Download all boards')
+      await clickText(owner, 'Download')
       await clickText(owner, 'Download ZIP')
       await owner.waitForFunction(
         () => document.querySelector('[role="dialog"]')?.textContent.includes('3 files downloaded. 1 failed.'),
@@ -1372,7 +1372,7 @@ try {
       )
       await viewer.goto(`${base}/settings?tab=account`)
       await viewer.waitForSelector('h2')
-      await clickText(viewer, 'Download all boards')
+      await clickText(viewer, 'Download')
       const checkbox = await viewer.waitForSelector('[role="dialog"] .filter-check [role="checkbox"]')
       assert.equal(await checkbox.evaluate((node) => node.getAttribute('data-state')), 'unchecked')
       await checkbox.click()

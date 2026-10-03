@@ -371,8 +371,8 @@ export function SettingsPage() {
                       <strong>Download your boards</strong>
                       <span>Download all owned boards, including archived projects, local edits, and images.</span>
                     </div>
-                    <button className="ui-button ui-button--outline" onClick={() => setDownloadOpen(true)}>
-                      Download all boards
+                    <button className="ui-button ui-button--default" onClick={() => setDownloadOpen(true)}>
+                      Download
                     </button>
                   </div>
                 </div>
