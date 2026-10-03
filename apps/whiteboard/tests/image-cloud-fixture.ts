@@ -1,20 +1,36 @@
+import { initializeApp, deleteApp } from 'firebase/app'
+import { getFunctions, httpsCallable, connectFunctionsEmulator } from 'firebase/functions'
+import { convertToExcalidrawElements } from '@excalidraw/excalidraw'
 import { createUserWithEmailAndPassword, signOut, signInAnonymously } from 'firebase/auth'
 import { doc, getDoc, setDoc } from 'firebase/firestore'
-import { getBytes, ref } from 'firebase/storage'
-import { getFirebaseAuth, getFirebaseStorage, getFirestoreDb } from '../src/lib/firebase'
-import { storeSceneAssets, restoreSceneAssets } from '../src/features/assets/scene-assets'
+import { getBytes, getDownloadURL, ref } from 'firebase/storage'
+import {
+  getFirebaseAuth,
+  getFirebaseStorage,
+  getFirestoreDb,
+  getFirebaseApp,
+  getSyncAccessFunctionRegion,
+} from '../src/lib/firebase'
+import { storeSceneAssets, restoreSceneAssets, requestBoardAsset } from '../src/features/assets/scene-assets'
 import { sharingService } from '../src/features/sharing/sharing-service'
 import { workspaceApi, workspaceValue } from '../src/features/workspace/workspace-api'
 import type { BoardScene } from '@agentic-whiteboard/storage'
 
-export async function exerciseCloudAssets(dataURL: string) {
+export async function exerciseCloudAssets(dataURL: string, live?: string) {
   // Auth initializes first: this also verifies later Storage and Firestore emulator connections.
   const auth = getFirebaseAuth()!
-  const { user } = await createUserWithEmailAndPassword(auth, `images-${Date.now()}@example.com`, 'test-password')
+  const { user } = live
+    ? await signInAnonymously(auth)
+    : await createUserWithEmailAndPassword(auth, `images-${Date.now()}@example.com`, 'test-password')
   const db = getFirestoreDb()!
   const storage = getFirebaseStorage()!
   const scene: BoardScene = {
-    elements: [{ id: 'image', type: 'image', fileId: 'asset', version: 1, isDeleted: false }],
+    elements: convertToExcalidrawElements(
+      [
+        { id: 'image', type: 'image', fileId: 'asset', status: 'saved', x: 100, y: 100, width: 180, height: 120 },
+      ] as any,
+      { regenerateIds: false },
+    ) as any,
     appState: {},
     files: { asset: { id: 'asset', dataURL, mimeType: 'image/png', created: 1 } },
   }
@@ -48,7 +64,8 @@ export async function exerciseCloudAssets(dataURL: string) {
     updatedAt: '',
     scene: { elements: [], appState: {} },
   })
-  await sharingService.updateSharedScene(sharedId, scene)
+  // Sharing an already-synced private board may receive metadata-only files.
+  await sharingService.updateSharedScene(sharedId, privateScene)
   const sharedSnapshot = (await getDoc(doc(db, 'boardShares', sharedId))).data()!
   // An upload error must reject instead of committing missing bytes.
   let missingFileRejected = false
@@ -61,6 +78,12 @@ export async function exerciseCloudAssets(dataURL: string) {
   await signOut(auth)
   await signInAnonymously(auth)
   const shared = await sharingService.getSharedBoard(sharedId)
+  let privateGatewayReadDenied = false
+  try {
+    await requestBoardAsset({ operation: 'read', storagePath: privateScene.files.asset.storagePath })
+  } catch (error: any) {
+    privateGatewayReadDenied = error.code === 'functions/permission-denied'
+  }
   let privateReadDenied = false
   try {
     await getBytes(ref(storage, privateScene.files.asset.storagePath))
@@ -68,11 +91,182 @@ export async function exerciseCloudAssets(dataURL: string) {
     privateReadDenied = error.code === 'storage/unauthorized'
   }
   return {
+    sharedId,
     privateInlineBytes: privateScene.files.asset.dataURL,
     privateRestored: restored.files!.asset.dataURL,
     sharedInlineBytes: sharedSnapshot.scene.files.asset.dataURL,
     sharedRestored: shared.config?.scene?.files?.asset?.dataURL,
     missingFileRejected,
     privateReadDenied,
+    privateGatewayReadDenied,
+  }
+}
+
+export async function moveSharedImage(boardId: string) {
+  await getFirebaseAuth()!.authStateReady()
+  const shared = await sharingService.getSharedBoard(boardId)
+  const scene = shared.config!.scene!
+  const file = scene.files!.asset
+  // Position-only writes can also receive a cloud descriptor with no bytes.
+  const descriptorScene = await storeSceneAssets(
+    { ...scene, files: { asset: { ...file, dataURL: '' } } },
+    `boards/${boardId}/assets`,
+  )
+  if (descriptorScene.files!.asset.storagePath !== file.storagePath) throw new Error('Lost upload receipt')
+  // Simulate an older local snapshot whose cloud upload receipt was not saved.
+  // The object already exists: metadata must prevent a duplicate upload.
+  await storeSceneAssets(
+    { ...scene, files: { asset: { ...file, storagePath: undefined } } },
+    `boards/${boardId}/assets`,
+  )
+  for (let move = 1; move <= 3; move++) {
+    scene.elements = scene.elements.map((element) => ({ ...element, x: move * 20, y: move * 10, version: move + 1 }))
+    await sharingService.updateSharedScene(boardId, scene)
+  }
+  const snap = (await getDoc(doc(getFirestoreDb()!, 'boardShares', boardId))).data()!
+  return { x: snap.scene.elements[0].x, fileId: snap.scene.elements[0].fileId }
+}
+
+export async function readSharedPosition(boardId: string) {
+  const scene = (await getDoc(doc(getFirestoreDb()!, 'boardShares', boardId))).data()!.scene
+  return { x: scene.elements[0].x, y: scene.elements[0].y, dataURL: scene.files.asset.dataURL }
+}
+
+export async function createPrivateImageBoard(dataURL: string) {
+  const auth = getFirebaseAuth()!
+  await auth.authStateReady()
+  // The application intentionally hides anonymous users from its account UI.
+  // Use its existing development-only identity hook with the real test UID.
+  localStorage.setItem(
+    'agentic-whiteboard:e2e-user',
+    JSON.stringify({ uid: auth.currentUser!.uid, displayName: 'Image regression' }),
+  )
+  await workspaceApi.activateCloudWorkspace(auth.currentUser!.uid)
+  const project = await workspaceApi.createProject('Share dialog regression')
+  const board = await workspaceApi.createBoard(project.id, 'Share an image')
+  const scene: BoardScene = {
+    elements: convertToExcalidrawElements([
+      { type: 'image', fileId: 'asset', status: 'saved', x: 100, y: 100, width: 180, height: 120 },
+    ] as any) as any,
+    appState: {},
+    files: { asset: { id: 'asset', dataURL, mimeType: 'image/png', created: 1 } },
+  }
+  await workspaceApi.saveBoard({ ...board, scene })
+  return board.id
+}
+
+export async function readSharedImagePath(boardId: string) {
+  const snap = await getDoc(doc(getFirestoreDb()!, 'boardShares', boardId))
+  return snap.data()?.scene?.files?.asset?.storagePath
+}
+
+export async function persistMetadataOnlyLocalScene(boardId: string) {
+  const board = (await workspaceApi.loadBoard(boardId))!
+  const storagePath = await readSharedImagePath(boardId)
+  await workspaceApi.saveBoard({
+    ...board,
+    scene: { ...board.scene, files: { asset: { ...board.scene.files!.asset, dataURL: '', storagePath } } },
+  })
+}
+
+export async function exerciseAssetLifecycle(boardId: string) {
+  workspaceApi.deactivateCloudWorkspace()
+  const auth = getFirebaseAuth()!
+  const db = getFirestoreDb()!
+  const board = (await workspaceApi.loadBoard(boardId))!
+  const privateRef = doc(db, 'users', auth.currentUser!.uid, 'projects', board.projectId, 'boards', boardId)
+  const shareRef = doc(db, 'boardShares', boardId)
+  const projectRef = doc(db, 'users', auth.currentUser!.uid, 'projects', board.projectId)
+  const sharedPath = await readSharedImagePath(boardId)
+  const privatePath = `users/${auth.currentUser!.uid}/boards/${boardId}/assets/asset`
+  const read = (storagePath: string) => requestBoardAsset({ operation: 'read', storagePath })
+  const denied = async (path: string) => {
+    try {
+      await read(path)
+      return false
+    } catch (error: any) {
+      return error.code === 'functions/permission-denied'
+    }
+  }
+  const visitorApp = initializeApp(getFirebaseApp()!.options, `asset-visitor-${Date.now()}`)
+  const visitorFunctions = getFunctions(visitorApp, getSyncAccessFunctionRegion())
+  if (import.meta.env.VITE_USE_FIREBASE_EMULATOR === 'true')
+    connectFunctionsEmulator(visitorFunctions, window.location.hostname, 5001)
+  const visitorAsset = httpsCallable(visitorFunctions, 'boardAsset')
+  const visitorDenied = async (operation: string) => {
+    try {
+      await visitorAsset({ operation, storagePath: sharedPath })
+      return false
+    } catch (error: any) {
+      return error.code === 'functions/permission-denied'
+    }
+  }
+  await setDoc(shareRef, { generalAccess: 'restricted' }, { merge: true })
+  const restrictedDeniesVisitor = (await visitorDenied('read')) && (await visitorDenied('upload'))
+  await setDoc(shareRef, { generalAccess: 'anyone_with_link', generalRole: 'viewer' }, { merge: true })
+  const publicViewerCanRead = Boolean((await visitorAsset({ operation: 'read', storagePath: sharedPath })).data)
+  const publicViewerCannotUpload = await visitorDenied('upload')
+  await setDoc(shareRef, { generalAccess: 'anyone_with_link', generalRole: 'editor' }, { merge: true })
+  const publicEditorCanReuseAsset = Boolean((await visitorAsset({ operation: 'upload', storagePath: sharedPath })).data)
+  await setDoc(shareRef, { generalAccess: 'restricted', generalRole: 'viewer' }, { merge: true })
+  const revokedVisitorCannotRead = await visitorDenied('read')
+  await deleteApp(visitorApp)
+  const before = (await read(sharedPath)).dataURL
+  const originalScene = (await getDoc(shareRef)).data()!.scene
+  await setDoc(
+    shareRef,
+    { scene: { ...originalScene, elements: originalScene.elements.map((el: any) => ({ ...el, isDeleted: true })) } },
+    { merge: true },
+  )
+  const imageTombstoneRetainsBytes = (await read(sharedPath)).dataURL === before
+  await setDoc(shareRef, { scene: originalScene }, { merge: true })
+  const imageRestoreReusesBytes = (await read(sharedPath)).dataURL === before
+  // Missing token metadata must not be regeneratable by a browser, even its owner.
+  let directStorageDenied = false
+  let tokenCreationDenied = false
+  try {
+    await getBytes(ref(getFirebaseStorage()!, sharedPath))
+  } catch (error: any) {
+    directStorageDenied = error.code === 'storage/unauthorized'
+  }
+  try {
+    await getDownloadURL(ref(getFirebaseStorage()!, sharedPath))
+  } catch (error: any) {
+    tokenCreationDenied = error.code === 'storage/unauthorized'
+  }
+  try {
+    await setDoc(privateRef, { active: false }, { merge: true })
+    const boardDeleteDeniesBoth = (await denied(privatePath)) && (await denied(sharedPath))
+    await setDoc(privateRef, { active: true }, { merge: true })
+    const boardRestoreReusesBytes = (await read(sharedPath)).dataURL === before
+    await setDoc(projectRef, { active: false }, { merge: true })
+    const projectDeleteDeniesBoth = (await denied(privatePath)) && (await denied(sharedPath))
+    await setDoc(projectRef, { active: true }, { merge: true })
+    const projectRestoreReusesBytes = (await read(sharedPath)).dataURL === before
+    await setDoc(shareRef, { active: false }, { merge: true })
+    const sharedDeleteDenied = await denied(sharedPath)
+    await setDoc(shareRef, { active: true }, { merge: true })
+    return {
+      restrictedDeniesVisitor,
+      publicViewerCanRead,
+      publicViewerCannotUpload,
+      publicEditorCanReuseAsset,
+      revokedVisitorCannotRead,
+      imageTombstoneRetainsBytes,
+      imageRestoreReusesBytes,
+      directStorageDenied,
+      tokenCreationDenied,
+      boardDeleteDeniesBoth,
+      projectDeleteDeniesBoth,
+      boardRestoreReusesBytes,
+      projectRestoreReusesBytes,
+      sharedDeleteDenied,
+    }
+  } finally {
+    await Promise.all([
+      setDoc(privateRef, { active: true }, { merge: true }),
+      setDoc(projectRef, { active: true }, { merge: true }),
+      setDoc(shareRef, { active: true }, { merge: true }),
+    ])
   }
 }

@@ -10,6 +10,7 @@ coverage/
 .env
 .env.*
 !.env.example
+!functions/.env.demo-image-persistence
 
 # Logs and diagnostics
 *.log

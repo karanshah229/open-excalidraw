@@ -8,6 +8,8 @@ import { defineString } from 'firebase-functions/params'
 
 initializeApp()
 
+export { boardAsset } from './board-assets.js'
+
 const GRACE_PERIOD_MS = 30_000
 const COMPACTION_LOCK_MS = 120_000
 

@@ -5,7 +5,7 @@ import { RxDBMigrationSchemaPlugin } from 'rxdb/plugins/migration-schema'
 import type { RxDatabase, RxJsonSchema } from 'rxdb'
 
 export type ProjectRole = 'owner' | 'editor' | 'viewer'
-export type BoardSyncStatus = 'local-only' | 'synced' | 'sync-failed' | 'conflict'
+export type BoardSyncStatus = 'local-only' | 'synced' | 'sync-failed' | 'sync-blocked' | 'conflict'
 export type ProjectMember = { principalId: string; role: ProjectRole }
 
 export type Project = {
@@ -65,6 +65,8 @@ export interface WorkspaceStore {
   updateBoardSyncStatus(boardId: string, syncStatus: BoardSyncStatus): Promise<void>
   markBoardSynced(boardId: string, revision: number): Promise<void>
   markBoardSyncFailed(boardId: string, error: string, nextSyncAt: string): Promise<void>
+  markBoardSyncBlocked(boardId: string, error: string): Promise<void>
+  resumeBoardSync(boardId: string): Promise<void>
   markBoardConflict(boardId: string, error: string): Promise<void>
   requeueConflictedBoard(boardId: string, remoteRevision: number): Promise<void>
   listBoardsForSync(): Promise<Board[]>
@@ -402,6 +404,11 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
     const document = await (db.boards as any).findOne(boardId).exec()
     if (document) {
       const current = plain<BoardDocument>(document)
+      // A project tombstone can arrive while an earlier write is being acknowledged.
+      if (current.syncStatus === 'sync-blocked') {
+        await document.incrementalPatch({ baseRevision: Math.max(current.baseRevision, revision) })
+        return
+      }
       // Sync runs asynchronously. A newer local edit may have been saved while
       // the cloud acknowledgement for `revision` was in flight. In that case
       // acknowledge the committed base without replacing the newer local
@@ -437,6 +444,25 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
         lastSyncError: error,
       })
     }
+  }
+
+  async markBoardSyncBlocked(boardId: string, error: string): Promise<void> {
+    const db = await database()
+    const document = await (db.boards as any).findOne(boardId).exec()
+    if (document)
+      await document.incrementalPatch({ syncStatus: 'sync-blocked', lastSyncError: error, nextSyncAt: null })
+  }
+
+  async resumeBoardSync(boardId: string): Promise<void> {
+    const db = await database()
+    const document = await (db.boards as any).findOne(boardId).exec()
+    if (document)
+      await document.incrementalPatch({
+        syncStatus: 'local-only',
+        syncAttempts: 0,
+        nextSyncAt: null,
+        lastSyncError: null,
+      })
   }
 
   async markBoardConflict(boardId: string, error: string): Promise<void> {

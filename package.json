@@ -32,7 +32,15 @@
     "test:collab:ops": "node tests/collab-undo-further-ops.test.mjs",
     "test:mcp": "pnpm dlx tsx tests/mcp-tools-suite.test.ts",
     "test:mcp:e2e": "node tests/mcp-live-e2e.test.mjs",
-    "test:dropdown": "node tests/create-board-modal-dropdown-scroll.test.mjs"
+    "test:dropdown": "node tests/create-board-modal-dropdown-scroll.test.mjs",
+    "test:images": "node tests/image-persistence.test.mjs",
+    "test:images:cloud": "pnpm --filter @agentic-whiteboard/functions build && firebase emulators:exec --only auth,firestore,storage,database,functions --project demo-image-persistence --config image-persistence.firebase.json 'node tests/image-persistence.test.mjs --cloud'",
+    "check:images:deployment": "python3 tests/image-deployment-status.py",
+    "test:images:formats": "node tests/image-formats.test.mjs",
+    "test:images:formats:cloud": "pnpm --filter @agentic-whiteboard/functions build && firebase emulators:exec --only auth,firestore,storage,database,functions --project demo-image-persistence --config image-persistence.firebase.json 'node tests/image-formats.test.mjs --cloud'",
+    "test:images:formats:dev": "node tests/image-formats.test.mjs --live=development",
+    "test:images:formats:prod-bundle": "node tests/image-formats.test.mjs --production-bundle",
+    "test:sync:deleted-project": "pnpm --filter @agentic-whiteboard/functions build && firebase emulators:exec --only auth,firestore,storage,database,functions --project demo-image-persistence --config image-persistence.firebase.json 'node tests/deleted-project-sync.test.mjs'"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

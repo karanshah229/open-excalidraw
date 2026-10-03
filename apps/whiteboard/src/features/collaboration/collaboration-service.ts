@@ -11,7 +11,7 @@ import {
   goOffline,
   type Database,
 } from 'firebase/database'
-import { ref as storageRef, uploadBytes, getDownloadURL, type FirebaseStorage } from 'firebase/storage'
+import { ref as storageRef, uploadBytes, type FirebaseStorage } from 'firebase/storage'
 import type { CollaboratorPresence, CollabUser, ElementDeltaRecord } from './types'
 
 export const MAX_ELEMENT_PAYLOAD_BYTES = 262144 // 256KB
@@ -406,21 +406,6 @@ export class CollaborationService {
   // ==========================================
   // ASSET / IMAGE DECOUPLING
   // ==========================================
-
-  /**
-   * Uploads an embedded image asset directly to Firebase Storage.
-   * Decouples large binary blobs from RTDB.
-   */
-  async uploadImageAsset(boardId: string, fileId: string, dataUrl: string, mimeType = 'image/png'): Promise<string> {
-    if (!this.storage) {
-      throw new Error('Firebase Storage is not initialized')
-    }
-
-    const assetStorageRef = storageRef(this.storage, `boards/${boardId}/assets/${fileId}`)
-    const blob = await fetch(dataUrl).then((res) => res.blob())
-    await uploadBytes(assetStorageRef, blob, { contentType: mimeType })
-    return getDownloadURL(assetStorageRef)
-  }
 
   // ==========================================
   // STORAGE SNAPSHOT & COMPACTION

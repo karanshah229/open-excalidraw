@@ -1,0 +1,7 @@
+[
+  {
+    "origin": ["https://open-excalidraw-b2ab4.web.app", "https://open-excalidraw-b2ab4.firebaseapp.com"],
+    "method": ["GET"],
+    "maxAgeSeconds": 3600
+  }
+]

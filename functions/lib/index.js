@@ -6,6 +6,7 @@ import { onDocumentWritten } from 'firebase-functions/v2/firestore';
 import { HttpsError, onCall } from 'firebase-functions/v2/https';
 import { defineString } from 'firebase-functions/params';
 initializeApp();
+export { boardAsset } from './board-assets.js';
 const GRACE_PERIOD_MS = 30_000;
 const COMPACTION_LOCK_MS = 120_000;
 // These deploy-time parameters prevent an implicit fallback to a region that

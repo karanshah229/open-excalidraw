@@ -17,6 +17,7 @@ import { useAuth } from '../lib/auth-context'
 import { BoardInfoDropdown } from '../components/board-info-dropdown'
 import { SyncStatusDropdown } from '../components/sync-status-dropdown'
 import { ShareModal } from '../components/share-modal'
+import { restoreSceneAssets } from '../features/assets/scene-assets'
 import { sharingService } from '../features/sharing/sharing-service'
 import {
   useCollaboration,
@@ -36,11 +37,19 @@ const starterLibraries = [
 ]
 
 type EditorStatus =
-  'Loading board' | 'Saving' | 'Synced locally' | 'Synced' | 'Sync failed' | 'Conflict' | 'Local save failed'
+  | 'Loading board'
+  | 'Saving'
+  | 'Synced locally'
+  | 'Synced'
+  | 'Sync failed'
+  | 'Conflict'
+  | 'Local save failed'
+  | 'Project deleted'
 const statusLabel = (status: BoardSyncStatus): EditorStatus => {
   if (status === 'local-only') return 'Synced locally'
   if (status === 'synced') return 'Synced'
   if (status === 'conflict') return 'Conflict'
+  if (status === 'sync-blocked') return 'Project deleted'
   return 'Sync failed'
 }
 
@@ -501,6 +510,8 @@ export function BoardEditor() {
               files: { ...cloudScene.files, ...details.document.scene.files },
             }
           }
+          // Local cloud descriptors must not replace already-hydrated bytes.
+          finalScene = await restoreSceneAssets(finalScene, cloudScene.files)
 
           setIsSharedBoard(true)
           const isOwner = Boolean(
@@ -565,6 +576,7 @@ export function BoardEditor() {
         // Case 2: Board only in local IndexedDB (freshly created prior to cloud sync)
         if (details) {
           const { document, project } = details
+          if (document.syncStatus !== 'sync-blocked') document.scene = await restoreSceneAssets(document.scene)
           documentRef.current = document
           filesRef.current = (document.scene.files ?? {}) as BinaryFiles
           elementsRef.current = document.scene.elements
@@ -572,7 +584,7 @@ export function BoardEditor() {
           savedSignature.current = getSceneSignature(document.scene)
           committedSignatureRef.current = savedSignature.current
           awaitingInitialSceneRef.current = true
-          setIsReadOnly(false)
+          setIsReadOnly(document.syncStatus === 'sync-blocked')
           setBoardMeta({
             boardName: document.name,
             projectId: project.id,
@@ -672,18 +684,22 @@ export function BoardEditor() {
         }
       },
       (error) => {
-        if (error?.code === 'permission-denied') {
+        if (error?.code === 'permission-denied' || error?.code === 'functions/permission-denied') {
           setAccessDenied(true)
         }
       },
+      () => filesRef.current as BoardScene['files'],
     )
     return () => unsubscribe()
   }, [boardId, isSharedBoard, authUser?.email, authUser?.uid])
 
   useEffect(() => {
-    if (isReadOnly || isSharedBoard) return
-    return workspaceApi.subscribeToBoardSyncStatus(boardId, (status) => setState(statusLabel(status)))
-  }, [boardId, isReadOnly, isSharedBoard])
+    if (isSharedBoard) return
+    return workspaceApi.subscribeToBoardSyncStatus(boardId, (status) => {
+      setState(statusLabel(status))
+      setIsReadOnly(status === 'sync-blocked')
+    })
+  }, [boardId, isSharedBoard])
 
   const sendScene = useCallback(
     (elements = elementsRef.current, operationId?: string, result?: unknown) => {
@@ -1144,7 +1160,9 @@ export function BoardEditor() {
           documentRef.current = saved
           committedSignatureRef.current = getSceneSignature(scene)
           setBoardMeta((prev) => (prev ? { ...prev, updatedAt: saved.updatedAt } : prev))
-          await sharingService.syncBoardSceneToShare(boardId, scene, saved.name)
+          // The loaded board already established whether a share exists.
+          // Avoid an extra Firestore existence read on every drag/save.
+          if (isSharedBoard) await sharingService.updateSharedScene(boardId, scene)
           queryClient.invalidateQueries({ queryKey: ['workspace'] })
           setState(isSharedBoard ? 'Synced' : statusLabel(saved.syncStatus))
           return
@@ -1641,15 +1659,25 @@ export function BoardEditor() {
                   <span>{isCopyingBoard ? 'Copying…' : 'Make a copy'}</span>
                 </button>
 
-                <BoardInfoDropdown
-                  boardName={boardMeta?.boardName || 'Untitled'}
-                  createdAt={boardMeta?.createdAt}
-                  updatedAt={boardMeta?.updatedAt}
-                  projectOwnerId={boardMeta?.projectOwnerId}
-                  projectOwnerName={boardMeta?.projectOwnerName}
-                  projectOwnerEmail={boardMeta?.projectOwnerEmail}
-                  getSceneSize={getSceneSize}
-                />
+                {state === 'Project deleted' ? (
+                  <SyncStatusDropdown
+                    state={state}
+                    boardName={boardMeta?.boardName || 'Untitled'}
+                    createdAt={boardMeta?.createdAt}
+                    updatedAt={boardMeta?.updatedAt}
+                    getSceneSize={getSceneSize}
+                  />
+                ) : (
+                  <BoardInfoDropdown
+                    boardName={boardMeta?.boardName || 'Untitled'}
+                    createdAt={boardMeta?.createdAt}
+                    updatedAt={boardMeta?.updatedAt}
+                    projectOwnerId={boardMeta?.projectOwnerId}
+                    projectOwnerName={boardMeta?.projectOwnerName}
+                    projectOwnerEmail={boardMeta?.projectOwnerEmail}
+                    getSceneSize={getSceneSize}
+                  />
+                )}
               </>
             ) : (
               <>
@@ -1829,7 +1857,7 @@ export function BoardEditor() {
           boardId={boardId}
           boardName={boardMeta.boardName}
           ownerId={boardMeta.projectOwnerId}
-          scene={{ elements: elementsRef.current, appState: appStateRef.current }}
+          scene={{ elements: elementsRef.current, appState: appStateRef.current, files: filesRef.current }}
         />
       )}
     </main>

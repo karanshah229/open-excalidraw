@@ -22,17 +22,13 @@ service firebase.storage {
     }
 
     // Private workspace boards do not require a boardShares document.
+    // Only the Admin image gateway handles bytes. Denying metadata also
+    // prevents clients from minting permanent Firebase download tokens.
     match /users/{userId}/boards/{boardId}/assets/{fileId} {
-      allow read: if request.auth != null && request.auth.uid == userId;
-      allow write: if request.auth != null && request.auth.uid == userId
-        && request.resource.size < 10 * 1024 * 1024
-        && request.resource.contentType.matches('image/.*');
+      allow read, write: if false;
     }
-
     match /boards/{boardId}/assets/{fileId} {
-      allow read: if canRead(board(boardId));
-      // Allow upload up to 10MB per image
-      allow write: if canEdit(board(boardId)) && request.resource.size < 10 * 1024 * 1024;
+      allow read, write: if false;
     }
     match /boards/{boardId}/snapshots/{snapshotId} {
       allow read: if canRead(board(boardId));

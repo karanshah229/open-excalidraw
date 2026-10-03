@@ -9,7 +9,7 @@ import {
   getSyncAccessFunctionRegion,
 } from '../../lib/firebase'
 import { restoreSceneAssets, storeSceneAssets } from '../assets/scene-assets'
-import { firestoreValue, workspaceStore, workspaceValue } from '../workspace/workspace-api'
+import { firestoreValue, workspaceStore, workspaceValue, workspaceApi } from '../workspace/workspace-api'
 import type { BoardScene } from '@agentic-whiteboard/storage'
 import type { ActiveSessionRecord } from '../collaboration/types'
 
@@ -25,6 +25,7 @@ export interface BoardCollaborator {
 export interface BoardShareConfig {
   boardId: string
   boardName: string
+  sourceProjectId?: string
   ownerId: string
   ownerName: string
   ownerEmail?: string
@@ -122,6 +123,10 @@ export const sharingService = {
       }
     }
 
+    // A synced private scene may carry Storage descriptors rather than inline
+    // bytes. Hydrate them before copying assets into the shared board's path.
+    if (resolvedScene) resolvedScene = await restoreSceneAssets(resolvedScene)
+
     // Legacy local workspaces used the placeholder owner `local-user`. A new
     // share must be claimed by the signed-in Firebase identity before rules
     // permit it; never persist that placeholder as a cloud owner.
@@ -130,6 +135,7 @@ export const sharingService = {
     const normalizedConfig: BoardShareConfig = {
       ...config,
       ownerId,
+      sourceProjectId: (await workspaceStore.loadBoard(config.boardId))?.projectId ?? config.sourceProjectId,
       scene: resolvedScene,
       updatedAt: new Date().toISOString(),
       invitedEmails: Array.from(new Set(config.invitedEmails.map((e) => e.trim().toLowerCase()))),
@@ -137,6 +143,7 @@ export const sharingService = {
 
     const db = getFirestoreDb()
     if (db) {
+      if (authenticatedOwnerId === ownerId) await workspaceApi.ensureCloudBoardSynced(config.boardId, ownerId)
       const ref = doc(db, 'boardShares', config.boardId)
       // Establish access policy before uploading a new shared board's assets.
       // Keep an existing scene intact until every file has uploaded successfully.
@@ -200,25 +207,29 @@ export const sharingService = {
     boardId: string,
     onUpdate: (config: BoardShareConfig) => void,
     onError?: (error: any) => void,
+    getKnownFiles?: () => BoardScene['files'],
   ): () => void {
     const db = getFirestoreDb()
     if (!db) return () => {}
     const ref = doc(db, 'boardShares', boardId)
     let generation = 0
-    let knownFiles: BoardScene['files'] = {}
+    let knownFiles: BoardScene['files'] = getKnownFiles?.() ?? {}
+    let hydration = Promise.resolve()
     const unsubscribe = onSnapshot(
       ref,
       (snap) => {
         if (snap.exists()) {
           const data = workspaceValue(snap.data()) as BoardShareConfig
           const current = ++generation
-          void (async () => {
-            if (data.scene) data.scene = await restoreSceneAssets(data.scene, knownFiles)
-            if (current === generation) {
-              knownFiles = data.scene?.files ?? {}
-              onUpdate(data)
-            }
-          })().catch((error) => onError?.(error))
+          // Serialize hydration so rapid snapshots share the first download.
+          // The editor may already hold a newly inserted image's local bytes.
+          hydration = hydration
+            .then(async () => {
+              if (data.scene) data.scene = await restoreSceneAssets(data.scene, { ...knownFiles, ...getKnownFiles?.() })
+              knownFiles = { ...knownFiles, ...data.scene?.files }
+              if (current === generation) onUpdate(data)
+            })
+            .catch((error) => onError?.(error))
         }
       },
       (error) => {
@@ -261,7 +272,12 @@ export const sharingService = {
     }
 
     const allowed = async () => {
-      if (remoteData!.scene) remoteData!.scene = await restoreSceneAssets(remoteData!.scene)
+      try {
+        if (remoteData!.scene) remoteData!.scene = await restoreSceneAssets(remoteData!.scene)
+      } catch (error: any) {
+        if (error?.code === 'functions/permission-denied') return { status: 'restricted' as const }
+        throw error
+      }
       return { status: 'allowed' as const, config: remoteData! }
     }
 
