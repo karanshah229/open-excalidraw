@@ -34,7 +34,7 @@ export interface SyncStatusDropdownProps {
   projectOwnerName?: string
   projectOwnerEmail?: string
   version?: number
-  getSceneSize: () => { bytes: number; elementsCount: number }
+  getSceneSize: () => { bytes: number; cloudBytes: number; assetBytes: number; elementsCount: number }
 }
 
 interface StatusConfig {
@@ -162,7 +162,7 @@ export function SyncStatusDropdown({
 
   // Compute live scene size and element count when popover is open
   const sceneData = useMemo(() => {
-    if (!isOpen) return { bytes: 0, elementsCount: 0 }
+    if (!isOpen) return { bytes: 0, cloudBytes: 0, assetBytes: 0, elementsCount: 0 }
     return getSceneSize()
   }, [isOpen, getSceneSize])
 
@@ -357,10 +357,13 @@ export function SyncStatusDropdown({
             <div className="board-info-item">
               <div className="board-info-item-label">
                 <HardDrive size={13} className="board-info-item-icon" />
-                <span>File size</span>
+                <span>Local file size</span>
               </div>
               <div className="board-info-item-value-wrap board-info-item-value-wrap--stacked">
                 <span className="board-info-item-value">{formatBytes(sceneData.bytes)}</span>
+                <span className="board-info-item-value">Cloud estimate: {formatBytes(sceneData.cloudBytes)} / 900 KiB</span>
+                <span className="board-info-item-value">Images: {formatBytes(sceneData.assetBytes)}</span>
+                {sceneData.cloudBytes >= 700 * 1024 ? <span role="alert">{sceneData.cloudBytes >= 850 * 1024 ? 'Board near cloud size limit. Split into smaller boards.' : 'Board approaching cloud size limit.'}</span> : null}
                 <span className="board-info-item-subtext">
                   {sceneData.elementsCount} element{sceneData.elementsCount === 1 ? '' : 's'}
                 </span>

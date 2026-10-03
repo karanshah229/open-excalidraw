@@ -7,12 +7,13 @@ import { UserDropdown } from './components/user-dropdown'
 import { SignInScreen } from './components/sign-in-screen'
 import { AuthProvider, useAuth } from './lib/auth-context'
 import { workspaceApi } from './features/workspace/workspace-api'
+import { AccountProvider, PlanButton } from './features/account/account-panel'
 
 export function AppShell() {
   return (
     <ThemeProvider>
       <AuthProvider>
-        <AuthenticatedApp />
+        <AccountProvider><AuthenticatedApp /></AccountProvider>
       </AuthProvider>
     </ThemeProvider>
   )
@@ -50,6 +51,7 @@ function AuthenticatedApp() {
         </div>
         <div className="app-header-right">
           <div id="header-status-slot" />
+          {user && !user.isAnonymous ? <PlanButton /> : null}
           {user && !user.isAnonymous ? (
             <UserDropdown />
           ) : (

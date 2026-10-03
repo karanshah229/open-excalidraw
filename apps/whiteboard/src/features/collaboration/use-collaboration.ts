@@ -439,7 +439,7 @@ export function useCollaboration({
       const now = Date.now()
       pendingPointerRef.current = payload.pointer
 
-      if (now - lastPointerBroadcastRef.current >= 33) {
+      if (now - lastPointerBroadcastRef.current >= 100) {
         lastPointerBroadcastRef.current = now
         const selectedIds = Object.keys(appStateRef.current.selectedElementIds || {})
         void collabServiceRef.current.updatePresence(boardId, collabUser.sessionId, payload.pointer, selectedIds)
@@ -455,7 +455,7 @@ export function useCollaboration({
             pendingPointerRef.current,
             selectedIds,
           )
-        }, 33)
+        }, 100)
       }
     },
     [enabled, collabUser, boardId, appStateRef, commitPendingDrag, clearCursor],

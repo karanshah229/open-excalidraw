@@ -20,23 +20,30 @@ service firebase.storage {
           && boardData.collaborators[request.auth.token.email] != null
           && boardData.collaborators[request.auth.token.email].role == 'editor');
     }
+    function hasUploadGrant(path) {
+      let grant = firestore.get(/databases/(default)/documents/assetGrants/$(request.resource.metadata.quotaGrant)).data;
+      return request.auth != null && resource == null
+        && grant.uploaderId == request.auth.uid && grant.storagePath == path
+        && grant.state == 'reserved' && grant.expiresAt > request.time.toMillis()
+        && grant.bytes == request.resource.size && grant.mimeType == request.resource.contentType;
+    }
 
     // Private workspace boards do not require a boardShares document.
     match /users/{userId}/boards/{boardId}/assets/{fileId} {
       allow read: if request.auth != null && request.auth.uid == userId;
-      allow write: if request.auth != null && request.auth.uid == userId
-        && request.resource.size < 10 * 1024 * 1024
-        && request.resource.contentType.matches('image/.*');
+      allow create: if request.auth != null && request.auth.uid == userId
+        && hasUploadGrant('users/' + userId + '/boards/' + boardId + '/assets/' + fileId);
+      allow update, delete: if false;
     }
 
     match /boards/{boardId}/assets/{fileId} {
       allow read: if canRead(board(boardId));
-      // Allow upload up to 10MB per image
-      allow write: if canEdit(board(boardId)) && request.resource.size < 10 * 1024 * 1024;
+      allow create: if canEdit(board(boardId)) && hasUploadGrant('boards/' + boardId + '/assets/' + fileId);
+      allow update, delete: if false;
     }
     match /boards/{boardId}/snapshots/{snapshotId} {
       allow read: if canRead(board(boardId));
-      allow write: if canEdit(board(boardId));
+      allow write: if false;
     }
   }
 }

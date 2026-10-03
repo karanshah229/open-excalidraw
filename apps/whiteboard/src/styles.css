@@ -3863,3 +3863,160 @@ button {
   width: 100%;
   justify-content: center;
 }
+/* Account plan/usage controls share the app's typography and theme. */
+.account-plan-button {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--accent);
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  padding: 6px 10px;
+  font: inherit;
+  cursor: pointer;
+}
+.account-overlay {
+  position: fixed;
+  inset: 0;
+  background: #0007;
+  z-index: 2000;
+}
+.account-dialog {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(680px, calc(100vw - 32px));
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: 26px;
+  border-radius: 14px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  box-shadow: 0 16px 80px #0004;
+  z-index: 2001;
+}
+.account-dialog h2 {
+  margin: 0 32px 10px 0;
+  font-size: 20px;
+}
+.account-dialog p {
+  line-height: 1.5;
+}
+.account-close {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.account-current-plan {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+.account-meter {
+  margin: 16px 0;
+}
+.account-meter > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+}
+.account-meter progress {
+  width: 100%;
+  height: 8px;
+  accent-color: #6965db;
+}
+.account-note {
+  font-size: 12px;
+  opacity: 0.8;
+}
+.account-plan-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin: 24px 0;
+}
+.account-plan-grid section {
+  border: 1px solid #8885;
+  border-radius: 10px;
+  padding: 16px;
+}
+.account-plan-grid h3 {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0 0 10px;
+}
+.account-plan-grid ul {
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.8;
+}
+.account-pro-plan {
+  border-color: #6965db !important;
+}
+.account-plan-grid small {
+  display: block;
+  font-weight: 400;
+  margin-top: 4px;
+}
+.account-primary {
+  border: 0;
+  border-radius: 7px;
+  padding: 10px 16px;
+  background: #6965db;
+  color: #fff;
+  cursor: pointer;
+  font: inherit;
+}
+.account-primary:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.cloud-quota-banner {
+  position: fixed;
+  left: 16px;
+  right: 16px;
+  bottom: 16px;
+  margin: auto;
+  max-width: 850px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: #fff4d6;
+  color: #583e0c;
+  border: 1px solid #d6b469;
+  border-radius: 9px;
+  box-shadow: 0 2px 16px #0002;
+  z-index: 1500;
+  font-size: 13px;
+}
+.cloud-quota-banner span {
+  flex: 1;
+}
+.cloud-quota-banner button {
+  background: transparent;
+  color: inherit;
+  border: 0;
+  text-decoration: underline;
+  cursor: pointer;
+}
+@media (max-width: 550px) {
+  .account-plan-grid {
+    grid-template-columns: 1fr;
+  }
+  .account-dialog {
+    padding: 18px;
+  }
+  .cloud-quota-banner {
+    flex-wrap: wrap;
+  }
+}

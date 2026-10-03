@@ -8,13 +8,6 @@ service cloud.firestore {
       return signedIn() && request.auth.token.email != null
         && data.invitedEmails != null && request.auth.token.email in data.invitedEmails;
     }
-    function isEditor(data) {
-      return isOwner(data)
-        || (data.generalAccess == 'anyone_with_link' && data.generalRole == 'editor')
-        || (signedIn() && request.auth.token.email != null && data.collaborators != null
-          && data.collaborators[request.auth.token.email] != null
-          && data.collaborators[request.auth.token.email].role == 'editor');
-    }
     function canRead(data) {
       return data.generalAccess == 'anyone_with_link' || isOwner(data) || hasInvitedEmail(data);
     }
@@ -24,26 +17,30 @@ service cloud.firestore {
       allow read, write: if signedIn() && request.auth.uid == userId;
 
       match /boards/{boardId} {
-        allow read, write: if signedIn() && request.auth.uid == userId;
+        allow read: if signedIn() && request.auth.uid == userId;
+        allow write: if false;
       }
     }
 
     match /boardShares/{boardId} {
       allow read: if canRead(resource.data);
-      allow create: if signedIn() && request.resource.data.ownerId == request.auth.uid;
-      allow update: if isOwner(resource.data)
-        || (isEditor(resource.data)
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['scene', 'updatedAt', 'boardName']));
-      allow delete: if isOwner(resource.data);
+      // Cloud Functions own mutations and atomically enforce/account for quotas.
+      allow write: if false;
 
       match /activeSessions/{sessionId} {
         allow read: if canRead(parentBoard(boardId));
-        allow create, update, delete: if isEditor(parentBoard(boardId));
+        allow write: if false;
       }
       match /history/{revisionId} {
         allow read: if canRead(parentBoard(boardId));
         allow write: if false;
       }
     }
+    match /accountUsage/{userId} {
+      allow read: if signedIn() && request.auth.uid == userId;
+      allow write: if false;
+    }
+    match /adminConfig/{document} { allow read, write: if false; }
+    match /assetGrants/{document} { allow read, write: if false; }
   }
 }

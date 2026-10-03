@@ -1,6 +1,7 @@
 import type { BoardFile, BoardScene } from '@agentic-whiteboard/storage'
-import { getBytes, ref, uploadString } from 'firebase/storage'
+import { getBytes, ref, uploadBytes } from 'firebase/storage'
 import { getFirebaseStorage } from '../../lib/firebase'
+import { cloudCall } from '../account/cloud-api'
 
 const uploads = new Map<string, Promise<void>>()
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024
@@ -20,7 +21,17 @@ export async function storeSceneAssets(scene: BoardScene, assetRoot: string): Pr
         upload = (async () => {
           const blob = await (await fetch(file.dataURL)).blob()
           if (blob.size >= MAX_IMAGE_BYTES) throw new Error('Images must be smaller than 10 MB to sync.')
-          await uploadString(ref(storage, storagePath), file.dataURL, 'data_url', { contentType: file.mimeType })
+          const segments = assetRoot.split('/')
+          const shared = segments[0] === 'boards'
+          const boardId = shared ? segments[1] : segments[3]
+          const reservation = await cloudCall<{ grantId: string; storagePath: string; uploaded: boolean }>('reserveCloudAsset', {
+            boardId, fileId: id, bytes: blob.size, mimeType: file.mimeType, shared,
+          })
+          if (!reservation.uploaded) {
+            await uploadBytes(ref(storage, reservation.storagePath), blob, { contentType: file.mimeType,
+              customMetadata: { quotaGrant: reservation.grantId } })
+            await cloudCall('confirmCloudAsset', { grantId: reservation.grantId })
+          }
         })()
         uploads.set(storagePath, upload)
         upload.catch(() => uploads.delete(storagePath))

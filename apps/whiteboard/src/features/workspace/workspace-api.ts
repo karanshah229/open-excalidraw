@@ -1,9 +1,10 @@
 import { RxDbWorkspaceStore } from '@agentic-whiteboard/storage'
 import type { Board, BoardDocument, Project } from '@agentic-whiteboard/storage'
-import { collection, doc, getDoc, getDocs, onSnapshot, query, runTransaction, setDoc, where } from 'firebase/firestore'
+import { collection, doc, getDoc, getDocs, onSnapshot, query, setDoc, where } from 'firebase/firestore'
 import { getFirestoreDb } from '../../lib/firebase'
 import { restoreSceneAssets, storeSceneAssets } from '../assets/scene-assets'
 import { reconcileElementsLWW } from '../collaboration/reconcile'
+import { cloudCall, pauseUntil } from '../account/cloud-api'
 
 export type WorkspaceBoard = Board & { project: Project }
 export const workspaceStore = new RxDbWorkspaceStore()
@@ -15,10 +16,8 @@ const dirtyProjectIds = new Set<string>()
 const projectListeners = new Map<string, () => void>()
 let projectsListener: (() => void) | undefined
 const SYNC_DEBOUNCE_MS = 150
-const MIN_WRITE_INTERVAL_MS = 1_000
+const MIN_WRITE_INTERVAL_MS = 5_000
 const MAX_RETRY_DELAY_MS = 60_000
-
-class SyncConflictError extends Error {}
 
 const NESTED_ARRAY_KEY = '_agenticWhiteboardNestedArray'
 
@@ -133,11 +132,22 @@ async function syncWorkspace(userId: string) {
         const assetRoot = `users/${userId}/boards/${current.id}/assets`
         const cloudScene = await storeSceneAssets(current.scene, assetRoot)
         let resolvedBoard = current
-        await runTransaction(db, async (transaction) => {
-          const remoteSnapshot = await transaction.get(ref)
+        // Server owns the commit/counters. A concurrent scene is reconciled locally
+        // before retrying a new operation; direct SDK writes are denied by rules.
+        const commit = (document: BoardDocument) => cloudCall('commitCloudBoard', {
+          mode: 'private', boardId: document.id, projectId: document.projectId,
+          operationId: `private-${document.revision}-${document.updatedAt.replace(/[^0-9]/g, '')}`,
+          baseRevision: document.baseRevision, document: firestoreValue(cloudBoard(document)),
+        })
+        try {
+          await commit({ ...current, scene: cloudScene })
+        } catch (error: any) {
+          if (error.code !== 'functions/aborted') throw error
+          const remoteSnapshot = await getDoc(ref)
           if (remoteSnapshot.exists()) {
             const remoteData = workspaceValue(remoteSnapshot.data()) as BoardDocument
             const remoteRevision = Number(remoteData.revision ?? 0)
+            if (remoteRevision === current.baseRevision) throw error
             if (remoteRevision !== current.baseRevision) {
               remoteData.scene = await restoreSceneAssets(remoteData.scene, current.scene.files)
               // Element-level LWW reconciliation
@@ -158,12 +168,10 @@ async function syncWorkspace(userId: string) {
                 updatedAt: new Date().toISOString(),
               }
               const mergedScene = await storeSceneAssets(resolvedBoard.scene, assetRoot)
-              transaction.set(ref, firestoreValue(cloudBoard({ ...resolvedBoard, scene: mergedScene })))
-              return
+              await commit({ ...resolvedBoard, baseRevision: remoteRevision, scene: mergedScene })
             }
-          }
-          transaction.set(ref, firestoreValue(cloudBoard({ ...current, scene: cloudScene })))
-        })
+          } else throw error
+        }
         if (resolvedBoard !== current) {
           await workspaceStore.upsertBoard(resolvedBoard)
         }
@@ -173,7 +181,8 @@ async function syncWorkspace(userId: string) {
     } catch (error) {
       const current = await workspaceStore.loadBoard(board.id)
       const nextAttempt = (current?.syncAttempts ?? 0) + 1
-      await workspaceStore.markBoardSyncFailed(board.id, errorMessage(error), retryAt(nextAttempt))
+      await workspaceStore.markBoardSyncFailed(board.id, errorMessage(error),
+        (error as any)?.code === 'functions/resource-exhausted' ? pauseUntil(error) : retryAt(nextAttempt))
       window.dispatchEvent(new CustomEvent(`board-sync:${board.id}`, { detail: 'sync-failed' }))
     }
   }
@@ -315,8 +324,11 @@ export const workspaceApi = {
     return project
   },
   async deleteBoard(boardId: string) {
+    // Permanent cloud deletion frees its slot; do not discard local data if cleanup fails.
+    if (activeUserId && getFirestoreDb()) await cloudCall('purgeCloudBoard', { boardId })
     await workspaceStore.deleteBoard(boardId)
-    queueSync()
+    // A deleted cloud board must not be recreated by the sync outbox.
+    await workspaceStore.markBoardSynced(boardId, (await workspaceStore.loadBoard(boardId))?.revision ?? 0)
   },
   async loadBoard(boardId: string): Promise<BoardDocument | null> {
     const document = await workspaceStore.loadBoard(boardId)
@@ -350,7 +362,14 @@ export const workspaceApi = {
   },
   async saveBoard(document: BoardDocument) {
     try {
+      const previous = await workspaceStore.loadBoard(document.id)
       const saved = await workspaceStore.saveBoard(document)
+      // Keep accepting local edits without resetting a server-requested retry delay.
+      if (previous?.syncStatus === 'sync-failed' && previous.nextSyncAt && Date.parse(previous.nextSyncAt) > Date.now()) {
+        await workspaceStore.markBoardSyncFailed(document.id, previous.lastSyncError ?? 'Cloud sync paused', previous.nextSyncAt)
+        queueSync()
+        return { ...saved, syncStatus: 'sync-failed' as const, nextSyncAt: previous.nextSyncAt, lastSyncError: previous.lastSyncError }
+      }
       queueSync()
       return saved
     } catch (error) {

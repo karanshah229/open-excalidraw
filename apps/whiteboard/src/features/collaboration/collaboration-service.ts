@@ -12,6 +12,7 @@ import {
   type Database,
 } from 'firebase/database'
 import { ref as storageRef, uploadBytes, getDownloadURL, type FirebaseStorage } from 'firebase/storage'
+import { cloudCall } from '../account/cloud-api'
 import type { CollaboratorPresence, CollabUser, ElementDeltaRecord } from './types'
 
 export const MAX_ELEMENT_PAYLOAD_BYTES = 262144 // 256KB
@@ -35,6 +36,7 @@ export function cleanPayload<T extends Record<string, any>>(obj: T): T {
 export class CollaborationService {
   private rtdb: Database | undefined
   private storage: FirebaseStorage | undefined
+  private elementWarnings = new Set<string>()
   private activeSessionId: string | null = null
   private currentCursor: { x: number; y: number } | null = null
   private currentSelectedElementIds: string[] = []
@@ -108,6 +110,8 @@ export class CollaborationService {
           joinedAt: user.joinedAt || Date.now(),
           lastSeen: Date.now(),
         })
+        await cloudCall('admitCloudSession', { boardId, sessionId: user.sessionId })
+        await onDisconnect(ref(this.rtdb, `sessionGrants/${boardId}/${user.sessionId}`)).remove()
         await set(presenceRef, presencePayload)
       } catch (err: any) {
         console.warn('[Collab] RTDB presence sync deferred or unavailable:', err?.message)
@@ -330,8 +334,15 @@ export class CollaborationService {
       const canonicalElement = cleanPayload({ ...elem, lastModifiedBy: authorUid })
       const serialized = JSON.stringify(canonicalElement)
 
-      if (serialized.length > MAX_ELEMENT_PAYLOAD_BYTES) {
-        console.warn(`[Collab] Element ${elem.id} exceeds 256KB payload limit. Skipping broadcast.`)
+      const elementBytes = new TextEncoder().encode(serialized).length
+      const warningBand = elementBytes >= 240 * 1024 ? 2 : elementBytes >= 200 * 1024 ? 1 : 0
+      const warningKey = `${boardId}:${warningBand}`
+      if (warningBand && elementBytes < MAX_ELEMENT_PAYLOAD_BYTES && !this.elementWarnings.has(warningKey)) {
+        this.elementWarnings.add(warningKey)
+        window.dispatchEvent(new CustomEvent('cloud-limit', { detail: { metric: 'elementBytes', kind: 'warning', message: warningBand === 2 ? 'A drawing element is near the live collaboration size limit. Simplify it or split it into smaller elements.' : 'A drawing element is approaching the live collaboration size limit.' } }))
+      }
+      if (elementBytes >= MAX_ELEMENT_PAYLOAD_BYTES) {
+        window.dispatchEvent(new CustomEvent('cloud-limit', { detail: { metric: 'elementBytes', message: 'This drawing element is too large for live collaboration. Export a backup or simplify it.' } }))
         continue
       }
 
@@ -347,8 +358,8 @@ export class CollaborationService {
 
     if (Object.keys(updates).length > 0) {
       try {
-        const rootRef = ref(this.rtdb)
-        await update(rootRef, updates)
+        await cloudCall('commitCloudElements', { boardId, sessionId: this.activeSessionId,
+          elements: Object.values(updates).map((record) => JSON.parse(record.data)) })
       } catch (err: any) {
         console.warn('[Collab] Element delta broadcast deferred or offline:', err?.message)
       }

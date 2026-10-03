@@ -5,6 +5,8 @@ import { onValueDeleted } from 'firebase-functions/v2/database';
 import { onDocumentWritten } from 'firebase-functions/v2/firestore';
 import { HttpsError, onCall } from 'firebase-functions/v2/https';
 import { defineString } from 'firebase-functions/params';
+import { persistRecoveryScene } from './account-usage.js';
+export { getAccountUsage, commitCloudBoard, reserveCloudAsset, confirmCloudAsset, accountAssetFinalized, accountAssetDeleted, admitCloudSession, purgeCloudBoard, cleanUsageReservations, commitCloudElements, requestProAccess } from './account-usage.js';
 initializeApp();
 const GRACE_PERIOD_MS = 30_000;
 const COMPACTION_LOCK_MS = 120_000;
@@ -108,23 +110,7 @@ export const compactAbandonedCollaborationRoom = onValueDeleted({ ref: '/presenc
         const baseElements = boardData.scene?.elements ?? [];
         const records = Object.values((deltaSnapshot.val() ?? {}));
         const mergedElements = mergeDeltas(baseElements, records);
-        await firestore.runTransaction(async (transaction) => {
-            const boardRef = firestore.doc(`boardShares/${boardId}`);
-            const current = await transaction.get(boardRef);
-            if (!current.exists)
-                return;
-            const currentData = current.data() ?? {};
-            const revision = Number(currentData.snapshotRevision ?? 0) + 1;
-            const scene = { ...(currentData.scene ?? {}), elements: mergedElements };
-            const updatedAt = new Date().toISOString();
-            transaction.update(boardRef, { scene, snapshotRevision: revision, updatedAt });
-            transaction.set(firestore.doc(`boardShares/${boardId}/history/${String(revision).padStart(12, '0')}`), {
-                revision,
-                scene,
-                reason: 'abandoned-room-compaction',
-                createdAt: updatedAt,
-            });
-        });
+        await persistRecoveryScene(boardId, mergedElements);
         // A reconnect after the grace period must retain its live data. A newly
         // connected client also seeds full elements, so skipping this prune is safe.
         if (!(await presenceRef.get()).exists())
@@ -143,7 +129,10 @@ export const mirrorBoardAccessToRtdb = onDocumentWritten({ document: 'boardShare
         await accessRef.remove();
         return;
     }
-    await mirrorBoardAccess(boardId, after.data() ?? {});
+    const beforePolicy = event.data?.before.exists ? accessPolicyFromConfig(event.data.before.data() ?? {}) : null;
+    const afterPolicy = accessPolicyFromConfig(after.data() ?? {});
+    if (JSON.stringify(beforePolicy) !== JSON.stringify(afterPolicy))
+        await mirrorBoardAccess(boardId, after.data() ?? {});
 });
 /**
  * Synchronously establishes RTDB access after an owner saves sharing policy.

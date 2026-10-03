@@ -1,13 +1,19 @@
 {
   "rules": {
-    "boardAccess": { ".read": false, ".write": false },
-    "system": { ".read": false, ".write": false },
+    "boardAccess": {
+      ".read": false,
+      ".write": false
+    },
+    "system": {
+      ".read": false,
+      ".write": false
+    },
     "boards": {
       "$boardId": {
-        ".read": "auth != null && (root.child('boardAccess').child($boardId).child('ownerId').val() === auth.uid || root.child('boardAccess').child($boardId).child('publicRead').val() === true || (auth.token.email != null && root.child('boardAccess').child($boardId).child('readersByEmail').child(auth.token.email).val() === true))",
+        ".read": "auth != null && (root.child('boardAccess').child($boardId).child('ownerId').val() === auth.uid || root.child('boardAccess').child($boardId).child('publicRead').val() === true || (auth.token.email != null && root.child('boardAccess').child($boardId).child('readersByEmail').child(auth.token.email).val() === true)) && root.child('liveUsers').child($boardId).child(auth.uid).child('expiresAt').val() > now",
         "elements": {
           "$elementId": {
-            ".write": "auth != null && (root.child('boardAccess').child($boardId).child('ownerId').val() === auth.uid || root.child('boardAccess').child($boardId).child('publicWrite').val() === true || (auth.token.email != null && root.child('boardAccess').child($boardId).child('editorsByEmail').child(auth.token.email).val() === true))",
+            ".write": false,
             ".validate": "!newData.exists() || (newData.hasChildren(['id', 'version', 'versionNonce', 'lastModifiedBy', 'data']) && newData.child('id').val() === $elementId && newData.child('lastModifiedBy').val() === auth.uid && newData.child('data').isString() && newData.child('data').val().length < 262144)"
           }
         }
@@ -17,7 +23,7 @@
       "$boardId": {
         ".read": "auth != null && (root.child('boardAccess').child($boardId).child('ownerId').val() === auth.uid || root.child('boardAccess').child($boardId).child('publicRead').val() === true || (auth.token.email != null && root.child('boardAccess').child($boardId).child('readersByEmail').child(auth.token.email).val() === true))",
         "$sessionId": {
-          ".write": "auth != null && (root.child('boardAccess').child($boardId).child('ownerId').val() === auth.uid || root.child('boardAccess').child($boardId).child('publicRead').val() === true || (auth.token.email != null && root.child('boardAccess').child($boardId).child('readersByEmail').child(auth.token.email).val() === true)) && ((!data.exists() && !newData.exists()) || (!data.exists() && newData.child('userId').val() === auth.uid) || (data.exists() && data.child('userId').val() === auth.uid))",
+          ".write": "(auth != null && (root.child('boardAccess').child($boardId).child('ownerId').val() === auth.uid || root.child('boardAccess').child($boardId).child('publicRead').val() === true || (auth.token.email != null && root.child('boardAccess').child($boardId).child('readersByEmail').child(auth.token.email).val() === true)) && ((!data.exists() && !newData.exists()) || (!data.exists() && newData.child('userId').val() === auth.uid) || (data.exists() && data.child('userId').val() === auth.uid))) && (!newData.exists() || (root.child('sessionGrants').child($boardId).child($sessionId).child('userId').val() === auth.uid && root.child('sessionGrants').child($boardId).child($sessionId).child('expiresAt').val() > now))",
           ".validate": "!newData.exists() || (newData.hasChildren(['userId', 'sessionId', 'displayName', 'color', 'lastSeen']) && newData.child('userId').val() === auth.uid && newData.child('sessionId').val() === $sessionId)"
         }
       }
@@ -26,10 +32,22 @@
       "$boardId": {
         ".read": "auth != null && (root.child('boardAccess').child($boardId).child('ownerId').val() === auth.uid || root.child('boardAccess').child($boardId).child('publicRead').val() === true || (auth.token.email != null && root.child('boardAccess').child($boardId).child('readersByEmail').child(auth.token.email).val() === true))",
         "$sessionId": {
-          ".write": "auth != null && (root.child('boardAccess').child($boardId).child('ownerId').val() === auth.uid || root.child('boardAccess').child($boardId).child('publicRead').val() === true || (auth.token.email != null && root.child('boardAccess').child($boardId).child('readersByEmail').child(auth.token.email).val() === true)) && ((!data.exists() && !newData.exists()) || (!data.exists() && newData.child('userId').val() === auth.uid) || (data.exists() && data.child('userId').val() === auth.uid))",
+          ".write": "(auth != null && (root.child('boardAccess').child($boardId).child('ownerId').val() === auth.uid || root.child('boardAccess').child($boardId).child('publicRead').val() === true || (auth.token.email != null && root.child('boardAccess').child($boardId).child('readersByEmail').child(auth.token.email).val() === true)) && ((!data.exists() && !newData.exists()) || (!data.exists() && newData.child('userId').val() === auth.uid) || (data.exists() && data.child('userId').val() === auth.uid))) && (!newData.exists() || (root.child('sessionGrants').child($boardId).child($sessionId).child('userId').val() === auth.uid && root.child('sessionGrants').child($boardId).child($sessionId).child('expiresAt').val() > now))",
           ".validate": "!newData.exists() || (newData.hasChildren(['userId', 'sessionId', 'joinedAt', 'lastSeen']) && newData.child('userId').val() === auth.uid && newData.child('sessionId').val() === $sessionId)"
         }
       }
+    },
+    "sessionGrants": {
+      "$boardId": {
+        "$sessionId": {
+          ".read": "auth != null && data.child('userId').val() === auth.uid",
+          ".write": "auth != null && !newData.exists() && data.child('userId').val() === auth.uid"
+        }
+      }
+    },
+    "liveUsers": {
+      ".read": false,
+      ".write": false
     }
   }
 }
