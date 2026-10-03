@@ -22,10 +22,10 @@ Follow-up decisions confirmed by the user:
 - Project editors can create boards. Shared projects appear on recipients' homepages alongside their own projects; distinguish them with a UI indicator.
 - Archive preserves links and editing, hides the project from the default homepage, and remains reachable through the existing filter.
 - Project deletion disables all contained board links, including individually shared boards. Restore and retention details remain open.
-- Explicit inheritance controls are accepted.
-- For boards inside shared projects, replace the homepage card's hover Share action next to Delete with a privacy/inheritance action that toggles between making private and restoring project access. Keep the accordion layout.
+- Latest UI decision: inheritance is implicit. New boards use project access; editing board sharing creates a board-specific override. A small Use project access action restores inheritance. See [the complete access matrix](board-sharing-permissions.md).
+- Keep the homepage card hover Share action beside Delete. Remove the board three-dot menu and Make private feature; Restricted in sharing is the single control for restricting board access. Keep the accordion layout.
 - Only the project owner can change board privacy/inheritance or delete boards. Editors can create/edit boards; editor-created boards remain owned by the project owner.
-- Make private removes existing individual invitations and public links, with confirmation explaining the access loss.
+- Restricted stops project inheritance and removes public access, but preserves individual board invitees: owner + invited people. No invitees means owner-only private.
 - Archive is a personal UI preference: it affects only the user archiving the project, including for received shared projects. It does not change project access, editability, or anyone else's homepage.
 
 UI review requirements, confirmed before manual sharing testing:
@@ -35,7 +35,7 @@ UI review requirements, confirmed before manual sharing testing:
 - Polish Rename and Download to match sharing; reflect a saved project name immediately on the homepage.
 - Reuse homepage filter checkbox spacing for multiple export formats. Name the ZIP after its project and reserve status space to prevent download progress/results changing dialog height.
 - Include canvas background in image exports to prevent transparent PNGs appearing blank.
-- Polish the archived filter. Selecting it shows archived projects; their Archive action becomes Unarchive.
+- Match the provided Filter projects design: All / Owned / Shared segments, Include archived projects, project count/search/checklist, Reset filters. Including archives shows both active and archived projects; the archived project menu offers Unarchive.
 
 Account-wide download answers, explicitly supplied by the user:
 
@@ -69,11 +69,11 @@ Checked official documentation on 2026-10-03. There is no single universal behav
 - [Miro board access](https://help.miro.com/hc/en-us/articles/4408888726290-Who-has-access-to-my-board): the highest access across sharing levels applies. [Making a board private](https://help.miro.com/hc/en-us/articles/360021095159-Make-a-Miro-board-private) requires removing all sharing levels; for shared spaces it advises moving the board out or unsharing the space.
 - [SharePoint unique permissions](https://support.microsoft.com/en-us/sharepoint/lists/sharepoint-sharing-and-permissions/customize-permissions-for-a-sharepoint-list-or-library): documents/items can stop inheriting from their parent and use independent permissions. Microsoft supports this but recommends ordinary group-based management where practical.
 
-Recommend explicit inheritance controls, using the independent-permission pattern to satisfy this app's confirmed requirement:
+Use implicit board overrides, following the independent-permission pattern to satisfy this app's confirmed requirement:
 
 - Inherit project access (default): compose current project grants and direct board grants by the highest allowed role.
 - Custom board access: ignore project sharing grants; allow the project owner plus the board's direct invite/link policy. This permits lower roles for selected project members and excludes everyone else.
-- Make private: an explicit owner action that atomically disables inheritance, removes direct invitations, and disables public links. Owner retains access. Do not equate disabling inheritance with owner-only access if older direct grants remain.
+- Restricted: an owner edit that disables inheritance/public access and preserves individual board invitations. Owner-only private applies only when no direct invitees remain.
 - Restore project access: explicit owner action to resume inheritance; explain that this may broaden access. Direct board grants remain separately managed unless explicitly removed.
 
 Project ownership and deletion checks always apply, including to custom/private boards. A project editor cannot change access, re-enable inheritance, or make their own created board private unless the product separately grants that management power. Creator identity is attribution; ownership remains with the project owner under the recommended model.
@@ -82,13 +82,11 @@ Private boards must disappear entirely for unauthorized recipients: no name, pre
 
 The board inheritance flag is authoritative server-managed policy and must be honored by Firestore, Storage, RTDB, live listeners, previews, listing, and export. Changing it needs the same revisioned revocation flow as direct sharing. Retain independent grants when converting existing boards; existing boards default to inheritance unless the owner chooses an exception, and exceptions survive subsequent project-policy changes.
 
-### Board-card privacy action
+### Board sharing controls
 
-Updated placement (confirmed in UI review): keep hover Share beside Delete for all owned boards, so owners can open sharing and copy the board link. Add a three-dot menu beside the board name for boards in shared projects, with the privacy action. Labels: Make private for inherited or custom-shared boards; Use project access for owner-only private boards. The second action restores inheritance, not historical invitations/public links. Both the board editor and the card Share action open the existing sharing dialog.
+Keep hover Share beside Delete for owned boards; both the board editor and homepage open the existing sharing modal. Remove the redundant board action menu and Make private dialog. Restricted retains individual board invitees and stops inheritance. Editing any board sharing setting implicitly creates a board-specific override, with clear source text and inherited people labeled Via project. Use project access restores inheritance while keeping direct board grants. Changes remain owner-only and server-authorized.
 
-Show privacy and board-delete controls only to the authorized owner; editor creation does not imply permission-management or deletion rights. Enforce this server-side as well. Keep a persistent lock indicator on private cards and ensure hover controls also appear on keyboard focus and touch. Make private requires confirmation explaining that direct invitations/public access will be removed. Explain that Use project access grants the current project audience access; a separate confirmation for restoring inheritance remains a proposal.
-
-Treat this as an asynchronous action with pending/failed states, not an optimistic visual switch. Do not claim privacy before authorization changes complete across stores. On failure, show the committed state and offer retry. Revocation disconnects affected live editors and rejects queued writes; preserve uncommitted edits as local recovery data. Privacy does not retract bytes already downloaded.
+On failed saves, roll back to the committed policy and show an error. Live subscriptions recover after permitted role changes; actual revocation denies further access. See [all permissions combinations](board-sharing-permissions.md).
 
 ## Product decisions still open
 
@@ -190,7 +188,7 @@ Validate before release using Firebase emulators plus browser/MCP integration co
 
 - Existing restricted/public viewer/editor board links, images, collaboration, presence, undo, rename, and board soft deletion.
 - Project and board role combinations, direct grant preservation after project revoke, ordinary invited emails, failed policy writes, out-of-order mirrors, and ownership spoof attempts.
-- Private/custom board exceptions within public and restricted shared projects; no unauthorized metadata/count/preview/export leaks; owner-only privacy transitions; restored inheritance; existing direct grants retained unless Make private explicitly removes them; later project updates preserving exceptions.
+- Private/custom board exceptions within public and restricted shared projects; no unauthorized metadata/count/preview/export leaks; owner-only privacy transitions; restored inheritance; existing direct grants retained when Restricted is selected; later project updates preserving exceptions.
 - Shared projects visible on recipients' homepages with correct owner/role badges; editor-created boards inherit policy and remain owned by the project owner; removing membership removes homepage access unless another valid project grant applies.
 - Existing/future/empty project boards, owner/editor/viewer creation, local pending publication, and board-only visitors unable to enumerate parent/sibling data.
 - Anonymous/public and signed-in/restricted project links, homepage query navigation, refresh, and sign-in transitions.
@@ -203,7 +201,7 @@ The architecture sections above preserve the original planning analysis. The imp
 
 ## Implementation and release requirements
 
-Implemented the existing accordion menu, shared/owned role badges and filters, personal archive preferences, owner-only privacy controls, shared editor creation/editing, project links on the homepage, and soft deletion. Board count stays next to the name; last edited remains on the right. Existing direct grants compose with project access unless a board explicitly disables inheritance. Making private clears all direct grants with confirmation.
+Implemented the existing accordion menu, shared/owned role badges and filters, personal archive preferences, owner-only privacy controls, shared editor creation/editing, project links on the homepage, and soft deletion. Board count stays next to the name; last edited remains on the right. Existing direct grants compose with project access unless a board explicitly disables inheritance. Restricted disables inheritance and public access while retaining direct invitees.
 
 Account download is under Settings → Account → Your data. Both scopes use the same read-only export pipeline with `.excalidraw`, SVG and PNG checkboxes, embedded image bytes, live RTDB changes, local pending edits, cancellation, per-format failures and retry. ZIP output includes capture times and failures in a manifest. Exports are consistent per board, not an atomic workspace snapshot; they cannot include unsynced edits from another device. Rendering is serial, PNG dimensions are capped at 8192, and uncompressed archive content is limited to 256 MB.
 
@@ -228,3 +226,11 @@ On 2026-10-03, the feature Functions and Firestore/Storage/RTDB rules were deplo
 The dev backfill inspected 61 existing board-share records: five were bound to private project/board documents, while 56 had no matching private parent and were preserved without inventing ownership bindings. Their direct grants remain projected; management through the new owner-validated callables requires a genuine private parent. Backups and migration diagnostics are kept in ignored local logs. These legacy records need separate data cleanup before claiming the entire dev dataset has valid ownership links.
 
 On 2026-10-03, UI review follow-ups extended project management to editors, retained Share on board cards with a separate privacy menu, and fixed live permission-listener recovery. `manageProject` and `listSharedProjects` were redeployed to the dev project; no additional rules changes or production deployment were made. The expanded suite passed 24 Puppeteer/browser/network scenarios, including editor management, public editor access, restricted-link presentation, live viewer/editor/public transitions, and no redundant Done/board-publication writes.
+
+### Latest UI decisions
+
+The filter panel follows the supplied Filter projects reference: segmented visibility, Include archived projects, project count/search/checklist, and Reset filters. Archives are included alongside active projects. Active filters with no matches show a matching-results empty state.
+
+Removed the board action menu/Make private modal and native access-mode selector. Explicit board sharing edits now automatically create a board-specific override; Restricted keeps owner + individually invited people. Use project access restores inheritance without discarding direct grants. See [the role matrix and all 162 combinations](board-sharing-permissions.md).
+
+Download format menus render above modal content and are tested with real pointer clicks. Preview keys include the board revision and element versions; saves notify the workspace and homepage navigation refetches metadata immediately. Delete confirmation no longer reserves an empty status area.

@@ -391,7 +391,10 @@ export const workspaceApi = {
           if (config)
             sharingService.rememberShareConfig(
               config.exists()
-                ? (workspaceValue(config.data()) as BoardShareConfig)
+                ? ({
+                    ...(workspaceValue(config.data()) as BoardShareConfig),
+                    projectPolicy: board.project.sharePolicy,
+                  } as BoardShareConfig)
                 : {
                     boardId: board.id,
                     projectId: board.projectId,
@@ -405,6 +408,7 @@ export const workspaceApi = {
                     collaborators: {},
                     invitedEmails: [],
                     inheritProjectAccess: true,
+                    projectPolicy: board.project.sharePolicy,
                   },
               uid ?? 'local-user',
             )
@@ -551,6 +555,7 @@ export const workspaceApi = {
   async saveBoard(document: BoardDocument) {
     try {
       const saved = await workspaceStore.saveBoard(document)
+      emitWorkspaceChange()
       queueSync()
       return saved
     } catch (error) {

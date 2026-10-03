@@ -4022,6 +4022,7 @@ button {
   outline-offset: 2px;
 }
 .download-format-popover {
+  z-index: 1000;
   width: var(--radix-popover-trigger-width);
   min-width: 240px;
 }
@@ -4119,4 +4120,121 @@ button {
 .board-menu-trigger {
   flex-shrink: 0;
   margin: -4px 0;
+}
+
+/* Project filter panel follows the workspace control scale. */
+.workspace-project-filter {
+  width: min(320px, calc(100vw - 40px));
+  padding: 18px;
+  border-radius: 14px;
+}
+.project-filter-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 18px;
+  font-size: 18px;
+  font-weight: 600;
+}
+.workspace-project-filter .filter-header-row {
+  justify-content: flex-start;
+  gap: 9px;
+  margin: 0 0 10px;
+}
+.project-filter-label {
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+}
+.workspace-project-filter .project-filter-tabs {
+  margin: 10px 0 16px;
+  border-radius: 9px;
+}
+.workspace-project-filter .project-filter-tabs button {
+  padding: 9px 8px;
+  font-size: 14px;
+  border-radius: 6px;
+}
+.workspace-project-filter .project-archive-filter {
+  margin: 0 0 16px;
+}
+.workspace-project-filter .project-archive-filter .filter-check {
+  padding: 6px 0;
+}
+.workspace-project-filter .filter-divider {
+  margin: 0 0 16px;
+}
+.workspace-project-filter .filter-section-count {
+  background: var(--bg-surface-hover);
+  color: var(--text-secondary);
+  height: 23px;
+  min-width: 23px;
+  border-radius: 50%;
+}
+.workspace-project-filter .filter-search-wrap {
+  height: 40px;
+  border-radius: 9px;
+  margin-bottom: 10px;
+}
+.workspace-project-filter .filter-check {
+  padding: 10px 8px;
+  gap: 12px;
+  font-size: 14px;
+}
+.workspace-project-filter .checkbox-root {
+  width: 19px;
+  height: 19px;
+  border-radius: 5px;
+}
+.workspace-project-filter .filter-check:has([data-state='checked']) {
+  background: var(--bg-surface-hover);
+}
+.workspace-project-filter .filter-bottom-bar {
+  justify-content: flex-start;
+  margin-top: 14px;
+  padding-top: 14px;
+}
+.workspace-project-filter .filter-clear-all-btn {
+  padding: 4px 0;
+  font-size: 14px;
+}
+.project-filter-arrow {
+  fill: var(--bg-surface);
+}
+.project-delete-dialog .project-dialog-description {
+  margin-bottom: 0;
+}
+.project-delete-dialog .google-share-footer {
+  margin-top: 20px;
+  padding-top: 0;
+}
+.project-delete-dialog .project-form-status {
+  min-height: 0;
+  margin-bottom: 0;
+}
+
+.board-sharing-source {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  margin-bottom: 16px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+.board-sharing-source p {
+  margin: 0;
+}
+.board-sharing-source button {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
 }

@@ -2,8 +2,7 @@ import { memo, useEffect, useRef, useState } from 'react'
 import { Link } from '@tanstack/react-router'
 import type { BinaryFiles } from '@excalidraw/excalidraw/types'
 import { exportToSvg } from '@excalidraw/excalidraw'
-import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
-import { Share2, Trash2, Lock, Unlock, MoreVertical } from 'lucide-react'
+import { Share2, Trash2, Lock } from 'lucide-react'
 import { useAuth } from '../../lib/auth-context'
 import { useTheme } from '../../lib/theme-context'
 import type { BoardScene } from '@agentic-whiteboard/storage'
@@ -40,14 +39,12 @@ export const BoardPreview = memo(function BoardPreview({
   board,
   onDelete,
   onShare,
-  onPrivacy,
   busy = false,
 }: {
   board: WorkspaceBoard
   index?: number
   onDelete?: (board: WorkspaceBoard) => void
   onShare?: (board: WorkspaceBoard) => void
-  onPrivacy?: (board: WorkspaceBoard) => void
   busy?: boolean
 }) {
   const { resolvedTheme } = useTheme()
@@ -56,7 +53,7 @@ export const BoardPreview = memo(function BoardPreview({
   const isDark = resolvedTheme === 'dark'
 
   const containerRef = useRef<HTMLDivElement>(null)
-  const sceneKey = `${user?.uid ?? 'anonymous'}:${board.id}:${board.updatedAt}`
+  const sceneKey = `${user?.uid ?? 'anonymous'}:${board.id}:${board.updatedAt}:${board.revision}`
   const [remoteScene, setRemoteScene] = useState<{ key: string; scene: BoardScene } | null>(null)
   const scene = board.scene ?? (remoteScene?.key === sceneKey ? remoteScene.scene : undefined)
   useEffect(() => {
@@ -94,7 +91,11 @@ export const BoardPreview = memo(function BoardPreview({
       ? rawBgColor
       : undefined
 
-  const cacheKey = `${PREVIEW_CACHE_VERSION}:${user?.uid ?? 'anonymous'}:${board.id}:${board.updatedAt}:${resolvedTheme}:${customBgColor ?? 'default'}`
+  const sceneVersion =
+    scene?.elements
+      .map((element: any) => `${element.id}:${element.version}:${element.versionNonce}:${element.isDeleted}`)
+      .join(',') ?? 'unloaded'
+  const cacheKey = `${PREVIEW_CACHE_VERSION}:${user?.uid ?? 'anonymous'}:${board.id}:${board.updatedAt}:${board.revision}:${sceneVersion}:${resolvedTheme}:${customBgColor ?? 'default'}`
 
   const [svgHtml, setSvgHtml] = useState<string | null>(() => {
     return previewSvgCache.get(cacheKey) ?? null
@@ -251,38 +252,6 @@ export const BoardPreview = memo(function BoardPreview({
       <div className="board-card__content">
         <div className="board-card-title-row">
           <strong>{board.name}</strong>
-          {isOwner && board.project.isShared && onPrivacy && (
-            <DropdownMenu.Root modal={false}>
-              <DropdownMenu.Trigger asChild>
-                <button
-                  type="button"
-                  className="project-menu-trigger board-menu-trigger"
-                  aria-label={`Board actions for ${board.name}`}
-                  disabled={busy}
-                  onClick={(event) => {
-                    event.preventDefault()
-                    event.stopPropagation()
-                  }}
-                  onPointerDown={(event) => event.stopPropagation()}
-                >
-                  <MoreVertical size={16} />
-                </button>
-              </DropdownMenu.Trigger>
-              <DropdownMenu.Portal>
-                <DropdownMenu.Content
-                  className="google-share-dropdown-menu"
-                  align="end"
-                  sideOffset={6}
-                  onClick={(event) => event.stopPropagation()}
-                >
-                  <DropdownMenu.Item className="google-share-dropdown-item" onSelect={() => onPrivacy(board)}>
-                    {board.isPrivate ? <Unlock size={14} /> : <Lock size={14} />}
-                    {board.isPrivate ? 'Use project access' : 'Make private'}
-                  </DropdownMenu.Item>
-                </DropdownMenu.Content>
-              </DropdownMenu.Portal>
-            </DropdownMenu.Root>
-          )}
         </div>
         <span>
           {board.project.name} · Edited {relativeTime(board.updatedAt)}

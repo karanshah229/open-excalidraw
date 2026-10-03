@@ -141,7 +141,7 @@ export function ProjectActionModal({
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay animate-fade-in" />
         <Dialog.Content
-          className="dialog-content google-share-dialog project-edit-dialog animate-scale-in"
+          className={`dialog-content google-share-dialog project-edit-dialog ${action === 'delete' ? 'project-delete-dialog' : ''} animate-scale-in`}
           aria-describedby="project-action-desc"
         >
           <div className="google-share-header">
@@ -177,9 +177,11 @@ export function ProjectActionModal({
               </label>
             </form>
           )}
-          <div className="project-form-status" role="alert">
-            {error}
-          </div>
+          {(action === 'rename' || error) && (
+            <div className="project-form-status" role="alert">
+              {error}
+            </div>
+          )}
           <div className="google-share-footer project-dialog-footer">
             <button className="google-share-copy-btn" disabled={busy} onClick={onClose}>
               Cancel

@@ -1,6 +1,6 @@
 import { doc, getDoc, onSnapshot, updateDoc } from 'firebase/firestore'
 import { onDisconnect, onValue, ref, remove, set } from 'firebase/database'
-import { projectService } from './project-service'
+import { projectService, type ProjectPolicy } from './project-service'
 import { getFirebaseAuth, getFirebaseRtdb, getFirestoreDb } from '../../lib/firebase'
 import { restoreSceneAssets, storeSceneAssets } from '../assets/scene-assets'
 import { firestoreValue, workspaceStore, workspaceValue } from '../workspace/workspace-api'
@@ -34,6 +34,7 @@ export interface BoardShareConfig {
   createdAt: string
   updatedAt: string
   accessRevision?: number
+  projectPolicy?: ProjectPolicy
   projectRole?: 'owner' | ShareRole | null
 }
 
@@ -148,7 +149,13 @@ export const sharingService = {
       if (!projectId) throw new Error('Board ownership could not be verified. Reload the board.')
       const { workspaceApi } = await import('../workspace/workspace-api')
       if (!options?.workspaceFlushed) await workspaceApi.flushCloud()
-      const { scene: _scene, ...policy } = normalizedConfig
+      const {
+        scene: _scene,
+        projectPolicy: _parent,
+        projectRole: _role,
+        effectiveRole: _effective,
+        ...policy
+      } = normalizedConfig
       await projectService.boardAccess(config.boardId, projectId, 'share', policy)
       sharingService.rememberShareConfig(normalizedConfig, authenticatedOwnerId ?? 'local-user')
       // Policy changes must never overwrite a newer scene with the modal's snapshot.
@@ -167,6 +174,7 @@ export const sharingService = {
         }
         if (boardName) updatePayload.boardName = boardName
         await withFirestoreWriteTimeout(updateDoc(ref, updatePayload))
+        window.dispatchEvent(new Event('workspace-changed'))
       } catch (error: any) {
         // An unshared board has no share document. Surface actual upload failures.
         if (error?.code !== 'not-found') throw error
@@ -184,6 +192,7 @@ export const sharingService = {
           updatedAt: new Date().toISOString(),
         }),
       )
+      window.dispatchEvent(new Event('workspace-changed'))
     }
   },
 
@@ -311,10 +320,15 @@ export const sharingService = {
     }
 
     let inheritedRole: ShareRole | 'owner' | null = null
-    if (remoteData.projectId && remoteData.inheritProjectAccess !== false && db) {
+    if (
+      remoteData.projectId &&
+      (remoteData.inheritProjectAccess !== false || remoteData.ownerId === currentUserId) &&
+      db
+    ) {
       const parent = await getDoc(doc(db, 'projectShares', remoteData.projectId)).catch(() => null)
       if (parent?.exists()) {
         const policy = parent.data()
+        remoteData.projectPolicy = policy as ProjectPolicy
         const email = getFirebaseAuth()?.currentUser?.emailVerified ? currentUserEmail?.toLowerCase() : null
         inheritedRole =
           policy.ownerId === currentUserId
@@ -326,6 +340,7 @@ export const sharingService = {
                 : 'viewer'
       }
     }
+    if (remoteData.inheritProjectAccess === false) inheritedRole = null
     remoteData.projectRole = inheritedRole
     const email = getFirebaseAuth()?.currentUser?.emailVerified ? currentUserEmail?.toLowerCase() : null
     remoteData.effectiveRole =

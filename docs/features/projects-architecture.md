@@ -5,7 +5,7 @@ This describes the implementation in `codex/first-class-projects`. The homepage 
 ```mermaid
 flowchart TB
   subgraph Browser[Browser]
-    Home["Homepage accordions<br/>Project menu and board privacy controls"]
+    Home["Homepage accordions<br/>Project menu and board sharing controls"]
     Editor["Board editor<br/>Scene editing and custom sharing"]
     Settings["Settings → Account → Your data"]
     Workspace["workspaceApi<br/>Owned sync, discovery and archive"]
@@ -87,7 +87,7 @@ flowchart TD
   Role -->|Editor| Edit["Read and edit scene"]
 ```
 
-Project owners and editors can manage project sharing, rename, and soft deletion. The server resolves the original owner’s private project and rechecks editor access inside the policy/rename transaction, without transferring ownership. Viewers cannot manage projects. Individual board sharing, privacy, and deletion remain owner-only. **Make private** sets inheritance to false, clears invitations and disables public links. **Use project access** restores inheritance; it does not restore invitations removed by Make private. Email invitation grants require a verified email.
+Project owners and editors can manage project sharing, rename, and soft deletion. The server resolves the original owner’s private project and rechecks editor access inside the policy/rename transaction, without transferring ownership. Viewers cannot manage projects. Individual board sharing, privacy, and deletion remain owner-only. Explicit edits in board sharing set inheritance to false automatically. **Restricted** disables public links while retaining direct board invitations. **Use project access** restores inheritance while preserving direct grants. The mode selector and separate Make private menu/dialog have been removed. See [the complete role matrix](board-sharing-permissions.md). Email invitation grants require a verified email.
 
 ## How a sharing or privacy change crosses databases
 
@@ -142,3 +142,7 @@ Implementation entry points:
 - Enforcement: `firestore.rules`, `storage.rules`, `database.rules.json`.
 
 See [requirements and rollout instructions](projects-and-bulk-download.md) for the preserved product decisions and migration order.
+
+## UI regression validation
+
+Latest validation: 27 Puppeteer browser/network scenarios passed, with 819 Firebase network responses and no browser errors. Tests use Firebase CLI demo emulators; the manual preview on port 5174 uses the real development Firebase project. The suite includes real pointer clicks for export formats, immediate drawing-preview refresh on logo navigation, the reference filter panel/reset/empty state, and Restricted preserving direct invitees. Build, workspace type checks and lint pass (four pre-existing lint warnings).

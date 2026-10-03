@@ -83,6 +83,7 @@ async function page(role, path = '') {
   const context = await browser.createBrowserContext(),
     page = await context.newPage()
   await page.setViewport({ width: 1400, height: 1000 })
+  page.on('dialog', (dialog) => dialog.accept())
   page.on('pageerror', (error) => failures.push({ role, error: error.message }))
   page.on('response', (response) => {
     if (/127\.0\.0\.1:(25001|28080|29099|29199)/.test(response.url()))
@@ -138,9 +139,14 @@ async function menu(page, name, action) {
   await page.click(`[aria-label="Project actions for ${name}"]`)
   await clickText(page, action, '[role="menuitem"]')
 }
-async function boardMenu(page, boardId, action) {
-  await page.click(`[data-board-id="${boardId}"] [aria-label^="Board actions for"]`)
-  await clickText(page, action, '[role="menuitem"]')
+async function boardShare(page, boardId) {
+  await page.$eval(`[data-board-id="${boardId}"] [aria-label="Share board"]`, (node) => node.click())
+  await page.waitForSelector('[role="dialog"] .google-share-copy-btn')
+}
+async function restrictBoard(page, boardId) {
+  await boardShare(page, boardId)
+  await page.click('[aria-label="General access setting"]')
+  await clickText(page, 'Restricted', '[role="menuitem"]')
 }
 async function until(check, label) {
   for (let index = 0; index < 100; index++) {
@@ -213,6 +219,67 @@ try {
     )
     await owner.goto(base)
     await owner.waitForSelector('[aria-label="Project actions for Project Alpha"]')
+  })
+  await record('Updated drawing refreshes thumbnail immediately after logo navigation', async () => {
+    await owner.waitForSelector(`[data-board-id="${boardId}"] .board-preview-svg`)
+    const before = await owner.$eval(`[data-board-id="${boardId}"] .board-preview-svg`, (node) => node.innerHTML)
+    await owner.click(`[data-board-id="${boardId}"]`)
+    await owner.waitForFunction(() => Boolean(window.__excalidrawAPI))
+    await owner.evaluate(() => {
+      window.__setUserInteracted()
+      window.__excalidrawAPI.updateScene({
+        elements: [
+          ...window.__excalidrawAPI.getSceneElements(),
+          ...window.__projectsTest.excalidraw.convertToExcalidrawElements(
+            [{ id: 'preview-change', type: 'rectangle', x: 150, y: 0, width: 100, height: 80 }],
+            { regenerateIds: false },
+          ),
+        ],
+      })
+    })
+    await owner.click('[aria-label="OpenExcalidraw"]')
+    await owner.waitForFunction(
+      (id, old) => {
+        const node = document.querySelector(`[data-board-id="${id}"] .board-preview-svg`)
+        return node && node.innerHTML !== old
+      },
+      { timeout: 5000 },
+      boardId,
+      before,
+    )
+  })
+  await record(
+    'Project filter design resets visibility, search and checkboxes; empty filters show matching state',
+    async () => {
+      await owner.click('[aria-label="Filter boards"]')
+      await owner.waitForSelector('.workspace-project-filter')
+      assert.equal(await owner.$eval('.project-filter-title', (node) => node.textContent), 'Filter projects')
+      await clickText(owner, 'Shared', '.project-filter-tabs button')
+      await owner.waitForSelector('.empty-boards--filtered')
+      assert.match(
+        await owner.$eval('.empty-boards--filtered', (node) => node.textContent),
+        /No matching projects or boards/,
+      )
+      assert.equal(await owner.$('.workspace-empty-state'), null)
+      await owner.type('[aria-label="Search projects"]', 'no project matches')
+      await clickText(owner, 'Reset filters')
+      assert.equal(await owner.$eval('[aria-label="Search projects"]', (node) => node.value), '')
+      assert.equal(
+        await owner.$eval('.project-filter-tabs button', (node) => node.getAttribute('aria-pressed')),
+        'true',
+      )
+      await owner.waitForSelector(`[data-board-id="${boardId}"]`)
+      await owner.keyboard.press('Escape')
+    },
+  )
+  await record('Download formats accept real pointer clicks above the modal', async () => {
+    await menu(owner, 'Project Alpha', 'Download')
+    await owner.click('[aria-label="Download formats"]')
+    const option = await owner.waitForSelector('.download-format-popover label:nth-child(2)')
+    await option.click()
+    assert.equal(await option.$eval('[role=checkbox]', (node) => node.getAttribute('data-state')), 'checked')
+    await owner.keyboard.press('Escape')
+    await clickText(owner, 'Close')
   })
   await record('Project menu preserves accordion; rename survives reload', async () => {
     const before = await owner.$eval('.group-header-toggle', (node) => node.getAttribute('aria-expanded'))
@@ -318,14 +385,12 @@ try {
     await deniedGuest.browserContext().close()
     await outsider.goto(base)
   })
-  await record('Shared board cards preserve Share and place privacy in the board menu', async () => {
+  await record('Shared board cards preserve Share without a redundant privacy menu', async () => {
     await owner.$eval(`[data-board-id="${boardId}"] [aria-label="Share board"]`, (node) => node.click())
     await owner.waitForSelector('[role="dialog"] .google-share-copy-btn')
     await owner.keyboard.press('Escape')
-    await owner.click(`[data-board-id="${boardId}"] [aria-label^="Board actions for"]`)
-    assert.match(await owner.$eval('[role="menu"]', (node) => node.textContent), /Make private/)
+    assert.equal(await owner.$(`[data-board-id="${boardId}"] [aria-label^="Board actions for"]`), null)
     assert.equal(new URL(owner.url()).pathname, '/')
-    await owner.keyboard.press('Escape')
   })
   await record('Editor creates inherited board owned by project owner; viewer create denied', async () => {
     await clickText(editor, 'New board')
@@ -679,21 +744,30 @@ try {
     )
     assert.ok((await db.doc(`boardShares/${boardId}`).get()).data().collaborators[identities.viewer.email])
   })
-  await record('Owner makes board private with confirmation; no recipient metadata leaks', async () => {
+  await record('Restricted board keeps invitees and removes inherited access; no metadata leaks', async () => {
     await owner.reload()
     await owner.waitForSelector(`[data-board-id="${boardId}"]`)
-    await boardMenu(owner, boardId, 'Make private')
-    await owner.waitForSelector('[role="dialog"]')
-    assert.match(
-      await owner.$eval('[role="dialog"]', (node) => node.textContent),
-      /individual invitations.*public links/,
+    await restrictBoard(owner, boardId)
+    await until(
+      async () => (await db.doc(`boardShares/${boardId}`).get()).data().inheritProjectAccess === false,
+      'board override committed',
     )
-    await clickText(owner, 'Make private')
-    await owner.waitForFunction(() => !document.querySelector('[role="dialog"]'))
     const config = (await db.doc(`boardShares/${boardId}`).get()).data()
-    assert.equal(config.inheritProjectAccess, false)
-    assert.deepEqual(config.invitedEmails, [])
+    assert.ok(config.invitedEmails.includes(identities.viewer.email), 'Restricted preserves individual invitees')
     assert.equal(config.generalAccess, 'restricted')
+    const direct = await viewer.evaluate(async (id) => {
+      const t = window.__projectsTest,
+        user = t.firebase.getFirebaseAuth().currentUser
+      return (await t.sharing.sharingService.getSharedBoard(id, user.email, user.uid)).status
+    }, boardId)
+    assert.equal(direct, 'allowed')
+    await clickText(owner, 'Done')
+    // Remove the explicit invitation separately before checking owner-only denial across stores.
+    await owner.evaluate(async (id) => {
+      const service = window.__projectsTest.sharing.sharingService
+      const config = await service.getShareConfig(id)
+      await service.saveShareConfig({ ...config, invitedEmails: [], collaborators: {} })
+    }, boardId)
     await viewer.reload()
     await viewer.waitForSelector('.workspace-intro')
     await until(
@@ -743,21 +817,22 @@ try {
     assert.equal(response.status, 401, 'RTDB must reject inherited access after privacy change')
   })
   await record('Restore inheritance and preserve existing board IDs', async () => {
-    await boardMenu(owner, boardId, 'Use project access')
+    await boardShare(owner, boardId)
+    await clickText(owner, 'Use project access')
     await until(
       async () => (await db.doc(`boardShares/${boardId}`).get()).data().inheritProjectAccess === true,
       'restored inheritance',
     )
+    await clickText(owner, 'Done')
     await viewer.reload()
     await viewer.waitForSelector(`[data-board-id="${boardId}"]`)
   })
   await record('Failed privacy network request leaves committed access unchanged and shows an error', async () => {
     owner.failFunction = 'manageBoardAccess'
-    await boardMenu(owner, boardId, 'Make private')
-    await clickText(owner, 'Make private')
+    await restrictBoard(owner, boardId)
     await owner.waitForSelector('[role="dialog"] [role="alert"]')
     assert.equal((await db.doc(`boardShares/${boardId}`).get()).data().inheritProjectAccess, true)
-    await clickText(owner, 'Cancel')
+    await owner.keyboard.press('Escape')
     owner.failFunction = null
   })
   await record('Archive is personal; shared project remains available to others', async () => {
@@ -781,7 +856,8 @@ try {
         .every((animation) => animation.playState === 'finished'),
     )
     await viewer.screenshot({ path: `${out}/project-filter.png` })
-    await clickText(viewer, 'Archived projects', 'label')
+    await viewer.screenshot({ path: `${out}/project-filters.png` })
+    await clickText(viewer, 'Include archived projects', 'label')
     await viewer.keyboard.press('Escape')
     await viewer.waitForSelector('[aria-label="Project actions for Project Beta"]')
     await menu(viewer, 'Project Beta', 'Unarchive')
@@ -871,7 +947,13 @@ try {
     const dialogHeight = await owner.$eval('[role="dialog"]', (node) => node.getBoundingClientRect().height)
     await owner.screenshot({ path: `${out}/download-dialog.png` })
     await owner.click('[aria-label="Download formats"]')
-    await clickText(owner, 'SVG', 'label')
+    const svgOption = await owner.waitForSelector('.download-format-popover label:nth-child(2)')
+    await svgOption.click()
+    assert.equal(
+      await svgOption.$eval('[role=checkbox]', (node) => node.getAttribute('data-state')),
+      'checked',
+      'Real pointer click must toggle SVG',
+    )
     await clickText(owner, 'PNG', 'label')
     await owner.keyboard.press('Escape')
     await clickText(owner, 'Download ZIP')

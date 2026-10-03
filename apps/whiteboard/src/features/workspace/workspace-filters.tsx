@@ -124,11 +124,19 @@ export function WorkspaceFilters(props: FilterProps) {
           </Button>
         </Popover.Trigger>
         <Popover.Portal>
-          <Popover.Content className="filter-popover animate-fade-in" align="end" sideOffset={8}>
+          <Popover.Content
+            className="filter-popover workspace-project-filter animate-fade-in"
+            align="end"
+            sideOffset={8}
+          >
             <div className="filter-popover-body">
               <div className="filter-header-row">
-                <span className="filter-section-title">Show projects</span>
+                <h2 className="project-filter-title">
+                  <Filter size={20} />
+                  Filter projects
+                </h2>
               </div>
+              <span className="project-filter-label">Visibility</span>
               <div className="project-filter-tabs" role="group" aria-label="Project ownership">
                 {props.onOwnershipChange &&
                   (['all', 'owned', 'shared'] as const).map((value) => (
@@ -145,7 +153,7 @@ export function WorkspaceFilters(props: FilterProps) {
               <div className="project-archive-filter">
                 {props.onArchivedChange && (
                   <FilterCheck
-                    label="Archived projects"
+                    label="Include archived projects"
                     checked={Boolean(props.archived)}
                     onCheckedChange={() => props.onArchivedChange?.(!props.archived)}
                   />
@@ -153,10 +161,8 @@ export function WorkspaceFilters(props: FilterProps) {
               </div>
               <hr className="filter-divider" />
               <div className="filter-header-row">
-                <span className="filter-section-title">Project</span>
-                {props.selectedProjectIds.size > 0 && (
-                  <span className="filter-section-count">{props.selectedProjectIds.size}</span>
-                )}
+                <span className="project-filter-label">Projects</span>
+                <span className="filter-section-count">{props.projects.length}</span>
               </div>
               <div className="filter-search-wrap">
                 <Search size={14} className="filter-search-icon" />
@@ -164,7 +170,7 @@ export function WorkspaceFilters(props: FilterProps) {
                   className="filter-search-input"
                   value={projectSearch}
                   onChange={(event) => setProjectSearch(event.target.value)}
-                  placeholder="Search projects"
+                  placeholder="Search projects…"
                   aria-label="Search projects"
                 />
               </div>
@@ -187,12 +193,17 @@ export function WorkspaceFilters(props: FilterProps) {
               <button
                 type="button"
                 className="filter-clear-all-btn"
-                onClick={props.onClearFilters}
-                disabled={activeFilterCount === 0}
+                onClick={() => {
+                  props.onClearFilters?.()
+                  props.onQueryChange('')
+                  setProjectSearch('')
+                }}
+                disabled={activeFilterCount === 0 && !projectSearch && !props.query}
               >
-                Clear all
+                Reset filters
               </button>
             </div>
+            <Popover.Arrow className="project-filter-arrow" width={18} height={9} />
           </Popover.Content>
         </Popover.Portal>
       </Popover.Root>

@@ -12,10 +12,9 @@ import { ShareModal } from '../../components/share-modal'
 import { GroupHeader, type SortOrder, WorkspaceFilters } from './workspace-filters'
 import { workspaceApi, type WorkspaceBoard } from './workspace-api'
 import { useAuth } from '../../lib/auth-context'
-import { projectService, type VisibleProject } from '../sharing/project-service'
+import { type VisibleProject } from '../sharing/project-service'
 import { ProjectMenu, ProjectActionModal, type ProjectAction } from './project-actions'
 import { DownloadBoardsModal } from './download-boards-modal'
-import * as Dialog from '@radix-ui/react-dialog'
 import { WorkspaceEmptyState } from './workspace-empty-state'
 
 const workspaceQueryKey = ['workspace'] as const
@@ -29,8 +28,6 @@ export function WorkspaceHome() {
   } | null>(null)
   const [archiveFilter, setArchiveFilter] = useState(false)
   const [ownershipFilter, setOwnershipFilter] = useState<'all' | 'owned' | 'shared'>('all')
-  const [privacyBoard, setPrivacyBoard] = useState<WorkspaceBoard | null>(null)
-  const [busyBoardId, setBusyBoardId] = useState<string | null>(null)
   const [actionError, setActionError] = useState('')
   const navigate = useNavigate()
   const searchParams = useSearch({ strict: false }) as { projectId?: string }
@@ -85,6 +82,7 @@ export function WorkspaceHome() {
     queryKey: [...workspaceQueryKey, user?.uid ?? 'guest', queryProjectId ?? 'all'],
     queryFn: () => workspaceApi.listWorkspace(queryProjectId),
     staleTime: 5_000,
+    refetchOnMount: 'always',
     refetchInterval: 10_000,
   })
 
@@ -129,26 +127,6 @@ export function WorkspaceHome() {
       setActionError(error instanceof Error ? error.message : 'Archive failed.')
     }
   }
-  const changePrivacy = async (board: WorkspaceBoard, makePrivate: boolean) => {
-    if (busyBoardId) return
-    setBusyBoardId(board.id)
-    setActionError('')
-    try {
-      await workspaceApi.flushCloud()
-      await projectService.boardAccess(board.id, board.projectId, makePrivate ? 'private' : 'inherit')
-      setPrivacyBoard(null)
-      complete()
-    } catch (error) {
-      setActionError(error instanceof Error ? error.message : 'Privacy could not be updated.')
-    } finally {
-      setBusyBoardId(null)
-    }
-  }
-  const onPrivacy = (board: WorkspaceBoard) => {
-    if (board.isPrivate) void changePrivacy(board, false)
-    else setPrivacyBoard(board)
-  }
-
   const handleCreateBoard = async ({
     boardName,
     projectId,
@@ -199,7 +177,7 @@ export function WorkspaceHome() {
         .filter(
           (project) =>
             (projectIds.size === 0 || projectIds.has(project.id)) &&
-            (queryProjectId === project.id || Boolean(project.archived) === archiveFilter) &&
+            (queryProjectId === project.id || archiveFilter || !project.archived) &&
             (ownershipFilter === 'all' ||
               (ownershipFilter === 'owned' ? project.ownerId === user?.uid : project.ownerId !== user?.uid)),
         )
@@ -330,8 +308,6 @@ export function WorkspaceHome() {
                     boards={recentBoards.filter((board) => !board.project.archived)}
                     onDelete={(board) => setBoardToDelete(board)}
                     onShare={(board) => setBoardToShare(board)}
-                    onPrivacy={onPrivacy}
-                    busyBoardId={busyBoardId}
                   />
                 )}
               </section>
@@ -379,28 +355,28 @@ export function WorkspaceHome() {
                     boards={groupBoards}
                     onDelete={(board) => setBoardToDelete(board)}
                     onShare={(board) => setBoardToShare(board)}
-                    onPrivacy={onPrivacy}
-                    busyBoardId={busyBoardId}
                   />
                 )}
               </section>
             )
           })}
           {byProject.length === 0 &&
-            (search || projectIds.size > 0 ? (
+            (search || projectIds.size > 0 || archiveFilter || ownershipFilter !== 'all' ? (
               <div className="empty-boards empty-boards--filtered">
                 <SearchIcon size={24} className="empty-filtered-icon" />
-                <p className="empty-filtered-title">No matching boards</p>
+                <p className="empty-filtered-title">No matching projects or boards</p>
                 <p className="empty-filtered-desc">
                   {search
                     ? `No boards match "${search}". Try another search term or clear filters.`
-                    : 'No boards match the selected filters.'}
+                    : 'No projects or boards match the selected filters.'}
                 </p>
                 <Button
                   variant="outline"
                   onClick={() => {
                     setSearch('')
                     setProjectIds(new Set())
+                    setArchiveFilter(false)
+                    setOwnershipFilter('all')
                     if (isProjectPage) navigate({ to: '/' })
                   }}
                 >
@@ -439,43 +415,6 @@ export function WorkspaceHome() {
           onComplete={complete}
         />
       ) : null}
-      {privacyBoard && (
-        <Dialog.Root
-          open
-          onOpenChange={(open) => {
-            if (!open && !busyBoardId) setPrivacyBoard(null)
-          }}
-        >
-          <Dialog.Portal>
-            <Dialog.Overlay className="dialog-overlay" />
-            <Dialog.Content className="dialog-content" aria-describedby="privacy-desc">
-              <Dialog.Title>Make board private</Dialog.Title>
-              <Dialog.Description id="privacy-desc">
-                Only you will have access to “{privacyBoard.name}”. Project access, individual invitations, and public
-                links will be removed for this board.
-              </Dialog.Description>
-              <div className="modal-actions">
-                <button
-                  className="modal-btn-cancel"
-                  disabled={Boolean(busyBoardId)}
-                  onClick={() => setPrivacyBoard(null)}
-                >
-                  Cancel
-                </button>
-                <button
-                  className="modal-btn-danger"
-                  disabled={Boolean(busyBoardId)}
-                  onClick={() => void changePrivacy(privacyBoard, true)}
-                >
-                  {busyBoardId ? 'Updating…' : 'Make private'}
-                </button>
-              </div>
-              {actionError && <p role="alert">{actionError}</p>}
-            </Dialog.Content>
-          </Dialog.Portal>
-        </Dialog.Root>
-      )}
-
       <DeleteBoardModal
         open={!!boardToDelete}
         onOpenChange={(open) => {
@@ -505,27 +444,15 @@ function BoardGrid({
   boards,
   onDelete,
   onShare,
-  onPrivacy,
-  busyBoardId,
 }: {
   boards: Awaited<ReturnType<typeof workspaceApi.listWorkspace>>['boards']
   onDelete?: (board: WorkspaceBoard) => void
   onShare?: (board: WorkspaceBoard) => void
-  onPrivacy?: (board: WorkspaceBoard) => void
-  busyBoardId?: string | null
 }) {
   return boards.length > 0 ? (
     <div className="board-grid">
       {boards.map((board, index) => (
-        <BoardPreview
-          key={board.id}
-          board={board}
-          index={index}
-          onDelete={onDelete}
-          onShare={onShare}
-          onPrivacy={onPrivacy}
-          busy={busyBoardId === board.id}
-        />
+        <BoardPreview key={board.id} board={board} index={index} onDelete={onDelete} onShare={onShare} />
       ))}
     </div>
   ) : (
