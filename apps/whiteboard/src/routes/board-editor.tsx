@@ -1,8 +1,10 @@
+import { AccessDenied } from '../components/access-denied'
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { doc, getDoc, updateDoc } from 'firebase/firestore'
 import { createPortal } from 'react-dom'
 import { Link, useNavigate, useParams, useBlocker } from '@tanstack/react-router'
 import { useQueryClient } from '@tanstack/react-query'
-import { Check, Copy, Eye, Loader2, Lock, Pencil, Share2 } from 'lucide-react'
+import { Check, Copy, Eye, Loader2, Pencil, Share2 } from 'lucide-react'
 import { convertToExcalidrawElements, Excalidraw, MainMenu, exportToSvg } from '@excalidraw/excalidraw'
 import type { BinaryFiles, ExcalidrawImperativeAPI } from '@excalidraw/excalidraw/types'
 import type { BoardDocument, BoardScene, BoardSyncStatus } from '@agentic-whiteboard/storage'
@@ -26,7 +28,7 @@ import {
   type ActiveSessionRecord,
 } from '../features/collaboration'
 import { reconcileElementsLWW } from '../features/collaboration/reconcile'
-import { getFirebaseAuth, isFirebaseConfigured } from '../lib/firebase'
+import { getFirebaseAuth, getFirestoreDb, isFirebaseConfigured } from '../lib/firebase'
 
 const LIBRARY_STORAGE_KEY = 'agentic-whiteboard:library:v1'
 const starterLibraries = [
@@ -258,6 +260,8 @@ export function BoardEditor() {
   const [isReadOnly, setIsReadOnly] = useState(false)
   const [isSharedBoard, setIsSharedBoard] = useState(false)
   const [accessDenied, setAccessDenied] = useState(false)
+  const accessDeniedRef = useRef(accessDenied)
+  accessDeniedRef.current = accessDenied
   const [boardNotFound, setBoardNotFound] = useState(false)
   const [activeSessions, setActiveSessions] = useState<ActiveSessionRecord[]>([])
 
@@ -408,6 +412,10 @@ export function BoardEditor() {
         documentRef.current = saved
         setBoardMeta((prev) => (prev ? { ...prev, updatedAt: saved.updatedAt } : prev))
         void sharingService.syncBoardSceneToShare(boardId, saved.scene, trimmed).catch(console.error)
+      } else {
+        const db = getFirestoreDb()
+        if (!db) throw new Error('Cloud board is unavailable.')
+        await updateDoc(doc(db, 'boardShares', boardId), { boardName: trimmed, updatedAt: new Date().toISOString() })
       }
       queryClient.invalidateQueries({ queryKey: ['workspace'] })
     } catch {
@@ -458,6 +466,7 @@ export function BoardEditor() {
   useEffect(() => {
     hasAutoZoomedRef.current = false
     setInitialData(null)
+    documentRef.current = null
     setIsSharedBoard(false)
     setAccessDenied(false)
     setBoardNotFound(false)
@@ -486,6 +495,10 @@ export function BoardEditor() {
         // Case 1: Board exists in Firebase (authoritative single source of truth)
         if (shared.status === 'allowed' && shared.config) {
           const config = shared.config
+          const db = getFirestoreDb()
+          const parent =
+            config.projectId && db ? await getDoc(doc(db, 'projectShares', config.projectId)).catch(() => null) : null
+          if (!active) return
           const cloudScene = config.scene ?? {
             elements: [],
             appState: { viewBackgroundColor: 'transparent' },
@@ -509,7 +522,9 @@ export function BoardEditor() {
           const isGeneralEditor = config.generalAccess === 'anyone_with_link' && config.generalRole === 'editor'
           const userEmail = authUser?.email?.trim().toLowerCase()
           const isCollabEditor = Boolean(userEmail && config.collaborators?.[userEmail]?.role === 'editor')
-          const canEdit = isOwner || isGeneralEditor || isCollabEditor
+          const canEdit = config.effectiveRole
+            ? config.effectiveRole === 'owner' || config.effectiveRole === 'editor'
+            : isOwner || isGeneralEditor || isCollabEditor
 
           setIsReadOnly(!canEdit)
           awaitingInitialSceneRef.current = true
@@ -538,8 +553,8 @@ export function BoardEditor() {
 
           setBoardMeta({
             boardName: config.boardName,
-            projectId: details?.project.id ?? '',
-            projectName: details?.project.name ?? 'Shared board',
+            projectId: details?.project.id ?? config.projectId ?? '',
+            projectName: details?.project.name ?? parent?.data()?.name ?? 'Shared board',
             projectOwnerId: config.ownerId,
             projectOwnerName: config.ownerName,
             projectOwnerEmail: config.ownerEmail,
@@ -565,6 +580,26 @@ export function BoardEditor() {
         // Case 2: Board only in local IndexedDB (freshly created prior to cloud sync)
         if (details) {
           const { document, project } = details
+          // The board read already established that no sharing document exists.
+          // Keep this verified default so opening Share needs no second read.
+          if (shared.status === 'not-found')
+            sharingService.rememberShareConfig(
+              {
+                boardId: document.id,
+                projectId: project.id,
+                boardName: document.name,
+                ownerId: project.ownerId,
+                ownerName: '',
+                generalAccess: 'restricted',
+                generalRole: 'viewer',
+                collaborators: {},
+                invitedEmails: [],
+                inheritProjectAccess: true,
+                createdAt: document.createdAt,
+                updatedAt: document.updatedAt,
+              },
+              authUser?.uid ?? 'local-user',
+            )
           documentRef.current = document
           filesRef.current = (document.scene.files ?? {}) as BinaryFiles
           elementsRef.current = document.scene.elements
@@ -613,9 +648,11 @@ export function BoardEditor() {
     const unsubscribe = sharingService.subscribeToSharedBoard(
       boardId,
       (updatedConfig) => {
+        const recoveringAccess = accessDeniedRef.current
         const userEmail = authUser?.email?.trim().toLowerCase()
         const userUid = authUser?.uid
         const stillAllowed =
+          Boolean(updatedConfig.effectiveRole) ||
           updatedConfig.generalAccess === 'anyone_with_link' ||
           (userUid && updatedConfig.ownerId === userUid) ||
           (userEmail && updatedConfig.invitedEmails?.map((e) => e.toLowerCase()).includes(userEmail))
@@ -629,7 +666,9 @@ export function BoardEditor() {
         const isGeneralEditor =
           updatedConfig.generalAccess === 'anyone_with_link' && updatedConfig.generalRole === 'editor'
         const isCollabEditor = Boolean(userEmail && updatedConfig.collaborators?.[userEmail]?.role === 'editor')
-        const canEdit = isOwner || isGeneralEditor || isCollabEditor
+        const canEdit = updatedConfig.effectiveRole
+          ? updatedConfig.effectiveRole === 'owner' || updatedConfig.effectiveRole === 'editor'
+          : isOwner || isGeneralEditor || isCollabEditor
         setIsReadOnly(!canEdit)
 
         setBoardMeta((prev) =>
@@ -670,6 +709,21 @@ export function BoardEditor() {
             })
           }
         }
+        if (recoveringAccess) {
+          // The denied view unmounts the canvas. Restore current local elements,
+          // including pending edits, rather than its original mount snapshot.
+          setInitialData((previous) =>
+            previous
+              ? {
+                  ...previous,
+                  elements: prepareInitialElements(elementsRef.current),
+                  appState: { ...appStateRef.current, theme: resolvedTheme },
+                  files: filesRef.current,
+                }
+              : previous,
+          )
+        }
+        setAccessDenied(false)
       },
       (error) => {
         if (error?.code === 'permission-denied') {
@@ -1455,51 +1509,13 @@ export function BoardEditor() {
     const displayEmail = isSwitchingAccount ? (lastUserEmailRef.current ?? authUser?.email) : authUser?.email
 
     return (
-      <div className="access-denied-container">
-        <div className="access-denied-card animate-scale-in">
-          <div className="access-denied-icon-wrap">
-            <Lock size={26} />
-          </div>
-          <h2 className="access-denied-title">You need access</h2>
-          <p className="access-denied-desc">Ask for access, or switch to an account with access to this board.</p>
-          <div className="access-denied-user-info">
-            {displayEmail ? `Signed in as ${displayEmail}` : 'You are not signed in'}
-          </div>
-          <div className="access-denied-actions">
-            {isUserSignedIn ? (
-              <>
-                <button
-                  type="button"
-                  className="google-share-copy-btn"
-                  onClick={handleSwitchAccount}
-                  disabled={isSwitchingAccount}
-                >
-                  {isSwitchingAccount && <Loader2 size={14} className="animate-spin" />}
-                  <span>Switch account</span>
-                </button>
-                <button
-                  type="button"
-                  className="google-share-done-btn"
-                  onClick={() => navigate({ to: '/' })}
-                  disabled={isSwitchingAccount}
-                >
-                  Go to workspace
-                </button>
-              </>
-            ) : (
-              <button
-                type="button"
-                className="google-share-done-btn"
-                onClick={handleSignIn}
-                disabled={isSigningIn || isSwitchingAccount}
-              >
-                {isSigningIn && <Loader2 size={14} className="animate-spin" />}
-                <span>Sign in with Google</span>
-              </button>
-            )}
-          </div>
-        </div>
-      </div>
+      <AccessDenied
+        email={displayEmail}
+        signedIn={isUserSignedIn}
+        busy={isSigningIn || isSwitchingAccount}
+        onSignIn={handleSignIn}
+        onSwitchAccount={handleSwitchAccount}
+      />
     )
   }
 
@@ -1548,8 +1564,8 @@ export function BoardEditor() {
               ) : (
                 <>
                   <Link
-                    to="/projects/$projectId"
-                    params={{ projectId: boardMeta.projectId }}
+                    to="/"
+                    search={{ projectId: boardMeta.projectId || undefined }}
                     className="breadcrumb-item breadcrumb-link"
                     title={`Filter by ${boardMeta.projectName}`}
                   >

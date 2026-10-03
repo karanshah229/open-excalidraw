@@ -1,9 +1,12 @@
-import { memo, useEffect, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import { Link } from '@tanstack/react-router'
 import type { BinaryFiles } from '@excalidraw/excalidraw/types'
 import { exportToSvg } from '@excalidraw/excalidraw'
-import { Share2, Trash2 } from 'lucide-react'
+import { Share2, Trash2, Lock } from 'lucide-react'
+import { useAuth } from '../../lib/auth-context'
 import { useTheme } from '../../lib/theme-context'
+import type { BoardScene } from '@agentic-whiteboard/storage'
+import { sharingService } from '../sharing/sharing-service'
 import type { WorkspaceBoard } from './workspace-api'
 
 const statusCopy = {
@@ -36,16 +39,47 @@ export const BoardPreview = memo(function BoardPreview({
   board,
   onDelete,
   onShare,
+  busy = false,
 }: {
   board: WorkspaceBoard
   index?: number
   onDelete?: (board: WorkspaceBoard) => void
   onShare?: (board: WorkspaceBoard) => void
+  busy?: boolean
 }) {
   const { resolvedTheme } = useTheme()
+  const { user } = useAuth()
+  const isOwner = board.project.ownerId === (user?.uid ?? 'local-user')
   const isDark = resolvedTheme === 'dark'
 
-  const rawBgColor = board.scene?.appState?.viewBackgroundColor as string | undefined
+  const containerRef = useRef<HTMLDivElement>(null)
+  const sceneKey = `${user?.uid ?? 'anonymous'}:${board.id}:${board.updatedAt}:${board.revision}`
+  const [remoteScene, setRemoteScene] = useState<{ key: string; scene: BoardScene } | null>(null)
+  const scene = board.scene ?? (remoteScene?.key === sceneKey ? remoteScene.scene : undefined)
+  useEffect(() => {
+    if (board.scene || !containerRef.current) return
+    let live = true
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return
+      observer.disconnect()
+      void sharingService
+        .getSharedBoard(board.id, user?.email, user?.uid)
+        .then((result) => {
+          if (live && result.status === 'allowed' && result.config?.scene)
+            setRemoteScene({ key: sceneKey, scene: result.config.scene })
+        })
+        .catch(() => {
+          /* Keep a neutral placeholder when access or network changes. */
+        })
+    })
+    observer.observe(containerRef.current)
+    return () => {
+      live = false
+      observer.disconnect()
+    }
+  }, [board.id, board.scene, sceneKey, user?.email, user?.uid])
+
+  const rawBgColor = scene?.appState?.viewBackgroundColor as string | undefined
   const isDarkBg = isColorDark(rawBgColor)
   // In dark mode, preserve dark thumbnail styling; only show custom background if it is genuinely dark.
   // In light mode, allow custom non-transparent background.
@@ -57,7 +91,11 @@ export const BoardPreview = memo(function BoardPreview({
       ? rawBgColor
       : undefined
 
-  const cacheKey = `${PREVIEW_CACHE_VERSION}:${board.id}:${board.updatedAt}:${resolvedTheme}:${customBgColor ?? 'default'}`
+  const sceneVersion =
+    scene?.elements
+      .map((element: any) => `${element.id}:${element.version}:${element.versionNonce}:${element.isDeleted}`)
+      .join(',') ?? 'unloaded'
+  const cacheKey = `${PREVIEW_CACHE_VERSION}:${user?.uid ?? 'anonymous'}:${board.id}:${board.updatedAt}:${board.revision}:${sceneVersion}:${resolvedTheme}:${customBgColor ?? 'default'}`
 
   const [svgHtml, setSvgHtml] = useState<string | null>(() => {
     return previewSvgCache.get(cacheKey) ?? null
@@ -69,7 +107,7 @@ export const BoardPreview = memo(function BoardPreview({
       return
     }
 
-    const elements = (board.scene?.elements ?? []).filter((el: any) => !el.isDeleted)
+    const elements = (scene?.elements ?? []).filter((el: any) => !el.isDeleted)
     if (elements.length === 0) {
       setSvgHtml(null)
       return
@@ -84,7 +122,7 @@ export const BoardPreview = memo(function BoardPreview({
         exportWithDarkMode: isDark,
         theme: resolvedTheme,
       },
-      files: (board.scene?.files ?? {}) as BinaryFiles,
+      files: (scene?.files ?? {}) as BinaryFiles,
       exportPadding: 16,
       skipInliningFonts: true,
       renderEmbeddables: false,
@@ -139,6 +177,7 @@ export const BoardPreview = memo(function BoardPreview({
         }
 
         const html = svg.outerHTML
+        if (previewSvgCache.size >= 200) previewSvgCache.clear()
         previewSvgCache.set(cacheKey, html)
         setSvgHtml(html)
       })
@@ -150,7 +189,7 @@ export const BoardPreview = memo(function BoardPreview({
     return () => {
       isMounted = false
     }
-  }, [board.id, board.updatedAt, board.scene, isDark, resolvedTheme, cacheKey])
+  }, [board.id, board.updatedAt, scene, isDark, resolvedTheme, cacheKey])
 
   const handleDelete = (event: React.MouseEvent) => {
     event.preventDefault()
@@ -161,8 +200,9 @@ export const BoardPreview = memo(function BoardPreview({
   }
 
   return (
-    <Link to="/boards/$boardId" params={{ boardId: board.id }} className="board-card">
+    <Link to="/boards/$boardId" params={{ boardId: board.id }} className="board-card" data-board-id={board.id}>
       <div
+        ref={containerRef}
         className="board-preview-container"
         data-has-custom-bg={customBgColor ? 'true' : 'false'}
         style={customBgColor ? { backgroundColor: customBgColor } : undefined}
@@ -171,10 +211,16 @@ export const BoardPreview = memo(function BoardPreview({
           <div className="board-preview-svg" dangerouslySetInnerHTML={{ __html: svgHtml }} />
         ) : (
           <div className="board-preview-empty" style={customBgColor ? { backgroundColor: customBgColor } : undefined}>
-            <span className="board-preview-empty__label">Empty board</span>
+            <span className="board-preview-empty__label">{scene ? 'Empty board' : 'Open to view board'}</span>
           </div>
         )}
-        {onShare ? (
+        {board.isPrivate && (
+          <span className="board-private-badge" title="Private board">
+            <Lock size={12} />
+            Private
+          </span>
+        )}
+        {isOwner && onShare ? (
           <button
             type="button"
             className="board-card-share-btn"
@@ -183,15 +229,17 @@ export const BoardPreview = memo(function BoardPreview({
               e.stopPropagation()
               onShare(board)
             }}
+            disabled={busy}
             title="Share board"
             aria-label="Share board"
           >
             <Share2 size={14} />
           </button>
         ) : null}
-        {onDelete ? (
+        {isOwner && onDelete ? (
           <button
             type="button"
+            disabled={busy}
             className="board-card-delete-btn"
             onClick={handleDelete}
             title="Delete board"
@@ -202,7 +250,9 @@ export const BoardPreview = memo(function BoardPreview({
         ) : null}
       </div>
       <div className="board-card__content">
-        <strong>{board.name}</strong>
+        <div className="board-card-title-row">
+          <strong>{board.name}</strong>
+        </div>
         <span>
           {board.project.name} · Edited {relativeTime(board.updatedAt)}
         </span>

@@ -32,7 +32,8 @@
     "test:collab:ops": "node tests/collab-undo-further-ops.test.mjs",
     "test:mcp": "pnpm dlx tsx tests/mcp-tools-suite.test.ts",
     "test:mcp:e2e": "node tests/mcp-live-e2e.test.mjs",
-    "test:dropdown": "node tests/create-board-modal-dropdown-scroll.test.mjs"
+    "test:dropdown": "node tests/create-board-modal-dropdown-scroll.test.mjs",
+    "test:e2e:projects": "node tests/run-projects-e2e.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

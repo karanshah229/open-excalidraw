@@ -1,42 +1,35 @@
 rules_version = '2';
-
 service firebase.storage {
   match /b/{bucket}/o {
-    function board(boardId) {
-      return firestore.get(/databases/(default)/documents/boardShares/$(boardId)).data;
-    }
-    function isOwner(boardData) { return request.auth != null && boardData.ownerId == request.auth.uid; }
-    function hasInvitedEmail(boardData) {
-      return request.auth != null && request.auth.token.email != null
-        && boardData.invitedEmails != null && request.auth.token.email in boardData.invitedEmails;
-    }
-    function canRead(boardData) {
-      return boardData.generalAccess == 'anyone_with_link' || isOwner(boardData) || hasInvitedEmail(boardData);
-    }
-    function canEdit(boardData) {
-      return isOwner(boardData)
-        || (boardData.generalAccess == 'anyone_with_link' && boardData.generalRole == 'editor')
-        || (request.auth != null && request.auth.token.email != null && boardData.collaborators != null
-          && boardData.collaborators[request.auth.token.email] != null
-          && boardData.collaborators[request.auth.token.email].role == 'editor');
-    }
-
-    // Private workspace boards do not require a boardShares document.
+    function board(boardId) { return firestore.get(/databases/(default)/documents/boardShares/$(boardId)).data; }
+    function invited(data) { return request.auth != null && request.auth.token.email_verified == true
+      && request.auth.token.email in data.get('invitedEmails', []); }
+    function live(data) { return data.get('deletedAt', null) == null && data.get('pending', false) == false; }
+    function owner(data) { return request.auth != null && data.ownerId == request.auth.uid; }
+    function readPolicy(data) { return live(data) && (owner(data) || data.generalAccess == 'anyone_with_link' || invited(data)); }
+    function editPolicy(data) { return live(data) && (owner(data) || (data.generalAccess == 'anyone_with_link' && data.generalRole == 'editor')
+      || (invited(data) && data.collaborators[request.auth.token.email].role == 'editor')); }
+    function parentExists(data) { return data.get('projectId', '') != '' && firestore.exists(/databases/(default)/documents/projectShares/$(data.projectId)); }
+    function project(data) { return firestore.get(/databases/(default)/documents/projectShares/$(data.projectId)).data; }
+    function readBoard(data) { return live(data) && (!parentExists(data) || live(project(data)))
+      && (readPolicy(data) || (parentExists(data) && data.get('inheritProjectAccess', true) && readPolicy(project(data)))); }
+    function editBoard(data) { return live(data) && (!parentExists(data) || live(project(data)))
+      && (editPolicy(data) || (parentExists(data) && data.get('inheritProjectAccess', true) && editPolicy(project(data)))); }
     match /users/{userId}/boards/{boardId}/assets/{fileId} {
-      allow read: if request.auth != null && request.auth.uid == userId;
+      allow read: if (request.auth != null && request.auth.uid == userId
+          && (!firestore.exists(/databases/(default)/documents/boardShares/$(boardId)) || readBoard(board(boardId))))
+        || (firestore.exists(/databases/(default)/documents/boardShares/$(boardId)) && board(boardId).ownerId == userId && readBoard(board(boardId)));
       allow write: if request.auth != null && request.auth.uid == userId
-        && request.resource.size < 10 * 1024 * 1024
-        && request.resource.contentType.matches('image/.*');
+        && (!firestore.exists(/databases/(default)/documents/boardShares/$(boardId)) || editBoard(board(boardId)))
+        && request.resource.size < 10 * 1024 * 1024 && request.resource.contentType.matches('image/.*');
     }
-
     match /boards/{boardId}/assets/{fileId} {
-      allow read: if canRead(board(boardId));
-      // Allow upload up to 10MB per image
-      allow write: if canEdit(board(boardId)) && request.resource.size < 10 * 1024 * 1024;
+      allow read: if readBoard(board(boardId));
+      allow write: if editBoard(board(boardId)) && request.resource.size < 10 * 1024 * 1024 && request.resource.contentType.matches('image/.*');
     }
     match /boards/{boardId}/snapshots/{snapshotId} {
-      allow read: if canRead(board(boardId));
-      allow write: if canEdit(board(boardId));
+      allow read: if readBoard(board(boardId));
+      allow write: if editBoard(board(boardId));
     }
   }
 }

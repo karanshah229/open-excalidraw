@@ -1,14 +1,34 @@
-import { RxDbWorkspaceStore } from '@agentic-whiteboard/storage'
+import { RxDbWorkspaceStore, setWorkspaceIdentity } from '@agentic-whiteboard/storage'
 import type { Board, BoardDocument, Project } from '@agentic-whiteboard/storage'
 import { collection, doc, getDoc, getDocs, onSnapshot, query, runTransaction, setDoc, where } from 'firebase/firestore'
 import { getFirestoreDb } from '../../lib/firebase'
 import { restoreSceneAssets, storeSceneAssets } from '../assets/scene-assets'
+import { sharingService } from '../sharing/sharing-service'
+import { projectService, type VisibleProject } from '../sharing/project-service'
 import { reconcileElementsLWW } from '../collaboration/reconcile'
 
-export type WorkspaceBoard = Board & { project: Project }
+export type WorkspaceBoard = Board & {
+  project: VisibleProject
+  inheritProjectAccess?: boolean
+  isPrivate?: boolean
+  role?: 'owner' | 'editor' | 'viewer'
+}
 export const workspaceStore = new RxDbWorkspaceStore()
+const workspaceRequests = new Map<string, Promise<{ projects: VisibleProject[]; boards: WorkspaceBoard[] }>>()
 
 let activeUserId: string | null = null
+let activation = 0
+const emitWorkspaceChange = () => window.dispatchEvent(new Event('workspace-changed'))
+const archiveKey = (uid: string) => `project-archive:v1:${uid}`
+function archivePreferences(uid: string): Record<string, boolean> {
+  try {
+    return JSON.parse(localStorage.getItem(archiveKey(uid)) ?? '{}')
+  } catch {
+    return {}
+  }
+}
+const isOwnerProject = (project: Project) => project.ownerId === (activeUserId ?? 'local-user')
+let syncInFlight: Promise<void> | undefined
 let syncTimer: number | undefined
 let nextWriteAt = 0
 const dirtyProjectIds = new Set<string>()
@@ -17,8 +37,6 @@ let projectsListener: (() => void) | undefined
 const SYNC_DEBOUNCE_MS = 150
 const MIN_WRITE_INTERVAL_MS = 1_000
 const MAX_RETRY_DELAY_MS = 60_000
-
-class SyncConflictError extends Error {}
 
 const NESTED_ARRAY_KEY = '_agenticWhiteboardNestedArray'
 
@@ -100,7 +118,8 @@ const cloudBoard = (board: BoardDocument): BoardDocument => {
 const matchesCommittedVersion = (local: BoardDocument, remote: BoardDocument) =>
   local.revision === remote.revision && local.updatedAt === remote.updatedAt
 
-async function syncWorkspace(userId: string) {
+async function performWorkspaceSync(userId: string) {
+  const generation = activation
   const db = getFirestoreDb()
   if (!db) return
   const [projects, boards] = await Promise.all([workspaceStore.listProjects(), workspaceStore.listBoardsForSync()])
@@ -114,7 +133,13 @@ async function syncWorkspace(userId: string) {
 
   for (const project of projects.filter((item) => projectIds.has(item.id))) {
     try {
-      await setDoc(doc(db, 'users', userId, 'projects', project.id), firestoreValue(project))
+      if (activation !== generation || activeUserId !== userId || project.ownerId !== userId) return
+      const projectRef = doc(db, 'users', userId, 'projects', project.id)
+      await runTransaction(db, async (transaction) => {
+        const existing = await transaction.get(projectRef)
+        if (!existing.exists()) transaction.set(projectRef, firestoreValue(project))
+        else if (existing.data().deletedAt) throw new Error('Project was deleted.')
+      })
       dirtyProjectIds.delete(project.id)
     } catch {
       dirtyProjectIds.add(project.id)
@@ -122,6 +147,7 @@ async function syncWorkspace(userId: string) {
   }
 
   for (const board of unsyncedBoards) {
+    if (generation !== activation || activeUserId !== userId) return
     const wait = Math.max(0, nextWriteAt - Date.now())
     if (wait) await new Promise<void>((resolve) => window.setTimeout(resolve, wait))
     nextWriteAt = Date.now() + MIN_WRITE_INTERVAL_MS
@@ -135,6 +161,8 @@ async function syncWorkspace(userId: string) {
         let resolvedBoard = current
         await runTransaction(db, async (transaction) => {
           const remoteSnapshot = await transaction.get(ref)
+          if (remoteSnapshot.exists() && remoteSnapshot.data().active === false && current.active)
+            throw new Error('Board was deleted.')
           if (remoteSnapshot.exists()) {
             const remoteData = workspaceValue(remoteSnapshot.data()) as BoardDocument
             const remoteRevision = Number(remoteData.revision ?? 0)
@@ -187,76 +215,70 @@ async function syncWorkspace(userId: string) {
   }
 }
 
-async function downloadWorkspace(userId: string) {
-  const db = getFirestoreDb()
-  if (!db) return
-  const projectSnapshots = await getDocs(collection(db, 'users', userId, 'projects'))
-  await Promise.all(
-    projectSnapshots.docs.map(async (projectSnapshot) => {
-      const project = projectSnapshot.data() as Project
-      await workspaceStore.upsertProject(project)
-      const boardSnapshots = await getDocs(
-        query(collection(db, 'users', userId, 'projects', project.id, 'boards'), where('active', '==', true)),
-      )
-      await Promise.all(
-        boardSnapshots.docs.map(async (boardSnapshot) => {
-          const remote = cloudBoard(workspaceValue(boardSnapshot.data()) as BoardDocument)
-          const known = await workspaceStore.loadBoard(remote.id)
-          remote.scene = await restoreSceneAssets(remote.scene, known?.scene.files)
-          const local = await workspaceStore.loadBoard(remote.id)
-          if (local?.syncStatus === 'local-only' || local?.syncStatus === 'sync-failed') {
-            if (matchesCommittedVersion(local, remote)) {
-              await workspaceStore.markBoardSynced(remote.id, remote.revision)
-            } else {
-              // Element-level LWW reconciliation
-              const mergedElements = reconcileElementsLWW(local.scene?.elements ?? [], remote.scene?.elements ?? [])
-              const mergedBoard: BoardDocument = {
-                ...local,
-                revision: Math.max(local.revision, remote.revision) + 1,
-                scene: {
-                  ...local.scene,
-                  elements: mergedElements,
-                  files: { ...remote.scene.files, ...local.scene.files },
-                },
-              }
-              await workspaceStore.upsertBoard(mergedBoard)
-              queueSync()
-            }
-          } else if (!local || remote.revision >= local.revision) {
-            await workspaceStore.upsertBoard(remote)
-          }
-        }),
-      )
-    }),
-  )
+async function syncWorkspace(userId: string) {
+  if (syncInFlight) {
+    await syncInFlight
+    return
+  }
+  syncInFlight = performWorkspaceSync(userId).finally(() => {
+    syncInFlight = undefined
+  })
+  await syncInFlight
 }
 
 function subscribeToRemoteWorkspace(userId: string) {
+  const generation = activation
   const db = getFirestoreDb()
   if (!db || projectsListener) return
   projectsListener = onSnapshot(collection(db, 'users', userId, 'projects'), (snapshot) => {
+    if (generation !== activation || activeUserId !== userId) return
     for (const projectSnapshot of snapshot.docs) {
-      const project = projectSnapshot.data() as Project
-      void workspaceStore.upsertProject(project)
+      const stored = projectSnapshot.data() as Project
+      const project: Project = { ...stored, id: projectSnapshot.id, ownerId: userId }
+      if (!project.deletedAt && (stored.ownerId !== userId || stored.id !== project.id))
+        void projectService
+          .manage(project.id, 'repair')
+          .catch((error) => console.error('Legacy project repair failed:', error))
+      void workspaceStore
+        .upsertProject(project)
+        .then(emitWorkspaceChange)
+        .catch((error) => console.error('Cloud project restore failed:', error))
+      if (project.deletedAt) {
+        projectListeners.get(project.id)?.()
+        projectListeners.delete(project.id)
+        continue
+      }
       if (projectListeners.has(project.id)) continue
       projectListeners.set(
         project.id,
         onSnapshot(
           query(collection(db, 'users', userId, 'projects', project.id, 'boards'), where('active', '==', true)),
           (boardSnapshot) => {
+            if (generation !== activation || activeUserId !== userId) return
             for (const change of boardSnapshot.docChanges()) {
               const boardDocument = change.doc
               const remote = {
                 ...(workspaceValue(boardDocument.data()) as BoardDocument),
+                id: boardDocument.id,
+                projectId: project.id,
                 active: change.type === 'removed' ? false : true,
               }
               void (async () => {
+                if (generation !== activation || activeUserId !== userId) return
                 const normalized = cloudBoard(remote)
+                if (!normalized.active) {
+                  await workspaceStore.upsertBoard(normalized)
+                  emitWorkspaceChange()
+                  return
+                }
                 const known = await workspaceStore.loadBoard(remote.id)
                 normalized.scene = await restoreSceneAssets(normalized.scene, known?.scene.files)
                 const local = await workspaceStore.loadBoard(remote.id)
                 if (local?.syncStatus === 'local-only' || local?.syncStatus === 'sync-failed') {
-                  if (normalized.revision !== local.baseRevision && normalized.revision !== local.revision) {
+                  if (matchesCommittedVersion(local, normalized)) {
+                    await workspaceStore.markBoardSynced(local.id, local.revision)
+                    emitWorkspaceChange()
+                  } else if (normalized.revision !== local.baseRevision && normalized.revision !== local.revision) {
                     // Element-level LWW reconciliation
                     const mergedElements = reconcileElementsLWW(
                       local.scene?.elements ?? [],
@@ -277,6 +299,7 @@ function subscribeToRemoteWorkspace(userId: string) {
                 } else if (!local || normalized.revision >= local.revision) {
                   await workspaceStore.upsertBoard(normalized)
                   await updateSyncStatus(remote.id, 'synced')
+                  emitWorkspaceChange()
                 }
               })().catch((error) => {
                 console.error(`Failed to restore cloud board ${remote.id}:`, error)
@@ -291,19 +314,172 @@ function subscribeToRemoteWorkspace(userId: string) {
 }
 
 export const workspaceApi = {
-  async listWorkspace(): Promise<{ projects: Project[]; boards: WorkspaceBoard[] }> {
-    if (typeof navigator !== 'undefined' && !navigator.onLine) {
-      return { projects: [], boards: [] }
+  listWorkspace(projectId?: string): Promise<{ projects: VisibleProject[]; boards: WorkspaceBoard[] }> {
+    const uid = activeUserId,
+      generation = activation
+    const key = `${generation}:${uid ?? 'guest'}:${projectId ?? 'all'}`
+    const existing = workspaceRequests.get(key)
+    if (existing) return existing
+    const request = (async () => {
+      const db = getFirestoreDb()
+      // Independent metadata sources start together; no board drawings are fetched for policies.
+      const [shared, preferences] = await Promise.all([
+        db && navigator.onLine
+          ? projectService.list(projectId, Boolean(uid))
+          : Promise.resolve({ projects: [], boards: [] }),
+        db && uid && navigator.onLine
+          ? getDocs(collection(db, 'users', uid, 'projectPreferences'))
+          : Promise.resolve(null),
+        workspaceStore.bootstrap(),
+      ])
+      if (generation !== activation || uid !== activeUserId) return { projects: [], boards: [] }
+      const personalArchives = archivePreferences(uid ?? 'local-user')
+      for (const preference of preferences?.docs ?? [])
+        personalArchives[preference.id] = preference.data().archived === true
+      const policies = 'ownedPolicies' in shared ? shared.ownedPolicies : undefined
+      const projectPolicies = new Map(policies?.projects.map((policy) => [policy.projectId, policy]))
+      const boardPolicies = new Map(policies?.boards.map((policy) => [policy.boardId, policy]))
+      const projects: VisibleProject[] = (await workspaceStore.listProjects())
+        .filter(() => uid || !projectId)
+        .map((project) => {
+          const policy = projectPolicies.get(project.id)
+          return {
+            ...project,
+            role: 'owner' as const,
+            archived: personalArchives[project.id] === true,
+            sharePolicy: policy ?? {
+              generalAccess: 'restricted',
+              generalRole: 'viewer',
+              collaborators: {},
+              invitedEmails: [],
+            },
+            isShared: Boolean(policy && (policy.generalAccess === 'anyone_with_link' || policy.invitedEmails?.length)),
+          }
+        })
+      const groups = await Promise.all(projects.map((project) => workspaceStore.listBoards(project.id)))
+      if (generation !== activation || uid !== activeUserId) return { projects: [], boards: [] }
+      const boards: WorkspaceBoard[] = groups.flatMap((group, index) =>
+        group.map((board) => {
+          const project = projects[index],
+            policy = boardPolicies.get(board.id)
+          // Only seed a verified default after the metadata request completed successfully.
+          if (policies)
+            sharingService.rememberShareConfig(
+              {
+                ...(policy ?? {
+                  boardId: board.id,
+                  projectId: project.id,
+                  boardName: board.name,
+                  ownerId: uid ?? 'local-user',
+                  ownerName: '',
+                  createdAt: board.createdAt,
+                  updatedAt: board.updatedAt,
+                  generalAccess: 'restricted',
+                  generalRole: 'viewer',
+                  collaborators: {},
+                  invitedEmails: [],
+                  inheritProjectAccess: true,
+                }),
+                projectPolicy: project.sharePolicy,
+              },
+              uid ?? 'local-user',
+            )
+          return {
+            ...board,
+            project,
+            role: 'owner' as const,
+            inheritProjectAccess: policy?.inheritProjectAccess !== false,
+            isPrivate:
+              policy?.inheritProjectAccess === false &&
+              policy.generalAccess === 'restricted' &&
+              !policy.invitedEmails?.length,
+          }
+        }),
+      )
+      for (const project of shared.projects) {
+        if (projects.some((owned) => owned.id === project.id)) continue
+        project.archived = personalArchives[project.id] === true
+        projects.push(project)
+        boards.push(
+          ...shared.boards.filter((board) => board.projectId === project.id).map((board) => ({ ...board, project })),
+        )
+      }
+      return { projects, boards }
+    })()
+    workspaceRequests.set(key, request)
+    void request
+      .finally(() => {
+        if (workspaceRequests.get(key) === request) workspaceRequests.delete(key)
+      })
+      .catch(() => {})
+    return request
+  },
+  async flushCloud() {
+    if (!activeUserId) return
+    if (!navigator.onLine) throw new Error('Connect to the internet to update cloud projects and sharing.')
+    await syncWorkspace(activeUserId)
+    await syncWorkspace(activeUserId)
+  },
+  async renameProject(projectId: string, name: string) {
+    const local = (await workspaceStore.listProjects()).find((project) => project.id === projectId)
+    const project: VisibleProject | undefined =
+      local ?? (await projectService.list(projectId)).projects.find((project) => project.id === projectId)
+    if (!project || (!isOwnerProject(project) && project.role !== 'editor'))
+      throw new Error('Project editor access required.')
+    if (!isOwnerProject(project)) {
+      await projectService.manage(projectId, 'rename', { name })
+      emitWorkspaceChange()
+      return
     }
-    await workspaceStore.bootstrap()
-    const projects = await workspaceStore.listProjects()
-    const boardGroups = await Promise.all(projects.map((project) => workspaceStore.listBoards(project.id)))
-    return {
-      projects,
-      boards: boardGroups.flatMap((boards, index) => boards.map((board) => ({ ...board, project: projects[index] }))),
+    if (getFirestoreDb()) {
+      const parent = await getDoc(doc(getFirestoreDb()!, 'users', activeUserId!, 'projects', projectId))
+      if (!parent.exists()) await workspaceApi.flushCloud()
+      await projectService.manage(projectId, 'rename', { name })
     }
+    await workspaceStore.upsertProject({ ...project, name: name.trim(), updatedAt: new Date().toISOString() })
+    emitWorkspaceChange()
+  },
+  async archiveProject(projectId: string, archived: boolean) {
+    const db = getFirestoreDb()
+    if (!db || !activeUserId) throw new Error('Sign in to archive projects.')
+    const preferences = archivePreferences(activeUserId)
+    localStorage.setItem(archiveKey(activeUserId), JSON.stringify({ ...preferences, [projectId]: archived }))
+    const pending = setDoc(doc(db, 'users', activeUserId, 'projectPreferences', projectId), { archived })
+    emitWorkspaceChange()
+    if (navigator.onLine) {
+      try {
+        await pending
+      } catch (error) {
+        localStorage.setItem(archiveKey(activeUserId), JSON.stringify(preferences))
+        emitWorkspaceChange()
+        throw error
+      }
+    } else void pending.catch((error) => console.error('Archive preference sync failed:', error))
+  },
+  async deleteProject(projectId: string) {
+    const local = (await workspaceStore.listProjects()).find((project) => project.id === projectId)
+    const project: VisibleProject | undefined =
+      local ?? (await projectService.list(projectId)).projects.find((project) => project.id === projectId)
+    if (!project || (!isOwnerProject(project) && project.role !== 'editor'))
+      throw new Error('Project editor access required.')
+    if (!isOwnerProject(project)) {
+      await projectService.manage(projectId, 'delete')
+      emitWorkspaceChange()
+      return
+    }
+    await workspaceApi.flushCloud()
+    await projectService.manage(projectId, 'delete')
+    await workspaceStore.upsertProject({ ...project, deletedAt: new Date().toISOString() })
+    emitWorkspaceChange()
   },
   async createBoard(projectId: string, name: string) {
+    const project = (await workspaceApi.listWorkspace()).projects.find((project) => project.id === projectId)
+    if (project?.isShared) {
+      const board = await projectService.createBoard(projectId, name)
+      if (isOwnerProject(project)) await workspaceStore.upsertBoard(board)
+      emitWorkspaceChange()
+      return board
+    }
     const board = await workspaceStore.createBoard(projectId, name)
     queueSync()
     return board
@@ -315,6 +491,12 @@ export const workspaceApi = {
     return project
   },
   async deleteBoard(boardId: string) {
+    const board = await workspaceStore.loadBoard(boardId)
+    if (!board) throw new Error('Only the owner can delete a board.')
+    if (getFirestoreDb()) {
+      await workspaceApi.flushCloud()
+      await projectService.boardAccess(boardId, board.projectId, 'delete')
+    }
     await workspaceStore.deleteBoard(boardId)
     queueSync()
   },
@@ -351,6 +533,7 @@ export const workspaceApi = {
   async saveBoard(document: BoardDocument) {
     try {
       const saved = await workspaceStore.saveBoard(document)
+      emitWorkspaceChange()
       queueSync()
       return saved
     } catch (error) {
@@ -374,13 +557,18 @@ export const workspaceApi = {
     queueSync()
   },
   async activateCloudWorkspace(userId: string) {
+    if (activeUserId === userId) return
+    workspaceApi.deactivateCloudWorkspace()
     activeUserId = userId
+    setWorkspaceIdentity(userId)
+    const generation = activation
     await workspaceStore.bootstrap()
-    await downloadWorkspace(userId)
+    if (activation !== generation || activeUserId !== userId) return
     const claimedProjectIds = await workspaceStore.claimLocalProjects(userId)
     claimedProjectIds.forEach((projectId) => dirtyProjectIds.add(projectId))
     subscribeToRemoteWorkspace(userId)
-    const { boards } = await workspaceApi.listWorkspace()
+    emitWorkspaceChange()
+    const boards = await workspaceStore.listBoardsForSync()
     if (
       boards.some((board) => board.syncStatus === 'local-only' || board.syncStatus === 'sync-failed') ||
       dirtyProjectIds.size
@@ -388,7 +576,13 @@ export const workspaceApi = {
       queueSync()
   },
   deactivateCloudWorkspace() {
+    activation++
+    if (syncTimer) window.clearTimeout(syncTimer)
+    syncTimer = undefined
+    dirtyProjectIds.clear()
     activeUserId = null
+    setWorkspaceIdentity(null)
+    emitWorkspaceChange()
     for (const unsubscribe of projectListeners.values()) unsubscribe()
     projectListeners.clear()
     projectsListener?.()
