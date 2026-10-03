@@ -234,3 +234,7 @@ The filter panel follows the supplied Filter projects reference: segmented visib
 Removed the board action menu/Make private modal and native access-mode selector. Explicit board sharing edits now automatically create a board-specific override; Restricted keeps owner + individually invited people. Use project access restores inheritance without discarding direct grants. See [the role matrix and all 162 combinations](board-sharing-permissions.md).
 
 Download format menus render above modal content and are tested with real pointer clicks. Preview keys include the board revision and element versions; saves notify the workspace and homepage navigation refetches metadata immediately. Delete confirmation no longer reserves an empty status area.
+
+### Reload and save performance review
+
+Follow-up requirements: speed up project email additions and app reload, use a single witty startup loader, and shrink Delete to 400px with narrower button padding. Implemented “Fetching your ideas…”, batched scene-free sharing metadata, parallel archive preferences, account/generation-scoped in-flight request deduplication, and single listener-driven workspace hydration. Sharing retains both security barriers but removes redundant projection reads/writes and parallelizes initial publication in bounded batches. See the architecture document for remaining cold-start/network limits.

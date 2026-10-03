@@ -1,3 +1,4 @@
+import { WorkspaceLoading } from '../../components/workspace-loading'
 import { AccessDenied } from '../../components/access-denied'
 import { useEffect, useDeferredValue, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
@@ -186,28 +187,7 @@ export function WorkspaceHome() {
     [workspace.data?.projects, boards, projectIds, queryProjectId, archiveFilter, ownershipFilter, user?.uid, search],
   )
 
-  if (workspace.isPending)
-    return (
-      <main className="workspace-shell">
-        {navSlot &&
-          isProjectPage &&
-          createPortal(
-            <nav className="header-breadcrumb" aria-label="Breadcrumb">
-              <Link to="/" className="breadcrumb-item breadcrumb-link" title="Workspace">
-                Workspace
-              </Link>
-              <span className="breadcrumb-separator" aria-hidden="true">
-                /
-              </span>
-              <span className="breadcrumb-item breadcrumb-current" title="Loading…">
-                Loading…
-              </span>
-            </nav>,
-            navSlot,
-          )}
-        <div className="workspace-loading">Loading your workspace…</div>
-      </main>
-    )
+  if (workspace.isPending) return <WorkspaceLoading />
   if (workspace.isError)
     return (
       <main className="workspace-shell">

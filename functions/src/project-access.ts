@@ -72,16 +72,20 @@ export function accessProjection(policy: Policy): Policy {
     editorEmails: `|${emails.filter((email) => policy.collaborators[email].role === 'editor').join('|')}|`,
   }
 }
-export async function mirrorCurrentPolicy(kind: 'board' | 'project', targetId: string) {
-  const snapshot = await getFirestore().doc(`${kind}Shares/${targetId}`).get()
-  if (!snapshot.exists) return
-  const projection = accessProjection(snapshot.data()!)
+async function mirrorPolicy(kind: 'board' | 'project', targetId: string, policy: Policy) {
+  const projection = accessProjection(policy)
   await getDatabase()
     .ref(`${kind}Access/${targetId}`)
     .transaction((current) => {
+      // Callables and repair triggers may mirror the same revision concurrently.
       if (current && Number(current.version ?? -1) > projection.version) return
+      if (current && Object.entries(projection).every(([key, value]) => current[key] === value)) return
       return projection
     })
+}
+export async function mirrorCurrentPolicy(kind: 'board' | 'project', targetId: string) {
+  const snapshot = await getFirestore().doc(`${kind}Shares/${targetId}`).get()
+  if (snapshot.exists) await mirrorPolicy(kind, targetId, snapshot.data()!)
 }
 async function mutatePolicy(
   kind: 'board' | 'project',
@@ -93,7 +97,7 @@ async function mutatePolicy(
 ) {
   const db = getFirestore(),
     ref = db.doc(`${kind}Shares/${targetId}`)
-  const revision = await db.runTransaction(async (tx) => {
+  const pendingPolicy = await db.runTransaction(async (tx) => {
     const current = await tx.get(ref),
       data = current.data() ?? initial
     if (data.ownerId && data.ownerId !== ownerId) fail('Project ownership changed.')
@@ -102,17 +106,19 @@ async function mutatePolicy(
     if (data.deletedAt && !patch.deletedAt) fail('This item was deleted.')
     const revision = Number(data.accessRevision ?? 0) + 1
     // Replace maps, never recursively merge omitted collaborators.
-    tx.set(ref, { ...data, ...patch, ownerId, accessRevision: revision, pending: true, updatedAt: timestamp() })
-    return revision
+    const next = { ...data, ...patch, ownerId, accessRevision: revision, pending: true, updatedAt: timestamp() }
+    tx.set(ref, next)
+    return next
   })
-  await mirrorCurrentPolicy(kind, targetId)
-  await db.runTransaction(async (tx) => {
+  await mirrorPolicy(kind, targetId, pendingPolicy)
+  const committedPolicy = await db.runTransaction(async (tx) => {
     const current = await tx.get(ref)
-    if (current.data()?.accessRevision !== revision)
+    if (current.data()?.accessRevision !== pendingPolicy.accessRevision)
       throw new HttpsError('aborted', 'Sharing changed. Reload and retry.')
     tx.update(ref, { pending: false })
+    return { ...current.data()!, pending: false }
   })
-  await mirrorCurrentPolicy(kind, targetId)
+  await mirrorPolicy(kind, targetId, committedPolicy)
 }
 export const mirrorProjectAccess = onDocumentWritten(
   { document: 'projectShares/{projectId}', region: triggerRegion },
@@ -259,12 +265,58 @@ export const listSharedProjects = onCall({ region }, async (request) => {
     targetId = request.data?.projectId ? id(request.data.projectId) : undefined
   const uid = request.auth?.uid,
     email = verifiedEmail(request)
-  let policies
-  if (targetId) policies = [await db.doc(`projectShares/${targetId}`).get()]
-  else {
-    if (!uid || !email) return { projects: [], boards: [] }
-    policies = (await db.collection('projectShares').where('invitedEmails', 'array-contains', email).get()).docs
-  }
+  // A single homepage call returns owned sharing metadata without drawing payloads.
+  // Server-owned policy documents establish ownership; clients cannot write these fields.
+  const fields = [
+    'boardId',
+    'boardName',
+    'projectId',
+    'name',
+    'ownerId',
+    'ownerName',
+    'ownerEmail',
+    'ownerPhotoURL',
+    'generalAccess',
+    'generalRole',
+    'invitedEmails',
+    'collaborators',
+    'inheritProjectAccess',
+    'accessRevision',
+    'pending',
+    'deletedAt',
+    'createdAt',
+    'updatedAt',
+  ]
+  const ownedPromise = request.data?.includeOwnedPolicies
+    ? Promise.all([
+        db
+          .collection('projectShares')
+          .where('ownerId', '==', identity(request))
+          .select(...fields)
+          .get(),
+        db
+          .collection('boardShares')
+          .where('ownerId', '==', identity(request))
+          .select(...fields)
+          .get(),
+      ]).then(([projects, boards]) => ({
+        projects: projects.docs.map((snapshot) => ({ ...snapshot.data(), projectId: snapshot.id })),
+        boards: boards.docs.map((snapshot) => ({ ...snapshot.data(), boardId: snapshot.id })),
+      }))
+    : Promise.resolve(undefined)
+  const policiesPromise = targetId
+    ? db
+        .doc(`projectShares/${targetId}`)
+        .get()
+        .then((snapshot) => [snapshot])
+    : uid && email
+      ? db
+          .collection('projectShares')
+          .where('invitedEmails', 'array-contains', email)
+          .get()
+          .then((snapshot) => snapshot.docs)
+      : Promise.resolve([])
+  const [ownedPolicies, policies] = await Promise.all([ownedPromise, policiesPromise])
   const projects: Policy[] = [],
     boards: Policy[] = []
   for (const snapshot of policies) {
@@ -275,10 +327,11 @@ export const listSharedProjects = onCall({ region }, async (request) => {
     const boardSnapshots = await db
       .collection(`users/${policy.ownerId}/projects/${snapshot.id}/boards`)
       .where('active', '==', true)
+      .select('name', 'createdAt', 'updatedAt', 'revision')
       .get()
     const configs = boardSnapshots.empty
       ? []
-      : await db.getAll(...boardSnapshots.docs.map((board) => db.doc(`boardShares/${board.id}`)))
+      : await db.getAll(...boardSnapshots.docs.map((board) => db.doc(`boardShares/${board.id}`)), { fieldMask: fields })
     projects.push({
       id: snapshot.id,
       name: policy.name,
@@ -331,7 +384,7 @@ export const listSharedProjects = onCall({ region }, async (request) => {
       })
     }
   }
-  return { projects, boards }
+  return { projects, boards, ...(ownedPolicies ? { ownedPolicies } : {}) }
 })
 
 export const createProjectBoard = onCall({ region }, async (request) => {

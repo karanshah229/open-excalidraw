@@ -89,22 +89,31 @@ export function ProjectActionModal({
         onShareConfigSaved={() => onComplete()}
         onSaveConfig={async (config) => {
           if (!prepared.current) {
-            const unpublished = []
-            for (const board of project.isShared && project.role === 'editor'
-              ? []
-              : await workspaceStore.listBoards(project.id)) {
-              const cached = sharingService.cachedShareConfig(board.id)
-              if (cached?.accessRevision && cached.projectId === project.id) continue
-              const policy = await sharingService.getShareConfig(board.id, {
-                boardName: board.name,
-                ownerId: project.ownerId,
-              })
-              if (!policy.accessRevision || policy.projectId !== project.id)
-                unpublished.push({ ...policy, projectId: project.id })
-            }
+            const boards =
+              project.isShared && project.role === 'editor' ? [] : await workspaceStore.listBoards(project.id)
+            const candidates = await Promise.all(
+              boards.map(async (board) => {
+                const cached = sharingService.cachedShareConfig(board.id)
+                if (cached?.accessRevision && cached.projectId === project.id) return null
+                const policy = await sharingService.getShareConfig(board.id, {
+                  boardName: board.name,
+                  ownerId: project.ownerId,
+                })
+                return !policy.accessRevision || policy.projectId !== project.id
+                  ? { ...policy, projectId: project.id }
+                  : null
+              }),
+            )
+            const unpublished = candidates.filter((policy) => policy !== null)
             if (unpublished.length) {
               await workspaceApi.flushCloud()
-              for (const policy of unpublished) await sharingService.saveShareConfig(policy, { workspaceFlushed: true })
+              // Bound first-publication work without serializing every board round trip.
+              for (let offset = 0; offset < unpublished.length; offset += 8)
+                await Promise.all(
+                  unpublished
+                    .slice(offset, offset + 8)
+                    .map((policy) => sharingService.saveShareConfig(policy, { workspaceFlushed: true })),
+                )
             }
             prepared.current = true
           }

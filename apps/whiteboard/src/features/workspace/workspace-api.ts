@@ -3,7 +3,7 @@ import type { Board, BoardDocument, Project } from '@agentic-whiteboard/storage'
 import { collection, doc, getDoc, getDocs, onSnapshot, query, runTransaction, setDoc, where } from 'firebase/firestore'
 import { getFirestoreDb } from '../../lib/firebase'
 import { restoreSceneAssets, storeSceneAssets } from '../assets/scene-assets'
-import { sharingService, type BoardShareConfig } from '../sharing/sharing-service'
+import { sharingService } from '../sharing/sharing-service'
 import { projectService, type VisibleProject } from '../sharing/project-service'
 import { reconcileElementsLWW } from '../collaboration/reconcile'
 
@@ -14,6 +14,7 @@ export type WorkspaceBoard = Board & {
   role?: 'owner' | 'editor' | 'viewer'
 }
 export const workspaceStore = new RxDbWorkspaceStore()
+const workspaceRequests = new Map<string, Promise<{ projects: VisibleProject[]; boards: WorkspaceBoard[] }>>()
 
 let activeUserId: string | null = null
 let activation = 0
@@ -225,54 +226,6 @@ async function syncWorkspace(userId: string) {
   await syncInFlight
 }
 
-async function downloadWorkspace(userId: string) {
-  const db = getFirestoreDb()
-  if (!db) return
-  const generation = activation
-  const projectSnapshots = await getDocs(collection(db, 'users', userId, 'projects'))
-  await Promise.all(
-    projectSnapshots.docs.map(async (projectSnapshot) => {
-      if (generation !== activation || activeUserId !== userId) return
-      const project = projectSnapshot.data() as Project
-      await workspaceStore.upsertProject(project)
-      if (project.deletedAt) return
-      const boardSnapshots = await getDocs(
-        query(collection(db, 'users', userId, 'projects', project.id, 'boards'), where('active', '==', true)),
-      )
-      await Promise.all(
-        boardSnapshots.docs.map(async (boardSnapshot) => {
-          if (generation !== activation || activeUserId !== userId) return
-          const remote = cloudBoard(workspaceValue(boardSnapshot.data()) as BoardDocument)
-          const known = await workspaceStore.loadBoard(remote.id)
-          remote.scene = await restoreSceneAssets(remote.scene, known?.scene.files)
-          const local = await workspaceStore.loadBoard(remote.id)
-          if (local?.syncStatus === 'local-only' || local?.syncStatus === 'sync-failed') {
-            if (matchesCommittedVersion(local, remote)) {
-              await workspaceStore.markBoardSynced(remote.id, remote.revision)
-            } else {
-              // Element-level LWW reconciliation
-              const mergedElements = reconcileElementsLWW(local.scene?.elements ?? [], remote.scene?.elements ?? [])
-              const mergedBoard: BoardDocument = {
-                ...local,
-                revision: Math.max(local.revision, remote.revision) + 1,
-                scene: {
-                  ...local.scene,
-                  elements: mergedElements,
-                  files: { ...remote.scene.files, ...local.scene.files },
-                },
-              }
-              await workspaceStore.upsertBoard(mergedBoard)
-              queueSync()
-            }
-          } else if (!local || remote.revision >= local.revision) {
-            await workspaceStore.upsertBoard(remote)
-          }
-        }),
-      )
-    }),
-  )
-}
-
 function subscribeToRemoteWorkspace(userId: string) {
   const generation = activation
   const db = getFirestoreDb()
@@ -312,7 +265,10 @@ function subscribeToRemoteWorkspace(userId: string) {
                 normalized.scene = await restoreSceneAssets(normalized.scene, known?.scene.files)
                 const local = await workspaceStore.loadBoard(remote.id)
                 if (local?.syncStatus === 'local-only' || local?.syncStatus === 'sync-failed') {
-                  if (normalized.revision !== local.baseRevision && normalized.revision !== local.revision) {
+                  if (matchesCommittedVersion(local, normalized)) {
+                    await workspaceStore.markBoardSynced(local.id, local.revision)
+                    emitWorkspaceChange()
+                  } else if (normalized.revision !== local.baseRevision && normalized.revision !== local.revision) {
                     // Element-level LWW reconciliation
                     const mergedElements = reconcileElementsLWW(
                       local.scene?.elements ?? [],
@@ -348,93 +304,105 @@ function subscribeToRemoteWorkspace(userId: string) {
 }
 
 export const workspaceApi = {
-  async listWorkspace(projectId?: string): Promise<{ projects: VisibleProject[]; boards: WorkspaceBoard[] }> {
-    await workspaceStore.bootstrap()
-    const projects: VisibleProject[] = (await workspaceStore.listProjects())
-      .filter(() => activeUserId || !projectId)
-      .map((project) => ({
-        ...project,
-        role: 'owner' as const,
-        archived: activeUserId ? archivePreferences(activeUserId)[project.id] === true : false,
-      }))
-    const groups = await Promise.all(projects.map((project) => workspaceStore.listBoards(project.id)))
-    const boards: WorkspaceBoard[] = groups.flatMap((group, index) =>
-      group.map((board) => ({ ...board, project: projects[index], role: 'owner' as const })),
-    )
-    const db = getFirestoreDb(),
-      uid = activeUserId
-    if (db && navigator.onLine) {
-      await Promise.all(
-        projects.map(async (project) => {
-          const policy = await getDoc(doc(db, 'projectShares', project.id)).catch(() => null)
-          if (policy)
-            project.sharePolicy = policy.exists()
-              ? (policy.data() as any)
-              : { generalAccess: 'restricted', generalRole: 'viewer', collaborators: {}, invitedEmails: [] }
-          project.isShared = Boolean(
-            policy?.exists() &&
-            (policy.data().generalAccess === 'anyone_with_link' || policy.data().invitedEmails?.length),
-          )
-          if (uid) {
-            const preference = await getDoc(doc(db, 'users', uid, 'projectPreferences', project.id)).catch(() => null)
-            project.archived = preference?.exists()
-              ? preference.data().archived === true
-              : archivePreferences(uid)[project.id] === true
+  listWorkspace(projectId?: string): Promise<{ projects: VisibleProject[]; boards: WorkspaceBoard[] }> {
+    const uid = activeUserId,
+      generation = activation
+    const key = `${generation}:${uid ?? 'guest'}:${projectId ?? 'all'}`
+    const existing = workspaceRequests.get(key)
+    if (existing) return existing
+    const request = (async () => {
+      const db = getFirestoreDb()
+      // Independent metadata sources start together; no board drawings are fetched for policies.
+      const [shared, preferences] = await Promise.all([
+        db && navigator.onLine
+          ? projectService.list(projectId, Boolean(uid))
+          : Promise.resolve({ projects: [], boards: [] }),
+        db && uid && navigator.onLine
+          ? getDocs(collection(db, 'users', uid, 'projectPreferences'))
+          : Promise.resolve(null),
+        workspaceStore.bootstrap(),
+      ])
+      if (generation !== activation || uid !== activeUserId) return { projects: [], boards: [] }
+      const personalArchives = archivePreferences(uid ?? 'local-user')
+      for (const preference of preferences?.docs ?? [])
+        personalArchives[preference.id] = preference.data().archived === true
+      const policies = 'ownedPolicies' in shared ? shared.ownedPolicies : undefined
+      const projectPolicies = new Map(policies?.projects.map((policy) => [policy.projectId, policy]))
+      const boardPolicies = new Map(policies?.boards.map((policy) => [policy.boardId, policy]))
+      const projects: VisibleProject[] = (await workspaceStore.listProjects())
+        .filter(() => uid || !projectId)
+        .map((project) => {
+          const policy = projectPolicies.get(project.id)
+          return {
+            ...project,
+            role: 'owner' as const,
+            archived: personalArchives[project.id] === true,
+            sharePolicy: policy ?? {
+              generalAccess: 'restricted',
+              generalRole: 'viewer',
+              collaborators: {},
+              invitedEmails: [],
+            },
+            isShared: Boolean(policy && (policy.generalAccess === 'anyone_with_link' || policy.invitedEmails?.length)),
+          }
+        })
+      const groups = await Promise.all(projects.map((project) => workspaceStore.listBoards(project.id)))
+      if (generation !== activation || uid !== activeUserId) return { projects: [], boards: [] }
+      const boards: WorkspaceBoard[] = groups.flatMap((group, index) =>
+        group.map((board) => {
+          const project = projects[index],
+            policy = boardPolicies.get(board.id)
+          // Only seed a verified default after the metadata request completed successfully.
+          if (policies)
+            sharingService.rememberShareConfig(
+              {
+                ...(policy ?? {
+                  boardId: board.id,
+                  projectId: project.id,
+                  boardName: board.name,
+                  ownerId: uid ?? 'local-user',
+                  ownerName: '',
+                  createdAt: board.createdAt,
+                  updatedAt: board.updatedAt,
+                  generalAccess: 'restricted',
+                  generalRole: 'viewer',
+                  collaborators: {},
+                  invitedEmails: [],
+                  inheritProjectAccess: true,
+                }),
+                projectPolicy: project.sharePolicy,
+              },
+              uid ?? 'local-user',
+            )
+          return {
+            ...board,
+            project,
+            role: 'owner' as const,
+            inheritProjectAccess: policy?.inheritProjectAccess !== false,
+            isPrivate:
+              policy?.inheritProjectAccess === false &&
+              policy.generalAccess === 'restricted' &&
+              !policy.invitedEmails?.length,
           }
         }),
       )
-      await Promise.all(
-        boards.map(async (board) => {
-          const config = await getDoc(doc(db, 'boardShares', board.id)).catch(() => null)
-          board.inheritProjectAccess = config?.data()?.inheritProjectAccess !== false
-          const policy = config?.data()
-          if (config)
-            sharingService.rememberShareConfig(
-              config.exists()
-                ? ({
-                    ...(workspaceValue(config.data()) as BoardShareConfig),
-                    projectPolicy: board.project.sharePolicy,
-                  } as BoardShareConfig)
-                : {
-                    boardId: board.id,
-                    projectId: board.projectId,
-                    boardName: board.name,
-                    ownerId: uid ?? 'local-user',
-                    ownerName: '',
-                    createdAt: board.createdAt,
-                    updatedAt: board.updatedAt,
-                    generalAccess: 'restricted',
-                    generalRole: 'viewer',
-                    collaborators: {},
-                    invitedEmails: [],
-                    inheritProjectAccess: true,
-                    projectPolicy: board.project.sharePolicy,
-                  },
-              uid ?? 'local-user',
-            )
-          board.isPrivate =
-            policy?.inheritProjectAccess === false &&
-            policy.generalAccess === 'restricted' &&
-            !policy.invitedEmails?.length
-        }),
-      )
-      const shared = await projectService.list(projectId)
-      if (activeUserId !== uid) return { projects: [], boards: [] }
       for (const project of shared.projects) {
         if (projects.some((owned) => owned.id === project.id)) continue
-        if (uid) {
-          const preference = await getDoc(doc(db, 'users', uid, 'projectPreferences', project.id))
-          project.archived = preference.exists()
-            ? preference.data().archived === true
-            : archivePreferences(uid)[project.id] === true
-        }
+        project.archived = personalArchives[project.id] === true
         projects.push(project)
         boards.push(
           ...shared.boards.filter((board) => board.projectId === project.id).map((board) => ({ ...board, project })),
         )
       }
-    }
-    return { projects, boards }
+      return { projects, boards }
+    })()
+    workspaceRequests.set(key, request)
+    void request
+      .finally(() => {
+        if (workspaceRequests.get(key) === request) workspaceRequests.delete(key)
+      })
+      .catch(() => {})
+    return request
   },
   async flushCloud() {
     if (!activeUserId) return
@@ -585,7 +553,6 @@ export const workspaceApi = {
     setWorkspaceIdentity(userId)
     const generation = activation
     await workspaceStore.bootstrap()
-    await downloadWorkspace(userId)
     if (activation !== generation || activeUserId !== userId) return
     const claimedProjectIds = await workspaceStore.claimLocalProjects(userId)
     claimedProjectIds.forEach((projectId) => dirtyProjectIds.add(projectId))

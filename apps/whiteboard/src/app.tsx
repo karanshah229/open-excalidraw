@@ -1,11 +1,12 @@
 import { Link, Outlet, useLocation } from '@tanstack/react-router'
-import { useEffect } from 'react'
+import { useLayoutEffect } from 'react'
 import { PanelsTopLeft } from 'lucide-react'
 import { ThemeProvider } from './lib/theme-context'
 import { UserProvider } from './lib/user-context'
 import { UserDropdown } from './components/user-dropdown'
 import { SignInScreen } from './components/sign-in-screen'
 import { AuthProvider, useAuth } from './lib/auth-context'
+import { WorkspaceLoading } from './components/workspace-loading'
 import { workspaceApi } from './features/workspace/workspace-api'
 
 export function AppShell() {
@@ -25,7 +26,7 @@ function AuthenticatedApp() {
   const isBoard = location.pathname.startsWith('/boards')
   const showBrandName = !isBoard && !isProject
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!user || user.isAnonymous) {
       workspaceApi.deactivateCloudWorkspace()
       return
@@ -35,7 +36,7 @@ function AuthenticatedApp() {
       .catch((error) => console.error('Workspace activation failed:', error))
   }, [user])
 
-  if (isLoading) return <main className="workspace-loading workspace-loading--full">Checking your account…</main>
+  if (isLoading) return <WorkspaceLoading />
   if (
     (!user || user.isAnonymous) &&
     !isBoard &&

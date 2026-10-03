@@ -85,12 +85,24 @@ async function page(role, path = '') {
   await page.setViewport({ width: 1400, height: 1000 })
   page.on('dialog', (dialog) => dialog.accept())
   page.on('pageerror', (error) => failures.push({ role, error: error.message }))
+  const requestStarts = new WeakMap()
   page.on('response', (response) => {
     if (/127\.0\.0\.1:(25001|28080|29099|29199)/.test(response.url()))
-      requests.push({ role, status: response.status(), method: response.request().method(), url: response.url() })
+      requests.push({
+        role,
+        status: response.status(),
+        method: response.request().method(),
+        url: response.url(),
+        durationMs: Date.now() - (requestStarts.get(response.request()) ?? Date.now()),
+      })
   })
   await page.setRequestInterception(true)
   page.on('request', (request) => {
+    requestStarts.set(request, Date.now())
+    if (page.delayFunction && request.method() === 'POST' && request.url().includes(`/${page.delayFunction}`)) {
+      setTimeout(() => void request.continue(), 1200)
+      return
+    }
     // Test identities and data must never reach production Firebase endpoints.
     if (/googleapis\.com|firebaseio\.com|cloudfunctions\.net/.test(new URL(request.url()).hostname))
       void request.abort()
@@ -219,6 +231,61 @@ try {
     )
     await owner.goto(base)
     await owner.waitForSelector('[aria-label="Project actions for Project Alpha"]')
+  })
+  await record('Projection deduplication preserves legacy bindings and ignores older revisions', async () => {
+    const projectionApp = initializeApp({ projectId, databaseURL: `http://127.0.0.1:29000?ns=${projectId}` })
+    const { mirrorCurrentPolicy } = await import('../functions/lib/project-access.js')
+    const id = 'projection-regression',
+      ref = db.doc(`boardShares/${id}`)
+    await ref.set({
+      ownerId: 'projection-fixture',
+      accessRevision: 3,
+      pending: false,
+      generalAccess: 'restricted',
+      collaborators: {},
+      invitedEmails: [],
+    })
+    await mirrorCurrentPolicy('board', id)
+    await ref.update({ projectId: 'bound-parent' })
+    await Promise.all([mirrorCurrentPolicy('board', id), mirrorCurrentPolicy('board', id)])
+    const bound = (await rtdb.ref(`boardAccess/${id}`).get()).val()
+    assert.equal(bound.projectId, 'bound-parent', 'Same-revision legacy parent bindings must not be skipped')
+    assert.equal(bound.version, 7)
+    await ref.update({ accessRevision: 2, generalAccess: 'anyone_with_link', generalRole: 'editor' })
+    await mirrorCurrentPolicy('board', id)
+    assert.deepEqual((await rtdb.ref(`boardAccess/${id}`).get()).val(), bound, 'Older revisions cannot broaden access')
+    await ref.delete()
+    await rtdb.ref(`boardAccess/${id}`).remove()
+    await require('firebase-admin/app').deleteApp(projectionApp)
+  })
+  await record('Startup uses one scroll-free loader; owned metadata excludes drawings', async () => {
+    owner.delayFunction = 'listSharedProjects'
+    await owner.reload({ waitUntil: 'domcontentloaded' })
+    await owner.waitForSelector('.workspace-startup-loader')
+    assert.equal(await owner.$$eval('.workspace-startup-loader', (nodes) => nodes.length), 1)
+    assert.equal(
+      await owner.$eval('.workspace-startup-loader', (node) => node.textContent.trim()),
+      'Fetching your ideas…',
+    )
+    assert.equal(await owner.evaluate(() => document.documentElement.scrollHeight > innerHeight), false)
+    await owner.waitForSelector(`[data-board-id="${boardId}"]`)
+    owner.delayFunction = null
+    const data = await owner.evaluate(() => window.__projectsTest.projects.projectService.list(undefined, true))
+    assert.ok(data.ownedPolicies.boards.every((policy) => !('scene' in policy)))
+    assert.ok(data.ownedPolicies.boards.every((policy) => policy.ownerId === identities.owner.uid))
+  })
+  await record('Concurrent workspace refreshes share one metadata request', async () => {
+    const before = requests.filter(
+      (request) => request.role === 'owner' && request.method === 'POST' && request.url.includes('/listSharedProjects'),
+    ).length
+    await owner.evaluate(async () => {
+      const api = window.__projectsTest.workspace.workspaceApi
+      await Promise.all([api.listWorkspace(), api.listWorkspace(), api.listWorkspace()])
+    })
+    const after = requests.filter(
+      (request) => request.role === 'owner' && request.method === 'POST' && request.url.includes('/listSharedProjects'),
+    ).length
+    assert.equal(after - before, 1, 'Overlapping refreshes must not duplicate metadata calls')
   })
   await record('Updated drawing refreshes thumbnail immediately after logo navigation', async () => {
     await owner.waitForSelector(`[data-board-id="${boardId}"] .board-preview-svg`)
@@ -384,6 +451,19 @@ try {
     assert.equal(await deniedGuest.$('.workspace-filters'), null)
     await deniedGuest.browserContext().close()
     await outsider.goto(base)
+  })
+  await record('Owned policy metadata is complete and never exposes another account or drawings', async () => {
+    const data = await owner.evaluate(() => window.__projectsTest.projects.projectService.list(undefined, true))
+    assert.ok(data.ownedPolicies.projects.some((policy) => policy.projectId === project.id))
+    assert.ok(data.ownedPolicies.boards.some((policy) => policy.boardId === boardId && policy.accessRevision))
+    assert.ok(
+      data.ownedPolicies.boards.every((policy) => !('scene' in policy) && policy.ownerId === identities.owner.uid),
+    )
+    const others = await viewer.evaluate(() => window.__projectsTest.projects.projectService.list(undefined, true))
+    assert.equal(
+      others.ownedPolicies.boards.some((policy) => policy.boardId === boardId),
+      false,
+    )
   })
   await record('Shared board cards preserve Share without a redundant privacy menu', async () => {
     await owner.$eval(`[data-board-id="${boardId}"] [aria-label="Share board"]`, (node) => node.click())
@@ -1102,6 +1182,9 @@ try {
       await editor.$eval('.project-dialog-footer', (node) => getComputedStyle(node).justifyContent),
       'flex-end',
     )
+    assert.equal(await editor.$eval('.project-delete-dialog', (node) => node.offsetWidth), 400)
+    assert.equal(await editor.$eval('.project-delete-btn', (node) => getComputedStyle(node).paddingLeft), '16px')
+    await editor.screenshot({ path: `${out}/delete-project-compact.png` })
     await clickText(editor, 'Delete project')
     await editor.waitForFunction(() => !document.querySelector('[role="dialog"]'), { timeout: 60000 })
     assert.ok((await project.ref.get()).data().deletedAt)

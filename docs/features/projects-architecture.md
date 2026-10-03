@@ -146,3 +146,17 @@ See [requirements and rollout instructions](projects-and-bulk-download.md) for t
 ## UI regression validation
 
 Latest validation: 27 Puppeteer browser/network scenarios passed, with 819 Firebase network responses and no browser errors. Tests use Firebase CLI demo emulators; the manual preview on port 5174 uses the real development Firebase project. The suite includes real pointer clicks for export formats, immediate drawing-preview refresh on logo navigation, the reference filter panel/reset/empty state, and Restricted preserving direct invitees. Build, workspace type checks and lint pass (four pre-existing lint warnings).
+
+## Startup and sharing latency
+
+Startup uses one fixed, viewport-sized “Fetching your ideas…” screen for both authentication and workspace discovery. Workspace identity is set in a layout effect before homepage queries start. Owned content hydrates through the existing live listeners; the separate initial download pass was removed. Reload no longer downloads the same workspace once and then hydrates it again through listener snapshots.
+
+One homepage callable returns shared project discovery plus account-owned project/board sharing metadata. Admin queries use field masks and omit scenes. Personal archive preferences are read once as a collection, in parallel with that callable and local bootstrap. Overlapping refreshes reuse the same in-flight promise, scoped by account, activation generation, and project filter. Owned local content is read after metadata returns so it includes concurrent listener hydration. Direct permissions remain account-scoped; anonymous callers cannot request owned policies.
+
+First-time project sharing reads policies concurrently and publishes missing boards in batches of eight after one cloud flush. Later changes skip already-published boards. Permission mutation returns the exact pending and committed transaction snapshots for RTDB projection, avoiding two redundant Firestore rereads. Identical projections abort duplicate writes; newer revisions stay monotonic, while same-revision legacy parent bindings still update. Both pending and committed permission barriers remain awaited before a sharing save is acknowledged.
+
+Done stays disabled until the server confirms the permission update. Cloud Functions cold starts and user-to-region network latency can still contribute; these changes remove redundant work without treating unconfirmed permissions as saved. Delete confirmation is 400px wide (viewport-constrained on mobile), with 16px horizontal Delete button padding.
+
+Validation of this performance follow-up: 31 browser/network scenarios passed with 608 Firebase network responses and zero browser errors. The regression explicitly checks one loader/no overflow, shared in-flight requests, metadata ownership and absent scenes, 400px delete sizing/padding, legacy same-revision bindings, and rejection of older projection revisions. Workspace type checks, frontend build, formatting, and lint pass (four existing warnings). Emulator request medians were 34ms for project saves and 10ms for metadata; these are controlled-test measurements, not real-user latency promises.
+
+Updated the affected callable/projection functions in `open-excalidraw-dev-2`; live endpoint checks return 401 for unauthenticated owned-policy requests and 200 with empty discovery for anonymous ordinary listing. The preview remains on port 5174 with real Firebase dev; production is unchanged.

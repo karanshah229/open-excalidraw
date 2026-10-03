@@ -1,7 +1,7 @@
 import { connectFunctionsEmulator, getFunctions, httpsCallable } from 'firebase/functions'
 import { getFirebaseApp, getSyncAccessFunctionRegion } from '../../lib/firebase'
 import type { BoardDocument, Project } from '@agentic-whiteboard/storage'
-import type { ShareAccessLevel, ShareRole } from './sharing-service'
+import type { BoardShareConfig, ShareAccessLevel, ShareRole } from './sharing-service'
 
 export type ProjectPolicy = {
   generalAccess: ShareAccessLevel
@@ -46,11 +46,15 @@ export const projectService = {
     action: 'share' | 'private' | 'inherit' | 'delete',
     policy?: ProjectPolicy,
   ) => projectCall('manageBoardAccess', { boardId, projectId, action, ...(policy ? { policy } : {}) }),
-  list: (projectId?: string) =>
-    projectCall<{ projects: VisibleProject[]; boards: VisibleBoard[] }>(
-      'listSharedProjects',
-      projectId ? { projectId } : {},
-    ),
+  list: (projectId?: string, includeOwnedPolicies = false) =>
+    projectCall<{
+      projects: VisibleProject[]
+      boards: VisibleBoard[]
+      ownedPolicies?: { projects: (ProjectPolicy & { projectId: string })[]; boards: BoardShareConfig[] }
+    }>('listSharedProjects', {
+      ...(projectId ? { projectId } : {}),
+      ...(includeOwnedPolicies ? { includeOwnedPolicies } : {}),
+    }),
   createBoard: (projectId: string, name: string) =>
     projectCall<BoardDocument>('createProjectBoard', { projectId, name, boardId: crypto.randomUUID() }),
 }
