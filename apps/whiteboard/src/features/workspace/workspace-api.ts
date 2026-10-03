@@ -233,8 +233,16 @@ function subscribeToRemoteWorkspace(userId: string) {
   projectsListener = onSnapshot(collection(db, 'users', userId, 'projects'), (snapshot) => {
     if (generation !== activation || activeUserId !== userId) return
     for (const projectSnapshot of snapshot.docs) {
-      const project = projectSnapshot.data() as Project
-      void workspaceStore.upsertProject(project).then(emitWorkspaceChange)
+      const stored = projectSnapshot.data() as Project
+      const project: Project = { ...stored, id: projectSnapshot.id, ownerId: userId }
+      if (!project.deletedAt && (stored.ownerId !== userId || stored.id !== project.id))
+        void projectService
+          .manage(project.id, 'repair')
+          .catch((error) => console.error('Legacy project repair failed:', error))
+      void workspaceStore
+        .upsertProject(project)
+        .then(emitWorkspaceChange)
+        .catch((error) => console.error('Cloud project restore failed:', error))
       if (project.deletedAt) {
         projectListeners.get(project.id)?.()
         projectListeners.delete(project.id)
@@ -251,6 +259,8 @@ function subscribeToRemoteWorkspace(userId: string) {
               const boardDocument = change.doc
               const remote = {
                 ...(workspaceValue(boardDocument.data()) as BoardDocument),
+                id: boardDocument.id,
+                projectId: project.id,
                 active: change.type === 'removed' ? false : true,
               }
               void (async () => {

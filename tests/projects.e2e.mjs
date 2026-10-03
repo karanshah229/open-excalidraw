@@ -57,6 +57,8 @@ for (const role of ['owner', 'editor', 'viewer', 'outsider']) {
 const { createServer } = await import(webRequire.resolve('vite'))
 const server = await createServer({
   root: fileURLToPath(new URL('../apps/whiteboard', import.meta.url)),
+  // Keep emulator dependency prebundles separate from the real dev preview.
+  cacheDir: fileURLToPath(new URL('../apps/whiteboard/node_modules/.vite-projects-tests', import.meta.url)),
   server: { host: '127.0.0.1', port: 15186, strictPort: true },
   plugins: [
     {
@@ -231,6 +233,125 @@ try {
     )
     await owner.goto(base)
     await owner.waitForSelector('[aria-label="Project actions for Project Alpha"]')
+  })
+  await record('Cloud projects with legacy owner metadata remain visible on the homepage', async () => {
+    const id = `legacy-owner-${Date.now()}`,
+      board = `${id}-board`,
+      now = new Date().toISOString()
+    const ref = db.doc(`users/${identities.owner.uid}/projects/${id}`)
+    await ref.set({
+      id,
+      name: 'Legacy owner project',
+      ownerId: 'original-environment-user',
+      members: [{ principalId: 'original-environment-user', role: 'owner' }],
+      createdAt: now,
+      updatedAt: now,
+    })
+    await ref
+      .collection('boards')
+      .doc(board)
+      .set({
+        id: board,
+        projectId: id,
+        name: 'Legacy owner board',
+        active: true,
+        scene: { elements: [], appState: {}, files: {} },
+        formatVersion: 1,
+        revision: 1,
+        baseRevision: 1,
+        syncStatus: 'synced',
+        createdAt: now,
+        updatedAt: now,
+        syncAttempts: 0,
+        nextSyncAt: null,
+        lastSyncError: null,
+      })
+    try {
+      await owner.waitForSelector(`[data-board-id="${board}"]`, { timeout: 5000 })
+      const value = await owner.evaluate(async (id) => {
+        const workspace = await window.__projectsTest.workspace.workspaceApi.listWorkspace()
+        return workspace.projects.find((project) => project.id === id)?.ownerId
+      }, id)
+      assert.equal(value, identities.owner.uid, 'Private namespace establishes ownership across environment imports')
+      await until(
+        async () => (await ref.get()).data()?.ownerId === identities.owner.uid,
+        'legacy ownership metadata repaired',
+      )
+      const policy = {
+        boardId: board,
+        ownerId: identities.owner.uid,
+        boardName: 'Legacy owner board',
+        generalAccess: 'restricted',
+        generalRole: 'viewer',
+        collaborators: {},
+        invitedEmails: [],
+        scene: { elements: [], appState: {}, files: {} },
+        createdAt: now,
+        updatedAt: now,
+      }
+      await db.doc(`boardShares/${board}`).set(policy)
+      await until(
+        async () => (await rtdb.ref(`boardAccess/${board}`).get()).val()?.blocked === false,
+        'initial projection',
+      )
+      await rtdb
+        .ref(`boardAccess/${board}`)
+        .set({ ownerId: identities.owner.uid, publicRead: false, publicWrite: false })
+      const staleDenied = await owner.evaluate(async (board) => {
+        const t = window.__projectsTest
+        try {
+          await t.database.get(t.database.ref(t.firebase.getFirebaseRtdb(), `boards/${board}/elements`))
+          return false
+        } catch {
+          return true
+        }
+      }, board)
+      assert.equal(staleDenied, true, 'Legacy projection reproduces the export permission failure')
+      const exported = await owner.evaluate(async (id) => {
+        const result = await window.__projectsTest.exports.exportBoards({
+          projectId: id,
+          formats: ['excalidraw', 'svg', 'png'],
+        })
+        return { files: result.fileNames, failures: result.failures }
+      }, id)
+      assert.deepEqual(exported.failures, [])
+      assert.equal(exported.files.length, 3)
+      assert.equal((await rtdb.ref(`boardAccess/${board}`).get()).val().blocked, false)
+      assert.deepEqual(
+        (await db.doc(`boardShares/${board}`).get()).data(),
+        policy,
+        'Projection repair preserves sharing and drawing data',
+      )
+      const projectPolicy = db.doc(`projectShares/${id}`)
+      await projectPolicy.set({ ownerId: identities.editor.uid, generalAccess: 'restricted', generalRole: 'viewer' })
+      const denied = await owner.evaluate(async (id) => {
+        try {
+          await window.__projectsTest.projects.projectService.manage(id, 'repair')
+          return false
+        } catch (error) {
+          return error.code === 'functions/permission-denied'
+        }
+      }, id)
+      assert.equal(denied, true, 'Repair cannot reassign an existing policy owned by someone else')
+      assert.equal((await projectPolicy.get()).data().ownerId, identities.editor.uid)
+      await projectPolicy.delete()
+    } finally {
+      await ref.update({ deletedAt: new Date().toISOString() })
+      const deletedDenied = await owner.evaluate(async (id) => {
+        try {
+          await window.__projectsTest.projects.projectService.manage(id, 'repair')
+          return false
+        } catch (error) {
+          return error.code === 'functions/permission-denied'
+        }
+      }, id)
+      assert.equal(deletedDenied, true, 'Repair cannot restore a deleted project')
+      await db.doc(`projectShares/${id}`).delete()
+      await owner.waitForFunction((board) => !document.querySelector(`[data-board-id="${board}"]`), {}, board)
+      await ref.collection('boards').doc(board).delete()
+      await db.doc(`boardShares/${board}`).delete()
+      await ref.delete()
+    }
   })
   await record('Projection deduplication preserves legacy bindings and ignores older revisions', async () => {
     const projectionApp = initializeApp({ projectId, databaseURL: `http://127.0.0.1:29000?ns=${projectId}` })

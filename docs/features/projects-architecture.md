@@ -145,7 +145,7 @@ See [requirements and rollout instructions](projects-and-bulk-download.md) for t
 
 ## UI regression validation
 
-Latest validation: 34 Puppeteer browser/network scenarios passed, with 801 Firebase network responses and no browser errors. Tests use Firebase CLI demo emulators; the manual preview on port 5174 uses the real development Firebase project. The suite includes real pointer clicks for export formats, immediate drawing-preview refresh on logo navigation, the reference filter panel/reset/empty state, and Restricted preserving direct invitees. Build, workspace type checks and lint pass (four pre-existing lint warnings).
+Latest validation: 35 Puppeteer browser/network scenarios passed, with 899 Firebase network responses and no browser errors. Tests use Firebase CLI demo emulators; the manual preview on port 5174 uses the real development Firebase project. The suite includes real pointer clicks for export formats, immediate drawing-preview refresh on logo navigation, the reference filter panel/reset/empty state, and Restricted preserving direct invitees. Build, workspace type checks and lint pass (four pre-existing lint warnings).
 
 ## Startup and sharing latency
 
@@ -160,3 +160,5 @@ Done stays disabled until the server confirms the permission update. Cloud Funct
 Validation of this performance follow-up: 31 browser/network scenarios passed with 608 Firebase network responses and zero browser errors. The regression explicitly checks one loader/no overflow, shared in-flight requests, metadata ownership and absent scenes, 400px delete sizing/padding, legacy same-revision bindings, and rejection of older projection revisions. Workspace type checks, frontend build, formatting, and lint pass (four existing warnings). Emulator request medians were 34ms for project saves and 10ms for metadata; these are controlled-test measurements, not real-user latency promises.
 
 Updated the affected callable/projection functions in `open-excalidraw-dev-2`; live endpoint checks return 401 for unauthenticated owned-policy requests and 200 with empty discovery for anonymous ordinary listing. The preview remains on port 5174 with real Firebase dev; production is unchanged.
+
+Cloud hydration derives owned identity from private namespace paths and repairs import-era project metadata through an owner-scoped transaction, guarded against foreign sharing policies and deleted projects. Owner exports repair outdated live-access projections only after a denied read, then retry normal authorization. See the legacy-workspace follow-up in the feature notes.

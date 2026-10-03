@@ -38,7 +38,7 @@ export async function projectCall<T>(name: string, data: Record<string, unknown>
   return (await httpsCallable<Record<string, unknown>, T>(functions, name)(data)).data
 }
 export const projectService = {
-  manage: (projectId: string, action: 'share' | 'rename' | 'delete', extra: Record<string, unknown> = {}) =>
+  manage: (projectId: string, action: 'share' | 'rename' | 'delete' | 'repair', extra: Record<string, unknown> = {}) =>
     projectCall('manageProject', { projectId, action, ...extra }),
   boardAccess: (
     boardId: string,

@@ -132,6 +132,27 @@ export const manageProject = onCall({ region }, async (request) => {
     projectId = id(request.data?.projectId),
     action = request.data?.action
   const db = getFirestore()
+  if (action === 'repair') {
+    // Private namespace ownership is authoritative for legacy/imported projects.
+    // An existing global policy owned elsewhere must never be reassigned.
+    const ref = db.doc(`users/${uid}/projects/${projectId}`)
+    await db.runTransaction(async (tx) => {
+      const [snapshot, policy] = await Promise.all([tx.get(ref), tx.get(db.doc(`projectShares/${projectId}`))])
+      if (!snapshot.exists || snapshot.data()?.deletedAt || (policy.exists && policy.data()?.ownerId !== uid))
+        fail('Owned project repair required.')
+      const project = snapshot.data()!
+      if (project.ownerId === uid && project.id === projectId) return
+      tx.update(ref, {
+        id: projectId,
+        ownerId: uid,
+        members: [
+          { principalId: uid, role: 'owner' },
+          ...(project.members ?? []).filter((member: Policy) => member.role !== 'owner' && member.principalId !== uid),
+        ],
+      })
+    })
+    return { ok: true }
+  }
   const currentPolicy = await db.doc(`projectShares/${projectId}`).get()
   const ownerId = currentPolicy.data()?.ownerId ?? uid
   const email = verifiedEmail(request)
