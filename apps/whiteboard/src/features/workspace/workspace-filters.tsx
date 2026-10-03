@@ -229,6 +229,7 @@ export function WorkspaceFilters(props: FilterProps) {
 }
 
 export function FilterCheck({
+  disabled = false,
   checked,
   onCheckedChange,
   label,
@@ -236,10 +237,11 @@ export function FilterCheck({
   checked: boolean
   onCheckedChange: () => void
   label: string
+  disabled?: boolean
 }) {
   return (
     <label className="filter-check">
-      <Checkbox.Root checked={checked} onCheckedChange={onCheckedChange} className="checkbox-root">
+      <Checkbox.Root disabled={disabled} checked={checked} onCheckedChange={onCheckedChange} className="checkbox-root">
         <Checkbox.Indicator className="checkbox-indicator">
           <Check size={11} strokeWidth={2.5} />
         </Checkbox.Indicator>

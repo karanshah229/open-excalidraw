@@ -46,14 +46,16 @@ export const projectService = {
     action: 'share' | 'private' | 'inherit' | 'delete',
     policy?: ProjectPolicy,
   ) => projectCall('manageBoardAccess', { boardId, projectId, action, ...(policy ? { policy } : {}) }),
-  list: (projectId?: string, includeOwnedPolicies = false) =>
+  list: (projectId?: string, includeOwnedPolicies = false, includeDirectBoards = false) =>
     projectCall<{
       projects: VisibleProject[]
       boards: VisibleBoard[]
+      directBoards?: (VisibleBoard & { project: VisibleProject })[]
       ownedPolicies?: { projects: (ProjectPolicy & { projectId: string })[]; boards: BoardShareConfig[] }
     }>('listSharedProjects', {
       ...(projectId ? { projectId } : {}),
       ...(includeOwnedPolicies ? { includeOwnedPolicies } : {}),
+      ...(includeDirectBoards ? { includeDirectBoards } : {}),
     }),
   createBoard: (projectId: string, name: string) =>
     projectCall<BoardDocument>('createProjectBoard', { projectId, name, boardId: crypto.randomUUID() }),

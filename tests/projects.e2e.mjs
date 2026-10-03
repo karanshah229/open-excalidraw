@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import puppeteer from 'puppeteer-core'
 
 const require = createRequire(new URL('../functions/package.json', import.meta.url))
@@ -1162,6 +1162,351 @@ try {
       await clickText(owner, 'Close')
       await owner.goto(base)
       await owner.waitForSelector('[aria-label="Project actions for Project Beta"]')
+    },
+  )
+  await record(
+    'Account export discovers cold cloud inventory and preserves conflict copies without writes',
+    async () => {
+      const fixtureId = `export-${Date.now()}`,
+        id = `${fixtureId}-board`,
+        inheritedId = `${fixtureId}-inherited`
+      const now = new Date().toISOString(),
+        uid = identities.owner.uid
+      const parent = db.doc(`users/${uid}/projects/${fixtureId}`)
+      const scene = {
+        elements: [
+          {
+            id: 'conflict-shape',
+            type: 'rectangle',
+            x: 0,
+            y: 0,
+            width: 90,
+            height: 80,
+            angle: 0,
+            strokeColor: '#000000',
+            backgroundColor: 'transparent',
+            fillStyle: 'solid',
+            strokeWidth: 1,
+            strokeStyle: 'solid',
+            roughness: 1,
+            opacity: 100,
+            groupIds: [],
+            frameId: null,
+            roundness: null,
+            seed: 1,
+            version: 1,
+            versionNonce: 1,
+            isDeleted: false,
+            boundElements: null,
+            updated: 1,
+            link: null,
+            locked: false,
+          },
+        ],
+        appState: {},
+        files: {},
+      }
+      const metadata = {
+        id: fixtureId,
+        name: 'Cloud backup fixture',
+        ownerId: uid,
+        members: [],
+        createdAt: now,
+        updatedAt: now,
+      }
+      await parent.set(metadata)
+      const policy = {
+        ownerId: uid,
+        ownerEmail: identities.owner.email,
+        ownerName: 'owner',
+        createdAt: now,
+        updatedAt: now,
+        generalAccess: 'restricted',
+        generalRole: 'viewer',
+        collaborators: {},
+        invitedEmails: [],
+        accessRevision: 1,
+      }
+      await db.doc(`projectShares/${fixtureId}`).set({
+        ...policy,
+        projectId: fixtureId,
+        name: metadata.name,
+        collaborators: {
+          [identities.viewer.email]: { email: identities.viewer.email, role: 'viewer', addedAt: now },
+        },
+        invitedEmails: [identities.viewer.email],
+      })
+      for (const board of [id, inheritedId]) {
+        await parent
+          .collection('boards')
+          .doc(board)
+          .set({
+            id: board,
+            projectId: fixtureId,
+            name: board === id ? 'Conflict copy' : 'Inherited copy',
+            active: true,
+            scene,
+            formatVersion: 1,
+            createdAt: now,
+            updatedAt: now,
+            revision: 4,
+            baseRevision: 4,
+            syncStatus: 'synced',
+            syncAttempts: 0,
+            nextSyncAt: null,
+            lastSyncError: null,
+          })
+        await db.doc(`boardShares/${board}`).set({
+          ...policy,
+          boardId: board,
+          projectId: fixtureId,
+          boardName: board === id ? 'Conflict copy' : 'Inherited copy',
+          scene,
+          inheritProjectAccess: board !== id,
+          ...(board === id
+            ? {
+                collaborators: {
+                  [identities.outsider.email]: { email: identities.outsider.email, role: 'viewer', addedAt: now },
+                },
+                invitedEmails: [identities.outsider.email],
+              }
+            : {}),
+        })
+      }
+      await until(
+        async () => (await rtdb.ref(`boardAccess/${inheritedId}`).get()).val()?.projectId === fixtureId,
+        'export fixture projected',
+      )
+      // Keep the fixture across the next scenarios; only demo-emulator resources are used.
+      globalThis.exportFixture = { fixtureId, id, inheritedId, parent, scene }
+      const before = (await parent.collection('boards').doc(id).get()).data()
+      const exported = await owner.evaluate(
+        async ({ fixtureId, id, scene }) => {
+          const t = window.__projectsTest,
+            store = t.workspace.workspaceStore
+          const list = store.listProjects,
+            load = store.loadBoard
+          store.listProjects = async () => []
+          store.loadBoard = async (key) =>
+            key === id
+              ? {
+                  id,
+                  projectId: fixtureId,
+                  name: 'Conflict copy',
+                  active: true,
+                  scene: { ...scene, elements: [{ ...scene.elements[0], width: 200, version: 2 }] },
+                  syncStatus: 'conflict',
+                  revision: 5,
+                  baseRevision: 3,
+                }
+              : load.call(store, key)
+          try {
+            const result = await t.exports.exportBoards({ projectId: fixtureId, formats: ['excalidraw', 'svg', 'png'] })
+            const prior = {
+              ...result,
+              files: {},
+              fileNames: result.fileNames.filter((name) => !name.endsWith(`${id}-cloud.png`)),
+              failures: [
+                { boardId: id, boardName: 'Conflict copy', format: 'png', variant: 'cloud', message: 'Retry fixture' },
+              ],
+            }
+            const retried = await t.exports.exportBoards({
+              projectId: fixtureId,
+              formats: ['excalidraw', 'svg', 'png'],
+              previous: prior,
+            })
+            return {
+              retriedFiles: Object.keys(retried.files),
+              files: Object.fromEntries(
+                Object.entries(result.files).map(([name, bytes]) => [
+                  name,
+                  name.endsWith('.excalidraw') ? JSON.parse(new TextDecoder().decode(bytes)) : bytes.length,
+                ]),
+              ),
+              captures: result.captures,
+              failures: result.failures,
+            }
+          } finally {
+            store.listProjects = list
+            store.loadBoard = load
+          }
+        },
+        { fixtureId, id, scene, uid },
+      )
+      assert.deepEqual(exported.failures, [])
+      assert.equal(Object.keys(exported.files).length, 9)
+      assert.equal(exported.retriedFiles.length, 1)
+      assert.ok(exported.retriedFiles[0].endsWith(`${id}-cloud.png`))
+      const local = Object.entries(exported.files).find(([name]) => name.endsWith(`${id}-local.excalidraw`))[1]
+      const cloud = Object.entries(exported.files).find(([name]) => name.endsWith(`${id}-cloud.excalidraw`))[1]
+      assert.equal(local.elements[0].width, 200)
+      assert.equal(cloud.elements[0].width, 90)
+      assert.deepEqual(exported.captures.find((item) => item.boardId === id).variants, ['local', 'cloud'])
+      assert.deepEqual((await parent.collection('boards').doc(id).get()).data(), before)
+    },
+  )
+  await record(
+    'Shared export is opt-in, discovers direct invitations, and excludes private sibling boards',
+    async () => {
+      const { id, inheritedId } = globalThis.exportFixture
+      const exportsFor = (page, includeShared) =>
+        page.evaluate(async (includeShared) => {
+          const result = await window.__projectsTest.exports.exportBoards({ formats: ['excalidraw'], includeShared })
+          return { names: result.fileNames, failures: result.failures }
+        }, includeShared)
+      assert.equal((await exportsFor(viewer, false)).names.length, 0)
+      const invited = await exportsFor(viewer, true)
+      assert.ok(invited.names.some((name) => name.includes(inheritedId)))
+      assert.ok(
+        !invited.names.some((name) => name.includes(`${id}.`)),
+        'Project invite cannot read custom private board',
+      )
+      const direct = await exportsFor(outsider, true)
+      assert.ok(
+        direct.names.some((name) => name.includes(`${id}.`)),
+        'Individual invitation discoverable without project membership',
+      )
+      assert.ok(
+        !direct.names.some((name) => name.includes(inheritedId)),
+        'Direct board invitation cannot read siblings',
+      )
+      await viewer.goto(`${base}/settings?tab=account`)
+      await viewer.waitForSelector('h2')
+      await clickText(viewer, 'Download all boards')
+      const checkbox = await viewer.waitForSelector('[role="dialog"] .filter-check [role="checkbox"]')
+      assert.equal(await checkbox.evaluate((node) => node.getAttribute('data-state')), 'unchecked')
+      await checkbox.click()
+      assert.equal(await checkbox.evaluate((node) => node.getAttribute('data-state')), 'checked')
+      await clickText(viewer, 'Download ZIP')
+      await viewer.waitForFunction(
+        () => {
+          const node = document.querySelector('[role="dialog"]')
+          return node?.textContent.includes('files downloaded.') && !node?.textContent.includes('Preparing')
+        },
+        { timeout: 60000 },
+      )
+      await clickText(viewer, 'Close')
+      await db.doc(`boardShares/${id}`).update({ collaborators: {}, invitedEmails: [], accessRevision: 2 })
+      const revoked = await exportsFor(outsider, true)
+      assert.ok(!revoked.names.some((name) => name.includes(`${id}.`)), 'Revoked direct invitation no longer exported')
+    },
+  )
+  await record(
+    'Multipart exports make valid numbered ZIPs, release file buffers, and stop on cancellation',
+    async () => {
+      const { fixtureId, id, inheritedId } = globalThis.exportFixture
+      const downloads = `${out}/multipart-${Date.now()}`
+      await mkdir(downloads, { recursive: true })
+      await owner
+        .createCDPSession()
+        .then((session) => session.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: downloads }))
+      const exported = await owner.evaluate(async (fixtureId) => {
+        const exports = window.__projectsTest.exports
+        const original = await exports.exportBoards({ projectId: fixtureId, formats: ['excalidraw'] })
+        const limit = Math.max(...Object.values(original.files).map((bytes) => bytes.length))
+        const oversized = await exports.exportBoards({
+          projectId: fixtureId,
+          formats: ['excalidraw'],
+          maxArchiveBytes: 1,
+        })
+        const recovered = await exports.exportBoards({
+          projectId: fixtureId,
+          formats: ['excalidraw'],
+          previous: oversized,
+        })
+        const parts = []
+        const result = await exports.exportBoards({
+          projectId: fixtureId,
+          formats: ['excalidraw'],
+          maxArchiveBytes: limit,
+          onArchiveReady: async (part, number, multipart) => {
+            parts.push({
+              number,
+              multipart,
+              names: Object.keys(part.files),
+              bytes: Object.values(part.files).reduce((sum, bytes) => sum + bytes.length, 0),
+            })
+            await exports.downloadExport(part, undefined, 'multipart-check', multipart ? number : undefined)
+          },
+        })
+        const controller = new AbortController()
+        let aborted = false,
+          count = 0
+        try {
+          await exports.exportBoards({
+            projectId: fixtureId,
+            formats: ['excalidraw'],
+            maxArchiveBytes: limit,
+            signal: controller.signal,
+            onArchiveReady: async () => {
+              count++
+              controller.abort()
+            },
+          })
+        } catch (error) {
+          aborted = error.name === 'AbortError'
+        }
+        let zipFailure = false
+        try {
+          await exports.exportBoards({
+            projectId: fixtureId,
+            formats: ['excalidraw'],
+            maxArchiveBytes: limit,
+            onArchiveReady: async () => {
+              throw new Error('Compression fixture failure')
+            },
+          })
+        } catch {
+          zipFailure = true
+        }
+        return {
+          oversizedFailures: oversized.failures.length,
+          recoveredFiles: recovered.fileNames.length,
+          parts,
+          limit,
+          names: result.fileNames,
+          retained: Object.keys(result.files),
+          archives: result.archiveCount,
+          failures: result.failures,
+          aborted,
+          count,
+          zipFailure,
+        }
+      }, fixtureId)
+      assert.equal(exported.oversizedFailures, 2)
+      assert.equal(exported.recoveredFiles, 2)
+      assert.equal(exported.parts.length, 2)
+      assert.ok(exported.parts.every((part) => part.multipart && part.bytes <= exported.limit))
+      assert.deepEqual(exported.retained, [])
+      assert.equal(exported.archives, 2)
+      assert.deepEqual(exported.failures, [])
+      assert.equal(new Set(exported.parts.flatMap((part) => part.names)).size, 2)
+      assert.equal(exported.aborted, true)
+      assert.equal(exported.count, 1)
+      assert.equal(exported.zipFailure, true)
+      await until(
+        async () => (await readdir(downloads)).filter((name) => name.endsWith('.zip')).length === 2,
+        'numbered ZIP parts downloaded',
+      )
+      const { unzipSync } = webRequire('fflate')
+      for (const [index, name] of (await readdir(downloads))
+        .filter((name) => name.endsWith('.zip'))
+        .sort()
+        .entries()) {
+        assert.ok(name.endsWith(`-part-00${index + 1}.zip`))
+        const files = unzipSync(await readFile(`${downloads}/${name}`))
+        const manifest = JSON.parse(new TextDecoder().decode(files['manifest.json']))
+        assert.equal(manifest.partNumber, index + 1)
+        assert.equal(manifest.files.length, 1)
+        assert.ok(files[manifest.files[0]])
+      }
+      const { parent } = globalThis.exportFixture
+      for (const board of [id, inheritedId]) {
+        await parent.collection('boards').doc(board).delete()
+        await db.doc(`boardShares/${board}`).delete()
+      }
+      await parent.delete()
+      await db.doc(`projectShares/${fixtureId}`).delete()
     },
   )
   await record('Soft delete blocks direct links and stale scene saves; data retained', async () => {

@@ -94,9 +94,9 @@ These are proposals, not accepted user decisions:
 
 - Confirmed update: project editors have the same Share, Rename, Download, Archive, and Delete project actions as owners, including editors granted access through a public editor link. Individual board privacy/deletion/direct sharing remain owner-only. Project deletion by an editor still disables all child board links; project/board ownership stays with the original owner. Personal archive/unarchive remains per-user.
 - Project deletion blocks all contained board links. Confirm the restore/retention policy; do not implement physical purging until specified.
-- Readable boards remain downloadable unless the product explicitly introduces a download restriction. Account-wide export still includes only owned boards.
+- Readable boards remain downloadable unless the product explicitly introduces a download restriction. Account-wide export defaults to owned boards; the optional Include shared boards checkbox adds invited shared projects and direct board invitations.
 - Recommend including archived owned projects in account-wide download, excluding deleted content by default; confirm scope.
-- Determine the supported format list from the installed editor/export capabilities. Do not promise PDF or other formats without implementing and validating them. The checkbox dropdown must keep selections open, prevent an empty selection, and report per-board/per-format failures.
+- Determine the supported format list from the installed editor/export capabilities. Do not promise PDF or other formats without implementing and validating them. The checkbox dropdown keeps selections open, disables download with no formats selected, and reports per-board/per-format failures.
 
 ## Additional UI and live-access review
 
@@ -238,3 +238,15 @@ Download format menus render above modal content and are tested with real pointe
 ### Reload and save performance review
 
 Follow-up requirements: speed up project email additions and app reload, use a single witty startup loader, and shrink Delete to 400px with narrower button padding. Implemented “Fetching your ideas…”, batched scene-free sharing metadata, parallel archive preferences, account/generation-scoped in-flight request deduplication, and single listener-driven workspace hydration. Sharing retains both security barriers but removes redundant projection reads/writes and parallelizes initial publication in bounded batches. See the architecture document for remaining cold-start/network limits.
+
+### Account export follow-up
+
+Confirmed: preserve both local and cloud versions when a board has a sync conflict; split large exports into numbered ZIPs; add an unchecked Include shared boards checkbox. Settings → Account → Your data remains the entry point. Owned projects include collaborators' creations and archived content; deleted projects/boards are excluded.
+
+Cloud project discovery runs independently of local workspace hydration. Local inventory, cloud projects, and optional shared discovery start concurrently. `listSharedProjects` accepts opt-in `includeDirectBoards`; it returns only verified direct invitations that still have readable policy and active parents/boards, without private parent names or sibling metadata. It does not enumerate arbitrary public-link boards. Permission is checked again when capturing each scene. Shared exports do not use another owner's cached local drafts.
+
+Conflict copies use `-local` and `-cloud` filename suffixes for every selected format. The cloud copy contains server snapshots/live deltas; the local copy keeps the current device's scene. Exports never resolve conflicts or publish edits. Manifests record variants and failures; retries skip successful board/format/version combinations.
+
+The modal streams output into ZIP parts with a 256 MB uncompressed-file budget per part, compresses/downloads each part before proceeding, and releases exported file buffers. Multipart names end in `-part-001.zip`, `-part-002.zip`, etc.; each part contains a manifest. An individual file over the part budget is reported as a failure; other files continue. PNG remains capped at 8192 pixels. Browsers may require permission to download multiple files. Input scene loading and browser download buffers still use memory; this is not a strict cap on total browser memory. Snapshot consistency remains per board, and offline edits on other devices are unavailable.
+
+Validation: `34` Puppeteer browser/network scenarios passed through Firebase CLI demo emulators, with `801` Firebase network responses and `0` browser errors. Added coverage for cold cloud inventory, all three formats of distinct conflict copies, version-specific retries, optional shared/direct invitations and revoked/private exclusions, real checkbox clicks, valid numbered ZIP manifests, oversized-file recovery, cancellation, and archive failures. Workspace type checks, frontend build, lint, formatting, and diff checks pass (four existing lint warnings). `listSharedProjects` was updated in `open-excalidraw-dev-2`; anonymous live discovery still returns no private data. Production is unchanged.

@@ -4282,3 +4282,7 @@ button {
     border-color: var(--accent);
   }
 }
+
+.download-shared-option {
+  margin-bottom: 20px;
+}

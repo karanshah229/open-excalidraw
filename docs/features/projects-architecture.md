@@ -11,7 +11,7 @@ flowchart TB
     Workspace["workspaceApi<br/>Owned sync, discovery and archive"]
     Sharing["projectService + sharingService"]
     Local[("RxDB / IndexedDB<br/>Owned boards and unsynced edits<br/>Queries scoped by account")]
-    Export["Shared export pipeline<br/>Project scope or owned-account scope"]
+    Export["Shared export pipeline<br/>Project scope or account scope"]
   end
 
   subgraph Firebase[Firebase backend]
@@ -131,7 +131,7 @@ flowchart LR
   Retry --> Capture
 ```
 
-Export does not publish local changes or alter sharing. Cancellation and account-change checks stop further processing. Snapshot consistency is per board; another device's offline edits are unavailable. The archive has a 256 MB uncompressed-content limit and PNG dimensions are capped at 8192. Shared listings currently refresh every ten seconds; large-project listing/publication pagination remains a scale limitation.
+Export does not publish local changes or alter sharing. Cancellation and account-change checks stop further processing. Snapshot consistency is per board; another device's offline edits are unavailable. Exports stream into numbered ZIP parts with a 256 MB uncompressed-file budget per part; a single oversized file is reported as a failure. PNG dimensions are capped at 8192. Account scope defaults to owned boards, with opt-in invited shared projects/direct board invitations. Explicit sync conflicts or a changed cloud base preserve separate local/cloud copies. See the account-export follow-up in the feature notes for memory limits and retry behavior. Shared listings currently refresh every ten seconds; large-project listing/publication pagination remains a scale limitation.
 
 Implementation entry points:
 
@@ -145,7 +145,7 @@ See [requirements and rollout instructions](projects-and-bulk-download.md) for t
 
 ## UI regression validation
 
-Latest validation: 27 Puppeteer browser/network scenarios passed, with 819 Firebase network responses and no browser errors. Tests use Firebase CLI demo emulators; the manual preview on port 5174 uses the real development Firebase project. The suite includes real pointer clicks for export formats, immediate drawing-preview refresh on logo navigation, the reference filter panel/reset/empty state, and Restricted preserving direct invitees. Build, workspace type checks and lint pass (four pre-existing lint warnings).
+Latest validation: 34 Puppeteer browser/network scenarios passed, with 801 Firebase network responses and no browser errors. Tests use Firebase CLI demo emulators; the manual preview on port 5174 uses the real development Firebase project. The suite includes real pointer clicks for export formats, immediate drawing-preview refresh on logo navigation, the reference filter panel/reset/empty state, and Restricted preserving direct invitees. Build, workspace type checks and lint pass (four pre-existing lint warnings).
 
 ## Startup and sharing latency
 

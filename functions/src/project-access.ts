@@ -316,7 +316,15 @@ export const listSharedProjects = onCall({ region }, async (request) => {
           .get()
           .then((snapshot) => snapshot.docs)
       : Promise.resolve([])
-  const [ownedPolicies, policies] = await Promise.all([ownedPromise, policiesPromise])
+  const directPromise =
+    request.data?.includeDirectBoards && uid && email && !targetId
+      ? db
+          .collection('boardShares')
+          .where('invitedEmails', 'array-contains', email)
+          .select(...fields)
+          .get()
+      : Promise.resolve(null)
+  const [ownedPolicies, policies, directSnapshots] = await Promise.all([ownedPromise, policiesPromise, directPromise])
   const projects: Policy[] = [],
     boards: Policy[] = []
   for (const snapshot of policies) {
@@ -384,7 +392,52 @@ export const listSharedProjects = onCall({ region }, async (request) => {
       })
     }
   }
-  return { projects, boards, ...(ownedPolicies ? { ownedPolicies } : {}) }
+  const directBoards: Policy[] = []
+  for (const snapshot of directSnapshots?.docs ?? []) {
+    const config = snapshot.data(),
+      role = policyRole(config, uid, email)
+    if (!role || config.ownerId === uid || boards.some((board) => board.id === snapshot.id)) continue
+    // A direct board invitation does not grant access to its project or sibling boards.
+    let parent: Policy | undefined, board: Policy | undefined
+    if (config.projectId) {
+      const [parentSnapshot, boardSnapshot, projectPolicy] = await db.getAll(
+        db.doc(`users/${config.ownerId}/projects/${config.projectId}`),
+        db.doc(`users/${config.ownerId}/projects/${config.projectId}/boards/${snapshot.id}`),
+        db.doc(`projectShares/${config.projectId}`),
+        { fieldMask: ['name', 'deletedAt', 'pending', 'active', 'createdAt', 'revision'] },
+      )
+      if (projectPolicy.data()?.deletedAt || projectPolicy.data()?.pending) continue
+      parent = parentSnapshot.data()
+      board = boardSnapshot.data()
+      if (!parent || parent.deletedAt || !board || board.active !== true) continue
+    }
+    directBoards.push({
+      id: snapshot.id,
+      projectId: config.projectId ?? `shared-${config.ownerId}`,
+      name: config.boardName ?? board?.name ?? 'Untitled board',
+      active: true,
+      createdAt: board?.createdAt ?? config.createdAt,
+      updatedAt: config.updatedAt,
+      revision: board?.revision ?? 0,
+      baseRevision: board?.revision ?? 0,
+      syncStatus: 'synced',
+      syncAttempts: 0,
+      nextSyncAt: null,
+      lastSyncError: null,
+      role,
+      project: {
+        id: config.projectId ?? `shared-${config.ownerId}`,
+        // Do not disclose a private parent project's name through a board invitation.
+        name: 'Shared boards',
+        ownerId: config.ownerId,
+        members: [],
+        createdAt: config.createdAt,
+        updatedAt: config.updatedAt,
+        isShared: true,
+      },
+    })
+  }
+  return { projects, boards, ...(directSnapshots ? { directBoards } : {}), ...(ownedPolicies ? { ownedPolicies } : {}) }
 })
 
 export const createProjectBoard = onCall({ region }, async (request) => {

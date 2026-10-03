@@ -15,6 +15,7 @@ export function DownloadBoardsModal({
   onClose: () => void
 }) {
   const [formats, setFormats] = useState<ExportFormat[]>(['excalidraw'])
+  const [includeShared, setIncludeShared] = useState(false)
   const [progress, setProgress] = useState<string | null>(null)
   const [result, setResult] = useState<ExportResult | null>(null)
   const [error, setError] = useState('')
@@ -30,12 +31,21 @@ export function DownloadBoardsModal({
       const next = await exportBoards({
         projectId,
         formats,
+        includeShared,
         signal: controller.current.signal,
         previous: retry ? (result ?? undefined) : undefined,
+        onArchiveReady: async (part, number, multipart) => {
+          setProgress(`Downloading ${multipart ? `ZIP part ${number}` : 'ZIP'}…`)
+          await downloadExport(
+            part,
+            controller.current!.signal,
+            projectId ? `${name}-boards` : 'my-boards',
+            multipart ? number : undefined,
+          )
+        },
         onProgress: (done, total) => setProgress(`Preparing ${done} of ${total} boards…`),
       })
       controller.current.signal.throwIfAborted()
-      await downloadExport(next, controller.current.signal, projectId ? `${name}-boards` : 'my-boards')
       setResult(next)
     } catch (error) {
       setError(error instanceof Error ? error.message : 'Download failed.')
@@ -65,8 +75,21 @@ export function DownloadBoardsModal({
             <Dialog.Title className="google-share-title">Download {name}</Dialog.Title>
           </div>
           <Dialog.Description id="download-desc" className="project-dialog-description">
-            Download a ZIP with your boards, images, and unsynced edits.
+            Download your boards, images, and unsynced edits. Large downloads are split into numbered ZIPs.
           </Dialog.Description>
+          {!projectId && (
+            <div className="download-shared-option">
+              <FilterCheck
+                label="Include shared boards"
+                checked={includeShared}
+                disabled={Boolean(progress)}
+                onCheckedChange={() => {
+                  setIncludeShared((value) => !value)
+                  setResult(null)
+                }}
+              />
+            </div>
+          )}
           <div className="download-format-field">
             <span className="download-field-label">File formats</span>
             <Popover.Root>
@@ -117,7 +140,7 @@ export function DownloadBoardsModal({
               </p>
             ) : result ? (
               <p role="status">
-                {Object.keys(result.files).length} files downloaded. {result.failures.length} failed.
+                {result.fileNames.length} files downloaded. {result.failures.length} failed.
               </p>
             ) : (
               <p className="download-hint">Select one or more formats. PNG and SVG include the canvas background.</p>
@@ -125,8 +148,9 @@ export function DownloadBoardsModal({
             {result?.failures.length ? (
               <ul className="export-failures">
                 {result.failures.map((failure) => (
-                  <li key={`${failure.boardId}-${failure.format}`}>
-                    {failure.boardName} ({failure.format}): {failure.message}
+                  <li key={`${failure.boardId}-${failure.format}-${failure.variant ?? 'current'}`}>
+                    {failure.boardName} ({failure.format}
+                    {failure.variant ? `, ${failure.variant} version` : ''}): {failure.message}
                   </li>
                 ))}
               </ul>
