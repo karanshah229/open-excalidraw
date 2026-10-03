@@ -1,8 +1,10 @@
 import { getFirestore } from 'firebase-admin/firestore'
-import { getDatabase } from 'firebase-admin/database'
 import { HttpsError, onCall, type CallableRequest } from 'firebase-functions/v2/https'
 import { defineString } from 'firebase-functions/params'
 import { onDocumentWritten } from 'firebase-functions/v2/firestore'
+import { prepareBoardAccounting } from './account-usage.js'
+import { policyRole, verifiedEmail, mirrorCurrentPolicy, mirrorPolicy } from './access-policy.js'
+export { policyRole, accessProjection, mirrorCurrentPolicy } from './access-policy.js'
 
 const region = defineString('SYNC_ACCESS_FUNCTION_REGION')
 const triggerRegion = defineString('FIRESTORE_FUNCTION_REGION')
@@ -22,23 +24,6 @@ function identity(request: CallableRequest) {
   }
   return request.auth.uid
 }
-export function policyRole(
-  policy: Policy | undefined,
-  uid?: string,
-  email?: string,
-): 'owner' | 'editor' | 'viewer' | null {
-  if (!policy || policy.deletedAt || policy.pending) return null
-  if (uid && policy.ownerId === uid) return 'owner'
-  const direct =
-    email && policy.invitedEmails?.includes(email) ? (policy.collaborators?.[email]?.role ?? 'viewer') : null
-  if (direct === 'editor' || (policy.generalAccess === 'anyone_with_link' && policy.generalRole === 'editor'))
-    return 'editor'
-  if (direct || policy.generalAccess === 'anyone_with_link') return 'viewer'
-  return null
-}
-function verifiedEmail(request: CallableRequest) {
-  return request.auth?.token.email_verified === true ? String(request.auth.token.email ?? '').toLowerCase() : undefined
-}
 function sanitizePolicy(input: Policy): Policy {
   const collaborators: Policy = {}
   for (const [email, value] of Object.entries(input.collaborators ?? {}) as [string, Policy][]) {
@@ -57,36 +42,6 @@ function sanitizePolicy(input: Policy): Policy {
     invitedEmails: Object.keys(collaborators),
   }
 }
-export function accessProjection(policy: Policy): Policy {
-  const emails = Object.keys(policy.collaborators ?? {}).filter((email) => policy.invitedEmails?.includes(email))
-  return {
-    version: Number(policy.accessRevision ?? 0) * 2 + (policy.pending ? 0 : 1),
-    ownerId: policy.ownerId ?? '',
-    projectId: policy.projectId ?? '',
-    inheritProjectAccess: policy.inheritProjectAccess !== false,
-    blocked: Boolean(policy.deletedAt || policy.pending),
-    publicRead: policy.generalAccess === 'anyone_with_link',
-    publicWrite: policy.generalAccess === 'anyone_with_link' && policy.generalRole === 'editor',
-    // Strings avoid invalid RTDB email keys; delimiters make membership exact.
-    readerEmails: `|${emails.join('|')}|`,
-    editorEmails: `|${emails.filter((email) => policy.collaborators[email].role === 'editor').join('|')}|`,
-  }
-}
-async function mirrorPolicy(kind: 'board' | 'project', targetId: string, policy: Policy) {
-  const projection = accessProjection(policy)
-  await getDatabase()
-    .ref(`${kind}Access/${targetId}`)
-    .transaction((current) => {
-      // Callables and repair triggers may mirror the same revision concurrently.
-      if (current && Number(current.version ?? -1) > projection.version) return
-      if (current && Object.entries(projection).every(([key, value]) => current[key] === value)) return
-      return projection
-    })
-}
-export async function mirrorCurrentPolicy(kind: 'board' | 'project', targetId: string) {
-  const snapshot = await getFirestore().doc(`${kind}Shares/${targetId}`).get()
-  if (snapshot.exists) await mirrorPolicy(kind, targetId, snapshot.data()!)
-}
 async function mutatePolicy(
   kind: 'board' | 'project',
   targetId: string,
@@ -97,6 +52,7 @@ async function mutatePolicy(
 ) {
   const db = getFirestore(),
     ref = db.doc(`${kind}Shares/${targetId}`)
+  const accountBoard = kind === 'board' ? await prepareBoardAccounting(ownerId, Boolean(patch.deletedAt)) : null
   const pendingPolicy = await db.runTransaction(async (tx) => {
     const current = await tx.get(ref),
       data = current.data() ?? initial
@@ -107,6 +63,7 @@ async function mutatePolicy(
     const revision = Number(data.accessRevision ?? 0) + 1
     // Replace maps, never recursively merge omitted collaborators.
     const next = { ...data, ...patch, ownerId, accessRevision: revision, pending: true, updatedAt: timestamp() }
+    if (accountBoard) await accountBoard(tx, targetId, [{ ref, data: next }])
     tx.set(ref, next)
     return next
   })
@@ -179,24 +136,31 @@ export const manageProject = onCall({ region }, async (request) => {
     })
   } else if (action === 'share' || action === 'delete') {
     if (action === 'delete') {
+      const accountBoard = await prepareBoardAccounting(ownerId, true)
       const boards = await db.collection(`users/${ownerId}/projects/${projectId}/boards`).get()
       for (const board of boards.docs) {
         const share = db.doc(`boardShares/${board.id}`)
-        if (!(await share.get()).exists)
-          await share.create({
-            boardId: board.id,
-            projectId,
-            ownerId,
-            boardName: board.data().name,
-            generalAccess: 'restricted',
-            generalRole: 'viewer',
-            invitedEmails: [],
-            collaborators: {},
-            inheritProjectAccess: true,
-            accessRevision: 1,
-            pending: false,
-          })
-        else await share.update({ projectId })
+        await db.runTransaction(async (tx) => {
+          const existing = await tx.get(share)
+          if (existing.exists && existing.data()?.ownerId !== ownerId) fail('Board ownership changed.')
+          const next = existing.exists
+            ? { ...existing.data(), projectId }
+            : {
+                boardId: board.id,
+                projectId,
+                ownerId,
+                boardName: board.data().name,
+                generalAccess: 'restricted',
+                generalRole: 'viewer',
+                invitedEmails: [],
+                collaborators: {},
+                inheritProjectAccess: true,
+                accessRevision: 1,
+                pending: false,
+              }
+          await accountBoard(tx, board.id, [{ ref: share, data: next }], projectId)
+          tx.set(share, next)
+        })
         await mirrorCurrentPolicy('board', board.id)
       }
     }
@@ -224,7 +188,7 @@ export const manageProject = onCall({ region }, async (request) => {
   return { ok: true }
 })
 
-export const manageBoardAccess = onCall({ region }, async (request) => {
+export async function changeBoardAccess(request: CallableRequest) {
   const uid = identity(request),
     boardId = id(request.data?.boardId),
     db = getFirestore()
@@ -279,7 +243,8 @@ export const manageBoardAccess = onCall({ region }, async (request) => {
   )
   if (action === 'delete') await board.ref.update({ active: false, updatedAt: timestamp() })
   return { ok: true }
-})
+}
+export const manageBoardAccess = onCall({ region }, changeBoardAccess)
 
 export const listSharedProjects = onCall({ region }, async (request) => {
   const db = getFirestore(),
@@ -470,6 +435,7 @@ export const createProjectBoard = onCall({ region }, async (request) => {
   const role = policyRole(policy, uid, verifiedEmail(request))
   if (role !== 'owner' && role !== 'editor') fail('Project editing access required.')
   const ref = db.doc(`users/${policy!.ownerId}/projects/${projectId}/boards/${boardId}`)
+  const accountBoard = await prepareBoardAccounting(policy!.ownerId)
   const createdAt = timestamp()
   const board = {
     id: boardId,
@@ -492,12 +458,16 @@ export const createProjectBoard = onCall({ region }, async (request) => {
   }
   await db.runTransaction(async (tx) => {
     const parent = await tx.get(db.doc(`projectShares/${projectId}`)),
-      existing = await tx.get(ref)
+      privateParent = await tx.get(db.doc(`users/${policy!.ownerId}/projects/${projectId}`)),
+      existing = await tx.get(ref),
+      existingShare = await tx.get(db.doc(`boardShares/${boardId}`))
     const currentRole = policyRole(parent.data(), uid, verifiedEmail(request))
     if (currentRole !== 'owner' && currentRole !== 'editor') fail('Project editing access was revoked.')
-    if (existing.exists) throw new HttpsError('already-exists', 'Board already exists.')
-    tx.create(ref, board)
-    tx.create(db.doc(`boardShares/${boardId}`), {
+    if (parent.data()?.ownerId !== policy!.ownerId || !privateParent.exists || privateParent.data()?.deletedAt)
+      fail('Project was deleted or ownership changed.')
+    if (existing.exists || existingShare.exists) throw new HttpsError('already-exists', 'Board already exists.')
+    const sharedRef = db.doc(`boardShares/${boardId}`)
+    const sharedBoard = {
       boardId,
       projectId,
       ownerId: policy!.ownerId,
@@ -513,7 +483,19 @@ export const createProjectBoard = onCall({ region }, async (request) => {
       collaborators: {},
       accessRevision: 1,
       pending: false,
-    })
+    }
+    await accountBoard(
+      tx,
+      boardId,
+      [
+        { ref, data: board },
+        { ref: sharedRef, data: sharedBoard },
+      ],
+      projectId,
+      true,
+    )
+    tx.create(ref, board)
+    tx.create(sharedRef, sharedBoard)
   })
   await mirrorCurrentPolicy('board', boardId)
   return board
@@ -527,6 +509,7 @@ export const publishProjectBoard = onDocumentWritten(
     const db = getFirestore(),
       privateRef = db.doc(`users/${ownerId}/projects/${projectId}/boards/${boardId}`)
     const policyRef = db.doc(`boardShares/${boardId}`)
+    const accountBoard = await prepareBoardAccounting(ownerId, true)
     await db.runTransaction(async (tx) => {
       const board = await tx.get(privateRef),
         project = await tx.get(db.doc(`projectShares/${projectId}`)),
@@ -535,14 +518,34 @@ export const publishProjectBoard = onDocumentWritten(
       const data = board.data()!
       if (existing.exists) {
         if (existing.data()?.ownerId !== ownerId) return
-        if (data.active === false && !existing.data()?.deletedAt)
+        if (data.active === false && !existing.data()?.deletedAt) {
+          await accountBoard(
+            tx,
+            boardId,
+            [
+              {
+                ref: policyRef,
+                data: {
+                  ...existing.data(),
+                  deletedAt: timestamp(),
+                  accessRevision: Number(existing.data()?.accessRevision ?? 0) + 1,
+                  pending: false,
+                  projectId,
+                },
+              },
+            ],
+            projectId,
+          )
           tx.update(policyRef, {
             deletedAt: timestamp(),
             accessRevision: Number(existing.data()?.accessRevision ?? 0) + 1,
             pending: false,
             projectId,
           })
-        else if (!existing.data()?.projectId) tx.update(policyRef, { projectId })
+        } else if (!existing.data()?.projectId) {
+          await accountBoard(tx, boardId, [{ ref: policyRef, data: { ...existing.data(), projectId } }], projectId)
+          tx.update(policyRef, { projectId })
+        }
         return
       }
       if (
@@ -552,7 +555,7 @@ export const publishProjectBoard = onDocumentWritten(
         data.active === false
       )
         return
-      tx.create(policyRef, {
+      const next = {
         boardId,
         projectId,
         ownerId,
@@ -568,7 +571,9 @@ export const publishProjectBoard = onDocumentWritten(
         updatedAt: data.updatedAt,
         accessRevision: 1,
         pending: false,
-      })
+      }
+      await accountBoard(tx, boardId, [{ ref: policyRef, data: next }], projectId)
+      tx.create(policyRef, next)
     })
     await mirrorCurrentPolicy('board', boardId)
   },

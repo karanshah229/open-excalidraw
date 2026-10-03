@@ -2,10 +2,12 @@ import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { useNavigate } from '@tanstack/react-router'
 import { LogOut, SlidersHorizontal } from 'lucide-react'
 import { useUser } from '../lib/user-context'
+import { useAccount } from '../features/account/account-panel'
 
 export function UserDropdown() {
   const { user, initials, fullName, logout } = useUser()
   const navigate = useNavigate()
+  const { openPlans } = useAccount()
 
   return (
     <DropdownMenu.Root modal={false}>
@@ -31,6 +33,8 @@ export function UserDropdown() {
           </div>
 
           <DropdownMenu.Separator className="user-dropdown-divider" />
+
+          <DropdownMenu.Item className="user-dropdown-item" onSelect={openPlans}>Plan and cloud usage</DropdownMenu.Item>
 
           <DropdownMenu.Item className="user-dropdown-item" onSelect={() => navigate({ to: '/settings' })}>
             <SlidersHorizontal size={14} className="user-dropdown-item-icon" />

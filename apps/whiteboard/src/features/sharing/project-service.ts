@@ -1,5 +1,4 @@
-import { connectFunctionsEmulator, getFunctions, httpsCallable } from 'firebase/functions'
-import { getFirebaseApp, getSyncAccessFunctionRegion } from '../../lib/firebase'
+import { cloudCall } from '../account/cloud-api'
 import type { BoardDocument, Project } from '@agentic-whiteboard/storage'
 import type { BoardShareConfig, ShareAccessLevel, ShareRole } from './sharing-service'
 
@@ -18,24 +17,9 @@ export type VisibleProject = Project & {
   sharePolicy?: ProjectPolicy
 }
 export type VisibleBoard = BoardDocument & { inheritProjectAccess?: boolean; role?: 'owner' | ShareRole }
-let functions: ReturnType<typeof getFunctions> | undefined
 export async function projectCall<T>(name: string, data: Record<string, unknown>): Promise<T> {
   if (!navigator.onLine) throw new Error('Connect to the internet to update cloud projects and sharing.')
-  const app = getFirebaseApp()
-  if (!app) throw new Error('Sign in to use cloud sharing.')
-  if (!functions) {
-    const region = getSyncAccessFunctionRegion()
-    if (!region) throw new Error('Sharing service region is not configured.')
-    functions = getFunctions(app, region)
-    if (import.meta.env.VITE_USE_FIREBASE_EMULATOR === 'true') {
-      connectFunctionsEmulator(
-        functions,
-        window.location.hostname,
-        Number(import.meta.env.VITE_FIREBASE_FUNCTIONS_EMULATOR_PORT || 5001),
-      )
-    }
-  }
-  return (await httpsCallable<Record<string, unknown>, T>(functions, name)(data)).data
+  return cloudCall<T>(name, data)
 }
 export const projectService = {
   manage: (projectId: string, action: 'share' | 'rename' | 'delete' | 'repair', extra: Record<string, unknown> = {}) =>

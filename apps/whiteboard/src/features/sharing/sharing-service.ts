@@ -1,4 +1,4 @@
-import { doc, getDoc, onSnapshot, updateDoc } from 'firebase/firestore'
+import { doc, getDoc, onSnapshot } from 'firebase/firestore'
 import { onDisconnect, onValue, ref, remove, set } from 'firebase/database'
 import { projectService, type ProjectPolicy } from './project-service'
 import { getFirebaseAuth, getFirebaseRtdb, getFirestoreDb } from '../../lib/firebase'
@@ -6,6 +6,9 @@ import { restoreSceneAssets, storeSceneAssets } from '../assets/scene-assets'
 import { firestoreValue, workspaceStore, workspaceValue } from '../workspace/workspace-api'
 import type { BoardScene } from '@agentic-whiteboard/storage'
 import type { ActiveSessionRecord } from '../collaboration/types'
+import { cloudCall } from '../account/cloud-api'
+import { readGuestRecovery } from './guest-recovery'
+import { reconcileElementsLWW } from '../collaboration/reconcile'
 
 export type ShareAccessLevel = 'restricted' | 'anyone_with_link'
 export type ShareRole = 'viewer' | 'editor'
@@ -30,6 +33,7 @@ export interface BoardShareConfig {
   generalRole: ShareRole
   invitedEmails: string[]
   collaborators: Record<string, BoardCollaborator>
+  hasLocalRecovery?: boolean
   scene?: BoardScene
   createdAt: string
   updatedAt: string
@@ -42,15 +46,6 @@ async function getDocWithTimeout<T>(docRef: any, timeoutMs = 3000): Promise<T> {
   return Promise.race([
     getDoc(docRef) as Promise<T>,
     new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Firestore getDoc timeout')), timeoutMs)),
-  ])
-}
-
-function withFirestoreWriteTimeout<T>(operation: Promise<T>, timeoutMs = 15_000): Promise<T> {
-  return Promise.race([
-    operation,
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`Firestore write acknowledgement timed out after ${timeoutMs}ms`)), timeoutMs),
-    ),
   ])
 }
 
@@ -76,6 +71,7 @@ export const sharingService = {
       ownerName?: string
       ownerEmail?: string
       ownerPhotoURL?: string
+      hasLocalRecovery?: boolean
       scene?: BoardScene
     },
   ): Promise<BoardShareConfig> {
@@ -173,11 +169,16 @@ export const sharingService = {
           updatedAt: new Date().toISOString(),
         }
         if (boardName) updatePayload.boardName = boardName
-        await withFirestoreWriteTimeout(updateDoc(ref, updatePayload))
+        await cloudCall('commitCloudBoard', {
+          mode: 'shared-scene',
+          boardId,
+          operationId: crypto.randomUUID(),
+          document: updatePayload,
+        })
         window.dispatchEvent(new Event('workspace-changed'))
       } catch (error: any) {
         // An unshared board has no share document. Surface actual upload failures.
-        if (error?.code !== 'not-found') throw error
+        if (!['not-found', 'functions/not-found'].includes(error?.code)) throw error
       }
     }
   },
@@ -185,13 +186,12 @@ export const sharingService = {
   async updateSharedScene(boardId: string, scene: BoardScene): Promise<void> {
     const db = getFirestoreDb()
     if (db) {
-      const ref = doc(db, 'boardShares', boardId)
-      await withFirestoreWriteTimeout(
-        updateDoc(ref, {
-          scene: firestoreValue(await storeSceneAssets(scene, `boards/${boardId}/assets`)),
-          updatedAt: new Date().toISOString(),
-        }),
-      )
+      await cloudCall('commitCloudBoard', {
+        mode: 'shared-scene',
+        boardId,
+        operationId: crypto.randomUUID(),
+        document: { scene: firestoreValue(await storeSceneAssets(scene, `boards/${boardId}/assets`)) },
+      })
       window.dispatchEvent(new Event('workspace-changed'))
     }
   },
@@ -316,6 +316,15 @@ export const sharingService = {
     const allowed = async () => {
       sharingService.rememberShareConfig(remoteData!, requestUser)
       if (remoteData!.scene) remoteData!.scene = await restoreSceneAssets(remoteData!.scene)
+      const recovery = await readGuestRecovery(`${getFirebaseAuth()?.currentUser?.uid ?? 'guest'}:${boardId}`)
+      if (recovery && remoteData!.scene) {
+        remoteData!.scene = {
+          ...recovery.scene,
+          elements: reconcileElementsLWW(recovery.scene.elements, remoteData!.scene.elements),
+          files: { ...remoteData!.scene.files, ...recovery.scene.files },
+        }
+        remoteData!.hasLocalRecovery = true
+      }
       return { status: 'allowed' as const, config: remoteData! }
     }
 
@@ -357,6 +366,7 @@ export const sharingService = {
   },
 
   async registerActiveSession(boardId: string, sessionId: string, userId: string): Promise<() => void> {
+    await cloudCall('admitCloudSession', { boardId, sessionId })
     const regKey = `${boardId}:${sessionId}`
     activeSessionRefCount.set(regKey, (activeSessionRefCount.get(regKey) ?? 0) + 1)
 
@@ -377,6 +387,12 @@ export const sharingService = {
     let retryTimer: ReturnType<typeof setTimeout> | undefined
     let retryAttempt = 0
     let publishing = false
+    const renewal = window.setInterval(
+      () => {
+        if (!released) void cloudCall('admitCloudSession', { boardId, sessionId }).catch(() => {})
+      },
+      30 * 60 * 1000,
+    )
     if (sessionRef) {
       const schedulePublicationRetry = () => {
         // A board can be opened just before its Firestore access policy is
@@ -403,6 +419,9 @@ export const sharingService = {
             await disconnect.cancel()
             return
           }
+          await cloudCall('admitCloudSession', { boardId, sessionId })
+          const grantRef = ref(rtdb!, `sessionGrants/${boardId}/${sessionId}`)
+          await onDisconnect(grantRef).remove()
           await set(sessionRef, sessionData)
           retryAttempt = 0
           if (retryTimer) {
@@ -411,7 +430,7 @@ export const sharingService = {
           }
         } catch (err: any) {
           console.warn('[Collab] Could not publish RTDB active session:', err?.message)
-          schedulePublicationRetry()
+          if (err?.code !== 'functions/resource-exhausted') schedulePublicationRetry()
         } finally {
           publishing = false
         }
@@ -430,6 +449,7 @@ export const sharingService = {
       if (cleanedUp) return
       cleanedUp = true
       released = true
+      window.clearInterval(renewal)
       unsubscribeConnection()
       if (retryTimer) clearTimeout(retryTimer)
       const currentCount = (activeSessionRefCount.get(regKey) ?? 1) - 1
@@ -454,6 +474,7 @@ export const sharingService = {
     if (rtdb) {
       try {
         await remove(ref(rtdb, `activeSessions/${boardId}/${sessionId}`))
+        await remove(ref(rtdb, `sessionGrants/${boardId}/${sessionId}`))
       } catch (err: any) {
         console.warn('[Collab] Could not remove RTDB active session:', err?.message)
       }

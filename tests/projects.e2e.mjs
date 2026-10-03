@@ -54,6 +54,7 @@ for (const role of ['owner', 'editor', 'viewer', 'outsider']) {
   })
   identities[role] = user
 }
+await db.doc(`accountEntitlements/${identities.owner.uid}`).set({ plan: 'pro', active: true })
 const { createServer } = await import(webRequire.resolve('vite'))
 const server = await createServer({
   root: fileURLToPath(new URL('../apps/whiteboard', import.meta.url)),

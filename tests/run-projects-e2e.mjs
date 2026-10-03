@@ -28,7 +28,7 @@ function run(command, args) {
 try {
   await writeFile(
     parameters,
-    'RTDB_FUNCTION_REGION=us-central1\nFIRESTORE_FUNCTION_REGION=us-central1\nSYNC_ACCESS_FUNCTION_REGION=us-central1\n',
+    'RTDB_FUNCTION_REGION=us-central1\nFIRESTORE_FUNCTION_REGION=us-central1\nSYNC_ACCESS_FUNCTION_REGION=us-central1\nSTORAGE_FUNCTION_REGION=us-central1\n',
   )
   await run('pnpm', ['--filter', '@agentic-whiteboard/functions', 'build'])
   await run('firebase', [

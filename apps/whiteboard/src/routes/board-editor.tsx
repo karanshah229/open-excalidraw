@@ -1,6 +1,6 @@
 import { AccessDenied } from '../components/access-denied'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { doc, getDoc, updateDoc } from 'firebase/firestore'
+import { doc, getDoc } from 'firebase/firestore'
 import { createPortal } from 'react-dom'
 import { Link, useNavigate, useParams, useBlocker } from '@tanstack/react-router'
 import { useQueryClient } from '@tanstack/react-query'
@@ -8,7 +8,7 @@ import { Check, Copy, Eye, Loader2, Pencil, Share2 } from 'lucide-react'
 import { convertToExcalidrawElements, Excalidraw, MainMenu, exportToSvg } from '@excalidraw/excalidraw'
 import type { BinaryFiles, ExcalidrawImperativeAPI } from '@excalidraw/excalidraw/types'
 import type { BoardDocument, BoardScene, BoardSyncStatus } from '@agentic-whiteboard/storage'
-import { workspaceApi } from '../features/workspace/workspace-api'
+import { workspaceApi, workspaceStore, firestoreValue } from '../features/workspace/workspace-api'
 import {
   generateArchitecturalTemplate,
   computeAutoLayout,
@@ -29,6 +29,8 @@ import {
 } from '../features/collaboration'
 import { reconcileElementsLWW } from '../features/collaboration/reconcile'
 import { getFirebaseAuth, getFirestoreDb, isFirebaseConfigured } from '../lib/firebase'
+import { cloudCall, cloudDocumentSize, pauseUntil } from '../features/account/cloud-api'
+import { saveGuestRecovery, clearGuestRecovery } from '../features/sharing/guest-recovery'
 
 const LIBRARY_STORAGE_KEY = 'agentic-whiteboard:library:v1'
 const starterLibraries = [
@@ -169,6 +171,14 @@ export function BoardEditor() {
   const savedSignature = useRef<string>()
   const committedSignatureRef = useRef<string>()
   const pendingSceneRef = useRef<BoardScene | null>(null)
+  const guestQuotaRetryRef = useRef<number | undefined>()
+  const guestCloudPauseRef = useRef<{ until: number; error: unknown } | null>(null)
+  useEffect(() => {
+    guestCloudPauseRef.current = null
+    return () => {
+      if (guestQuotaRetryRef.current) window.clearTimeout(guestQuotaRetryRef.current)
+    }
+  }, [boardId])
   const awaitingInitialSceneRef = useRef(true)
   const hasAutoZoomedRef = useRef(false)
   const userHasInteractedRef = useRef(false)
@@ -280,7 +290,11 @@ export function BoardEditor() {
       const cleanup = await sharingService.registerActiveSession(boardId, sessionIdRef.current, user.uid)
       if (cancelled) cleanup()
       else cleanupSession = cleanup
-    })()
+    })().catch((error) => {
+      console.warn('Live session unavailable:', error)
+      if ((error as any)?.code === 'functions/resource-exhausted' && (error as any)?.details?.metric === 'sessions')
+        setIsReadOnly(true)
+    })
     return () => {
       cancelled = true
       if (cleanupSession) cleanupSession()
@@ -415,7 +429,12 @@ export function BoardEditor() {
       } else {
         const db = getFirestoreDb()
         if (!db) throw new Error('Cloud board is unavailable.')
-        await updateDoc(doc(db, 'boardShares', boardId), { boardName: trimmed, updatedAt: new Date().toISOString() })
+        await cloudCall('commitCloudBoard', {
+          mode: 'shared-scene',
+          boardId,
+          operationId: crypto.randomUUID(),
+          document: { boardName: trimmed },
+        })
       }
       queryClient.invalidateQueries({ queryKey: ['workspace'] })
     } catch {
@@ -573,7 +592,8 @@ export function BoardEditor() {
             libraryItems: Promise.resolve(libraryItems),
           })
           triggerAutoCenter()
-          setState('Synced')
+          if (config.hasLocalRecovery) pendingSceneRef.current = finalScene
+          setState(config.hasLocalRecovery ? 'Synced locally' : 'Synced')
           return
         }
 
@@ -1208,7 +1228,12 @@ export function BoardEditor() {
           return
         }
 
+        const recoveryKey = `${getFirebaseAuth()?.currentUser?.uid ?? 'guest'}:${boardId}`
+        const operationId = await saveGuestRecovery(recoveryKey, scene)
+        if (guestCloudPauseRef.current && guestCloudPauseRef.current.until > Date.now())
+          throw guestCloudPauseRef.current.error
         await sharingService.updateSharedScene(boardId, scene)
+        await clearGuestRecovery(recoveryKey, operationId)
         committedSignatureRef.current = getSceneSignature(scene)
         setState('Synced')
       })
@@ -1220,11 +1245,39 @@ export function BoardEditor() {
     [boardId, isSharedBoard, queryClient],
   )
 
-  const handleSaveFailure = useCallback((scene: BoardScene, error: unknown) => {
-    pendingSceneRef.current ??= scene
-    console.error('Failed to save scene:', error)
-    setState(documentRef.current ? 'Local save failed' : 'Sync failed')
-  }, [])
+  const handleSaveFailure = useCallback(
+    (scene: BoardScene, error: unknown) => {
+      pendingSceneRef.current ??= scene
+      console.error('Failed to save scene:', error)
+      const isQuota = (error as any)?.code === 'functions/resource-exhausted'
+      setState(isQuota || (error as any)?.code?.startsWith('functions/') ? 'Sync failed' : 'Local save failed')
+      if (documentRef.current && isQuota) {
+        void workspaceStore.markBoardSyncFailed(
+          documentRef.current.id,
+          error instanceof Error ? error.message : 'Cloud allowance reached',
+          pauseUntil(error),
+        )
+      } else if (isQuota) {
+        const until = Date.parse(pauseUntil(error))
+        guestCloudPauseRef.current = { until, error }
+        if (guestQuotaRetryRef.current) window.clearTimeout(guestQuotaRetryRef.current)
+        guestQuotaRetryRef.current = window.setTimeout(
+          () => {
+            guestCloudPauseRef.current = null
+            const pending = pendingSceneRef.current
+            if (pending)
+              void enqueueSceneSave(pending)
+                .then(() => {
+                  if (pendingSceneRef.current === pending) pendingSceneRef.current = null
+                })
+                .catch((retryError) => handleSaveFailure(pending, retryError))
+          },
+          Math.max(500, until - Date.now()),
+        )
+      }
+    },
+    [enqueueSceneSave],
+  )
 
   const flushSave = useCallback(async () => {
     if (isReadOnly) return
@@ -1242,6 +1295,16 @@ export function BoardEditor() {
       handleSaveFailure(scene, error)
     }
   }, [enqueueSceneSave, handleSaveFailure, isReadOnly])
+
+  useEffect(() => {
+    const recovery = pendingSceneRef.current
+    if (!initialData || isReadOnly || documentRef.current || !recovery) return
+    void enqueueSceneSave(recovery)
+      .then(() => {
+        if (pendingSceneRef.current === recovery) pendingSceneRef.current = null
+      })
+      .catch((error) => handleSaveFailure(recovery, error))
+  }, [initialData, isReadOnly, enqueueSceneSave, handleSaveFailure])
 
   // Task 1: Auto-downgrade & state persistence when room membership changes
   const prevLazyActiveRef = useRef(false)
@@ -1347,11 +1410,38 @@ export function BoardEditor() {
     }
     const payload = documentRef.current ? { ...documentRef.current, scene } : scene
     const bytes = new TextEncoder().encode(JSON.stringify(payload)).length
-    return {
-      bytes,
-      elementsCount: elements.length,
+    const cloudScene = {
+      ...scene,
+      appState: {
+        theme: scene.appState.theme,
+        viewBackgroundColor: scene.appState.viewBackgroundColor,
+        gridModeEnabled: scene.appState.gridModeEnabled,
+        objectsSnapModeEnabled: scene.appState.objectsSnapModeEnabled,
+      },
+      files: Object.fromEntries(
+        Object.entries(scene.files).map(([key, file]) => [
+          key,
+          {
+            ...file,
+            dataURL: '',
+            storagePath: (file as any).storagePath ?? `boards/${boardId}/assets/${key}`,
+          },
+        ]),
+      ),
     }
-  }, [])
+    const cloudPayload = documentRef.current ? { ...documentRef.current, scene: cloudScene } : { scene: cloudScene }
+    const path = documentRef.current
+      ? `users/${getFirebaseAuth()?.currentUser?.uid}/projects/${documentRef.current.projectId}/boards/${boardId}`
+      : `boardShares/${boardId}`
+    const cloudBytes = cloudDocumentSize(path, firestoreValue(cloudPayload) as Record<string, unknown>)
+    const assetBytes = Object.values(scene.files).reduce((sum, file) => {
+      const data = file.dataURL?.split(',')[1] ?? ''
+      return (
+        sum + Math.max(0, Math.floor((data.length * 3) / 4) - (data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0))
+      )
+    }, 0)
+    return { bytes, cloudBytes, assetBytes, elementsCount: elements.length }
+  }, [boardId])
 
   const onChange = useCallback(
     (

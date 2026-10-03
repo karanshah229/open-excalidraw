@@ -38,12 +38,15 @@ service cloud.firestore {
       allow delete: if false;
       match /boards/{boardId} {
         allow read: if signedIn() && request.auth.uid == userId && privateParentLive(userId, projectId);
-        allow create: if signedIn() && request.auth.uid == userId && privateParentLive(userId, projectId);
-        allow update: if signedIn() && request.auth.uid == userId && privateParentLive(userId, projectId)
-          && resource.data.active == true && request.resource.data.projectId == projectId;
-        allow delete: if false;
+        allow write: if false;
       }
     }
+    match /accountUsage/{userId} {
+      allow read: if signedIn() && request.auth.uid == userId;
+      allow write: if false;
+    }
+    match /adminConfig/{document} { allow read, write: if false; }
+    match /assetGrants/{document} { allow read, write: if false; }
     match /projectShares/{projectId} {
       allow get: if !exists(/databases/$(database)/documents/projectShares/$(projectId)) || readPolicy(resource.data);
       allow list: if owner(resource.data);
@@ -52,9 +55,7 @@ service cloud.firestore {
     match /boardShares/{boardId} {
       allow get: if !exists(/databases/$(database)/documents/boardShares/$(boardId)) || readBoard(resource.data);
       allow list: if owner(resource.data) && readBoard(resource.data);
-      allow create, delete: if false;
-      allow update: if editBoard(resource.data)
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['scene', 'updatedAt', 'boardName']);
+      allow write: if false;
       match /activeSessions/{sessionId} {
         allow read: if readBoard(get(/databases/$(database)/documents/boardShares/$(boardId)).data);
         allow write: if false;

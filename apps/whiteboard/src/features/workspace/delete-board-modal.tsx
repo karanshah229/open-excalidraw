@@ -10,15 +10,17 @@ interface DeleteBoardModalProps {
 
 export function DeleteBoardModal({ open, onOpenChange, boardName, onConfirm }: DeleteBoardModalProps) {
   const [isDeleting, setIsDeleting] = useState(false)
+  const [errorMessage, setErrorMessage] = useState('')
 
   const handleConfirm = async () => {
     if (isDeleting) return
+    setErrorMessage('')
     setIsDeleting(true)
     try {
       await onConfirm()
       onOpenChange(false)
     } catch (error) {
-      console.error('Failed to delete board:', error)
+      setErrorMessage(error instanceof Error ? error.message : 'Cloud deletion failed. Retry when connected; the board remains on this device.')
     } finally {
       setIsDeleting(false)
     }
@@ -31,9 +33,10 @@ export function DeleteBoardModal({ open, onOpenChange, boardName, onConfirm }: D
         <Dialog.Content className="dialog-content delete-modal-content" aria-describedby="delete-board-desc">
           <Dialog.Title className="delete-board-title">Delete board</Dialog.Title>
           <Dialog.Description id="delete-board-desc" className="delete-board-desc">
-            Are you sure you want to delete <strong>&ldquo;{boardName}&rdquo;</strong>? This action cannot be undone.
+            Are you sure you want to delete <strong>&ldquo;{boardName}&rdquo;</strong>? This permanently removes its cloud images, sharing and recovery history, and frees its cloud allowance. Export a backup first; this action cannot be undone.
           </Dialog.Description>
 
+          {errorMessage ? <p role="alert">{errorMessage}</p> : null}
           <div className="modal-actions">
             <button
               type="button"

@@ -15,21 +15,30 @@ service firebase.storage {
       && (readPolicy(data) || (parentExists(data) && data.get('inheritProjectAccess', true) && readPolicy(project(data)))); }
     function editBoard(data) { return live(data) && (!parentExists(data) || live(project(data)))
       && (editPolicy(data) || (parentExists(data) && data.get('inheritProjectAccess', true) && editPolicy(project(data)))); }
+    function hasUploadGrant(path) {
+      let grant = firestore.get(/databases/(default)/documents/assetGrants/$(request.resource.metadata.quotaGrant)).data;
+      return request.auth != null && resource == null
+        && grant.uploaderId == request.auth.uid && grant.storagePath == path
+        && grant.state == 'reserved' && grant.expiresAt > request.time.toMillis()
+        && grant.bytes == request.resource.size && grant.mimeType == request.resource.contentType;
+    }
     match /users/{userId}/boards/{boardId}/assets/{fileId} {
       allow read: if (request.auth != null && request.auth.uid == userId
           && (!firestore.exists(/databases/(default)/documents/boardShares/$(boardId)) || readBoard(board(boardId))))
         || (firestore.exists(/databases/(default)/documents/boardShares/$(boardId)) && board(boardId).ownerId == userId && readBoard(board(boardId)));
-      allow write: if request.auth != null && request.auth.uid == userId
+      allow create: if request.auth != null && request.auth.uid == userId
         && (!firestore.exists(/databases/(default)/documents/boardShares/$(boardId)) || editBoard(board(boardId)))
-        && request.resource.size < 10 * 1024 * 1024 && request.resource.contentType.matches('image/.*');
+        && hasUploadGrant('users/' + userId + '/boards/' + boardId + '/assets/' + fileId);
+      allow update, delete: if false;
     }
     match /boards/{boardId}/assets/{fileId} {
       allow read: if readBoard(board(boardId));
-      allow write: if editBoard(board(boardId)) && request.resource.size < 10 * 1024 * 1024 && request.resource.contentType.matches('image/.*');
+      allow create: if editBoard(board(boardId)) && hasUploadGrant('boards/' + boardId + '/assets/' + fileId);
+      allow update, delete: if false;
     }
     match /boards/{boardId}/snapshots/{snapshotId} {
       allow read: if readBoard(board(boardId));
-      allow write: if editBoard(board(boardId));
+      allow write: if false;
     }
   }
 }

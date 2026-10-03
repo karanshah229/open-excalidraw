@@ -1,9 +1,9 @@
 import type { BoardScene } from '@agentic-whiteboard/storage'
 import { collection, doc, getDocs, getDocFromServer as getDoc, query, where } from 'firebase/firestore'
-import { get, ref } from 'firebase/database'
-import { getFirebaseAuth, getFirebaseRtdb, getFirestoreDb } from '../../lib/firebase'
+import { getFirebaseAuth, getFirestoreDb } from '../../lib/firebase'
 import { workspaceApi, workspaceStore, workspaceValue, type WorkspaceBoard } from './workspace-api'
-import { projectCall, projectService, type VisibleProject } from '../sharing/project-service'
+import { projectService, type VisibleProject } from '../sharing/project-service'
+import { cloudCall } from '../account/cloud-api'
 import { sharingService } from '../sharing/sharing-service'
 import { restoreSceneAssets } from '../assets/scene-assets'
 import { mergeDeltaRecordsOntoBase, reconcileElementsLWW } from '../collaboration/reconcile'
@@ -146,27 +146,12 @@ async function capture(board: ExportBoard): Promise<Capture> {
             files: { ...cloudScene.files, ...published.files },
           }
         : published
-      const rtdb = getFirebaseRtdb()
-      if (rtdb) {
-        const elementsRef = ref(rtdb, `boards/${board.id}/elements`)
-        let deltas
-        try {
-          deltas = await get(elementsRef)
-        } catch (error) {
-          const code = (error as { code?: string }).code?.toLowerCase()
-          const denied =
-            code?.includes('permission') ||
-            (error instanceof Error && /^permission[_ -]denied[.!]?$/i.test(error.message))
-          if (shared.config.ownerId !== uid || !denied) throw error
-          // Older projections lack the new policy gates. Repair from the server policy,
-          // then retry the authorized read; never discard live edits on a denied read.
-          await projectCall('syncBoardAccessToRtdb', { boardId: board.id })
-          deltas = await get(elementsRef)
-        }
-        cloudScene = {
-          ...cloudScene,
-          elements: mergeDeltaRecordsOntoBase(cloudScene.elements, Object.values(deltas.val() ?? {})),
-        }
+      const { elements } = await cloudCall<{ elements: Record<string, any> }>('getCloudBoardElements', {
+        boardId: board.id,
+      })
+      cloudScene = {
+        ...cloudScene,
+        elements: mergeDeltaRecordsOntoBase(cloudScene.elements, Object.values(elements)),
       }
     } else if (!owned) throw new Error('Board is no longer available.')
     scene = cloudScene ?? scene
