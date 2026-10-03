@@ -27,12 +27,17 @@ page.on('request', (req) =>
     ? void req.abort('blockedbyclient')
     : void req.continue(),
 )
-const clickText = async (text) =>
-  page.evaluate((text) => {
+const clickText = async (text) => {
+  await page.waitForFunction(
+    (text) => [...document.querySelectorAll('button')].some((el) => el.textContent.trim() === text),
+    {},
+    text,
+  )
+  await page.evaluate((text) => {
     const button = [...document.querySelectorAll('button')].find((el) => el.textContent.trim() === text)
-    if (!button) throw Error(`Missing button: ${text}`)
     button.click()
   }, text)
+}
 const waitText = (text) => page.waitForFunction((text) => document.body.innerText.includes(text), {}, text)
 try {
   await page.goto('http://127.0.0.1:15175', { waitUntil: 'domcontentloaded' })
@@ -70,7 +75,7 @@ try {
   await page.evaluate(() => window.dispatchEvent(new Event('account-usage-changed')))
   await waitText('approaching your allowance.')
   await page.click('[aria-label="Dismiss usage warning"]')
-  assert.equal(await page.$('.cloud-quota-banner'), null)
+  await page.waitForSelector('.cloud-quota-banner', { hidden: true })
   await db.doc(`accountUsage/${uid}`).update({ boards: 3, assetBytes: 24 * 1024 ** 2 })
   await page.evaluate(() => window.dispatchEvent(new Event('account-usage-changed')))
   await waitText('at or near capacity.')
@@ -190,6 +195,24 @@ try {
   )
   assert.deepEqual(errors, [])
   console.log('PASS Free alerts, Pro request, complimentary CTA, responsive layout, and local recovery UI checks')
+} catch (error) {
+  await mkdir(new URL('../logs/freemium-ui/', import.meta.url), { recursive: true })
+  await page.screenshot({
+    path: new URL('../logs/freemium-ui/merge-failure.png', import.meta.url).pathname,
+    fullPage: true,
+  })
+  console.log(
+    'Failure UI:',
+    await page.evaluate(() => ({
+      text: document.body.innerText,
+      dismissed: Object.fromEntries(Object.entries(localStorage).filter(([key]) => key.startsWith('cloud-warning'))),
+      warnings: [...document.querySelectorAll('.cloud-quota-banner')].map((el) => ({
+        text: el.innerText,
+        rect: el.getBoundingClientRect().toJSON(),
+      })),
+    })),
+  )
+  throw error
 } finally {
   await browser.close()
   await aa.deleteApp(admin)

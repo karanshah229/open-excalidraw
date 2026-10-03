@@ -20,3 +20,5 @@ Dev has the eight freemium callable endpoints and a narrow own-session-grant cle
 | 14    | Pro ten-session ceiling and eleventh-browser rejection              |
 
 After recapturing the live suites, regenerate this review with `node tests/freemium-feature-slideshow.mjs --publish-review`. The published review references local PNG files; it includes no Firebase credentials or raw logs.
+
+The live screenshots were captured before the project-sharing merge. The combined implementation passes both emulator/browser suites; see [integration validation](../../plans/freemium-project-sharing-integration.md).

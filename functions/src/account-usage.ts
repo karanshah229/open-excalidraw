@@ -7,6 +7,7 @@ import { HttpsError, onCall, type CallableRequest } from 'firebase-functions/v2/
 import { onObjectDeleted, onObjectFinalized } from 'firebase-functions/v2/storage'
 import { onSchedule } from 'firebase-functions/v2/scheduler'
 import { defineString } from 'firebase-functions/params'
+import { policyRole, verifiedEmail, accessProjection, mirrorCurrentPolicy } from './access-policy.js'
 import { PLAN_LIMITS, complimentaryPlan, firestoreDocumentBytes, periodAt, type Limits } from './usage-policy.js'
 
 const region = defineString('SYNC_ACCESS_FUNCTION_REGION')
@@ -79,19 +80,86 @@ async function mutationPolicy(ownerId: string) {
   return { ...entitlement, freeDailySaves }
 }
 
-export function canRead(data: any, userId: string, email: unknown): boolean {
-  return (
-    data.ownerId === userId ||
-    data.generalAccess === 'anyone_with_link' ||
-    (typeof email === 'string' && (data.invitedEmails ?? []).includes(email.toLowerCase()))
-  )
+export async function boardRole(data: any, userId: string, email?: string, tx?: FirebaseFirestore.Transaction) {
+  if (!data || data.deletedAt || data.pending) return null
+  const parent = data.projectId
+    ? await (tx
+        ? tx.get(getFirestore().doc(`projectShares/${data.projectId}`))
+        : getFirestore().doc(`projectShares/${data.projectId}`).get())
+    : undefined
+  if (parent?.data()?.deletedAt || parent?.data()?.pending) return null
+  const direct = policyRole(data, userId, email)
+  const inherited = data.inheritProjectAccess !== false ? policyRole(parent?.data(), userId, email) : null
+  if (direct === 'owner' || inherited === 'owner') return 'owner'
+  if (direct === 'editor' || inherited === 'editor') return 'editor'
+  return direct ?? inherited
 }
-function canEdit(data: any, userId: string, email: unknown): boolean {
-  return (
-    data.ownerId === userId ||
-    (data.generalAccess === 'anyone_with_link' && data.generalRole === 'editor') ||
-    (typeof email === 'string' && data.collaborators?.[email.toLowerCase()]?.role === 'editor')
-  )
+
+/** Account for project callables/triggers in the same transaction as their board changes. */
+export async function prepareBoardAccounting(ownerId: string, cleanup = false) {
+  await ensureUsage(ownerId)
+  const entitlement = cleanup ? { ...(await ownerPlan(ownerId)), freeDailySaves: 2000 } : await mutationPolicy(ownerId)
+  const { limits, plan, source, freeDailySaves } = entitlement
+  return async (
+    tx: FirebaseFirestore.Transaction,
+    boardId: string,
+    changes: { ref: FirebaseFirestore.DocumentReference; data: any }[],
+    projectId?: string,
+    saveScene = false,
+  ) => {
+    const usageRef = getFirestore().doc(`accountUsage/${ownerId}`),
+      recordRef = usageRef.collection('boards').doc(boardId)
+    const poolRef = getFirestore().doc(`projectUsage/${source === 'complimentary' ? 'complimentary' : plan}`)
+    const [usage, record, pool] = await Promise.all([
+      tx.get(usageRef),
+      tx.get(recordRef),
+      ...(saveScene ? [tx.get(poolRef)] : []),
+    ])
+    if (record.data()?.deleting) throw new HttpsError('failed-precondition', 'This board is being deleted.')
+    const state = usage.data() ?? {},
+      nextRecord: Record<string, any> = { ...record.data(), ...(projectId ? { projectId } : {}) }
+    if (!record.exists && limits.boards !== null && Number(state.boards ?? 0) >= limits.boards)
+      quota(
+        'boards',
+        limits.boards,
+        'The owner’s cloud board allowance is full. Delete a cloud board permanently or view Pro.',
+      )
+    let total = Number(state.currentDocumentBytes ?? 0)
+    for (const { ref, data } of changes) {
+      const key = ref.path.startsWith('boardShares/') ? 'sharedBytes' : 'privateBytes'
+      const bytes = checkSize(ref.path, data, limits)
+      total += bytes - Number(nextRecord[key] ?? 0)
+      nextRecord[key] = bytes
+    }
+    if (total > limits.currentDocumentBytes && total > Number(state.currentDocumentBytes ?? 0))
+      quota(
+        'currentDocumentBytes',
+        limits.currentDocumentBytes,
+        'The owner’s cloud document storage allowance is full.',
+      )
+    const sceneHash = saveScene ? logicalSceneHash(changes.at(-1)?.data.scene) : undefined
+    const countsSave = saveScene && sceneHash !== nextRecord.logicalHash
+    const day = periodAt().day,
+      saves = state.day === day ? Number(state.saves ?? 0) : 0
+    const pooledSaves = pool?.data()?.day === day ? Number(pool.data()?.saves ?? 0) : 0
+    if (countsSave && saves >= limits.dailySaves)
+      quota('saves', limits.dailySaves, 'The owner’s daily cloud save allowance is full.')
+    if (countsSave && plan === 'free' && pooledSaves >= freeDailySaves)
+      quota('sharedPool', freeDailySaves, 'Today’s shared Free cloud capacity is used.')
+    if (saveScene) nextRecord.logicalHash = sceneHash
+    tx.set(recordRef, nextRecord)
+    tx.set(
+      usageRef,
+      {
+        boards: Number(state.boards ?? 0) + (record.exists ? 0 : 1),
+        currentDocumentBytes: total,
+        ...(saveScene ? { day, saves: saves + (countsSave ? 1 : 0) } : {}),
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    )
+    if (countsSave) tx.set(poolRef, { day, saves: pooledSaves + 1 }, { merge: true })
+  }
 }
 
 /** Runs once under a server lease; clients cannot race inventory with new cloud writes. */
@@ -202,6 +270,26 @@ async function summary(ownerId: string) {
 }
 export const getAccountUsage = onCall({ region }, async (request) => summary(uid(request)))
 
+// Bulk export captures live edits without occupying an editing session slot.
+export const getCloudBoardElements = onCall({ region }, async (request) => {
+  const userId = uid(request),
+    boardId = id(request.data?.boardId, 'board ID')
+  const board = await getFirestore().doc(`boardShares/${boardId}`).get()
+  if (!board.exists || !(await boardRole(board.data(), userId, verifiedEmail(request))))
+    throw new HttpsError('permission-denied', 'This board is no longer readable.')
+  if (board.data()?.ownerId === userId) {
+    const projection = (await getDatabase().ref(`boardAccess/${boardId}`).get()).val()
+    if (Object.entries(accessProjection(board.data()!)).some(([key, value]) => projection?.[key] !== value))
+      await mirrorCurrentPolicy('board', boardId)
+  }
+  const elements = (await getDatabase().ref(`boards/${boardId}/elements`).get()).val() ?? {}
+  // Recheck after capture so a policy transition cannot return a newly denied board.
+  const current = await board.ref.get()
+  if (!current.exists || !(await boardRole(current.data(), userId, verifiedEmail(request))))
+    throw new HttpsError('permission-denied', 'Your board access changed.')
+  return { elements }
+})
+
 export const requestProAccess = onCall({ region }, async (request) => {
   const userId = uid(request),
     user = await getAuth().getUser(userId)
@@ -263,6 +351,20 @@ export const commitCloudBoard = onCall({ region }, async (request) => {
   if (!['private', 'share-config', 'shared-scene'].includes(mode))
     throw new HttpsError('invalid-argument', 'Invalid cloud operation.')
   const boardId = id(request.data?.boardId, 'board ID')
+  if (mode === 'share-config') {
+    const record = await getFirestore().doc(`accountUsage/${userId}/boards/${boardId}`).get()
+    const { changeBoardAccess } = await import('./project-access.js')
+    await changeBoardAccess({
+      ...request,
+      data: {
+        boardId,
+        projectId: request.data?.projectId ?? record.data()?.projectId,
+        action: 'share',
+        policy: request.data?.document,
+      },
+    })
+    return { committed: true, revision: 0, duplicate: false }
+  }
   const operationId = id(request.data?.operationId, 'operation ID')
   const db = getFirestore()
   const sharedRef = db.doc(`boardShares/${boardId}`)
@@ -276,7 +378,7 @@ export const commitCloudBoard = onCall({ region }, async (request) => {
     target = db.doc(`users/${userId}/projects/${projectId}/boards/${boardId}`)
   } else if (shareData) {
     ownerId = shareData.ownerId
-    if (mode === 'share-config' ? ownerId !== userId : !canEdit(shareData, userId, request.auth!.token.email)) {
+    if (!['owner', 'editor'].includes((await boardRole(shareData, userId, verifiedEmail(request))) ?? '')) {
       throw new HttpsError('permission-denied', 'You cannot change this board.')
     }
   } else if (mode === 'shared-scene') {
@@ -311,13 +413,28 @@ export const commitCloudBoard = onCall({ region }, async (request) => {
       if (
         live &&
         (live.ownerId !== ownerId ||
-          (mode === 'share-config' ? ownerId !== userId : !canEdit(live, userId, request.auth!.token.email)))
+          !['owner', 'editor'].includes((await boardRole(live, userId, verifiedEmail(request), tx)) ?? ''))
       ) {
         throw new HttpsError('permission-denied', 'Your board access changed.')
       }
     }
     let data: any
+    let publishedData: any
     if (mode === 'private') {
+      const [parent, parentPolicy] = await Promise.all([
+        tx.get(db.doc(`users/${ownerId}/projects/${projectId}`)),
+        tx.get(db.doc(`projectShares/${projectId}`)),
+      ])
+      if (
+        !parent.exists ||
+        parent.data()?.deletedAt ||
+        parentPolicy.data()?.deletedAt ||
+        parentPolicy.data()?.pending ||
+        currentShare.data()?.deletedAt ||
+        currentShare.data()?.pending ||
+        (existing?.active === false && payload.active)
+      )
+        throw new HttpsError('permission-denied', 'This board or its project is unavailable.')
       if (record.data()?.projectId && record.data()!.projectId !== projectId)
         throw new HttpsError(
           'failed-precondition',
@@ -337,6 +454,25 @@ export const commitCloudBoard = onCall({ region }, async (request) => {
       }
       data = { ...payload, syncStatus: 'synced', syncAttempts: 0, nextSyncAt: null, lastSyncError: null }
       delete data._cloudHash
+      if (!currentShare.exists && parentPolicy.exists && data.active) {
+        publishedData = {
+          boardId,
+          projectId,
+          ownerId,
+          boardName: data.name,
+          ownerName: parentPolicy.data()?.ownerName ?? 'Owner',
+          generalAccess: 'restricted',
+          generalRole: 'viewer',
+          collaborators: {},
+          invitedEmails: [],
+          inheritProjectAccess: true,
+          scene: data.scene,
+          createdAt: data.createdAt ?? data.updatedAt,
+          updatedAt: data.updatedAt,
+          accessRevision: 1,
+          pending: false,
+        }
+      }
       if (
         !Number.isSafeInteger(data.revision) ||
         data.revision < 0 ||
@@ -344,32 +480,9 @@ export const commitCloudBoard = onCall({ region }, async (request) => {
       ) {
         throw new HttpsError('invalid-argument', 'A newer board revision is required.')
       }
-    } else if (mode === 'share-config') {
-      const allowed = [
-        'boardName',
-        'ownerName',
-        'ownerEmail',
-        'ownerPhotoURL',
-        'generalAccess',
-        'generalRole',
-        'invitedEmails',
-        'collaborators',
-      ]
-      data = { ...(existing ?? {}), boardId, ownerId, createdAt: existing?.createdAt ?? new Date().toISOString() }
-      for (const key of allowed) if (payload[key] !== undefined) data[key] = payload[key]
-      if (
-        !['restricted', 'anyone_with_link'].includes(data.generalAccess) ||
-        !['viewer', 'editor'].includes(data.generalRole) ||
-        !Array.isArray(data.invitedEmails) ||
-        data.invitedEmails.length > 100 ||
-        typeof data.collaborators !== 'object'
-      ) {
-        throw new HttpsError('invalid-argument', 'Invalid sharing settings.')
-      }
-      // Sharing metadata is established before uploads; an existing scene remains intact.
     } else {
       if (!existing) throw new HttpsError('not-found', 'This shared board no longer exists.')
-      data = { ...existing, scene: payload.scene }
+      data = { ...existing, ...(payload.scene ? { scene: payload.scene } : {}) }
       if (typeof payload.boardName === 'string') data.boardName = payload.boardName
     }
     data.updatedAt = mode === 'private' ? payload.updatedAt : new Date().toISOString()
@@ -380,7 +493,7 @@ export const commitCloudBoard = onCall({ region }, async (request) => {
     const hashKey = mode === 'private' ? 'privateHash' : 'sharedHash'
     const sceneHash = hash(JSON.stringify(data.scene ?? null))
     const logicalHash = logicalSceneHash(data.scene)
-    const countsSave = mode !== 'share-config' && Boolean(data.scene) && boardRecord.logicalHash !== logicalHash
+    const countsSave = Boolean(data.scene) && boardRecord.logicalHash !== logicalHash
     const day = periodAt().day
     const saves = state.day === day ? Number(state.saves ?? 0) : 0
     const pooledSaves = pool.data()?.day === day ? Number(pool.data()?.saves ?? 0) : 0
@@ -403,16 +516,20 @@ export const commitCloudBoard = onCall({ region }, async (request) => {
         limits.dailySaves,
         'Today’s cloud save allowance is used. Local edits can continue; cloud sync resumes tomorrow (UTC).',
       )
-    const totalBytes = Number(state.currentDocumentBytes ?? 0) - Number(boardRecord[byteKey] ?? 0) + bytes
+    const publishedBytes = publishedData ? checkSize(sharedRef.path, publishedData, limits) : 0
+    const totalBytes =
+      publishedBytes + Number(state.currentDocumentBytes ?? 0) - Number(boardRecord[byteKey] ?? 0) + bytes
     if (totalBytes > limits.currentDocumentBytes && totalBytes > Number(state.currentDocumentBytes ?? 0)) {
       quota('currentDocumentBytes', limits.currentDocumentBytes, 'Your cloud document storage allowance is full.')
     }
     tx.set(target, data)
+    if (publishedData) tx.create(sharedRef, publishedData)
     tx.set(recordRef, {
       ...boardRecord,
+      ...(publishedData ? { sharedBytes: publishedBytes, sharedHash: hash(JSON.stringify(data.scene)) } : {}),
       [byteKey]: bytes,
       [hashKey]: sceneHash,
-      ...(mode !== 'share-config' && data.scene ? { logicalHash } : {}),
+      ...(data.scene ? { logicalHash } : {}),
       ...(projectId ? { projectId } : {}),
     })
     tx.set(
@@ -452,7 +569,10 @@ export const reserveCloudAsset = onCall({ region }, async (request) => {
   let ownerId = userId
   if (shared) {
     const board = await getFirestore().doc(`boardShares/${boardId}`).get()
-    if (!board.exists || !canEdit(board.data(), userId, request.auth!.token.email))
+    if (
+      !board.exists ||
+      !['owner', 'editor'].includes((await boardRole(board.data(), userId, verifiedEmail(request))) ?? '')
+    )
       throw new HttpsError('permission-denied', 'You cannot upload to this board.')
     ownerId = board.data()!.ownerId
   }
@@ -585,7 +705,7 @@ export const admitCloudSession = onCall({ region }, async (request) => {
     boardId = id(request.data?.boardId, 'board ID'),
     sessionId = id(request.data?.sessionId, 'session ID')
   const board = await getFirestore().doc(`boardShares/${boardId}`).get()
-  if (!board.exists || !canRead(board.data(), userId, request.auth!.token.email))
+  if (!board.exists || !(await boardRole(board.data(), userId, verifiedEmail(request))))
     throw new HttpsError('permission-denied', 'You cannot join this board.')
   const { limits, plan } = await mutationPolicy(board.data()!.ownerId)
   const ref = getDatabase().ref(`sessionGrants/${boardId}`)
@@ -761,7 +881,7 @@ export const commitCloudElements = onCall({ region }, async (request) => {
   ])
   if (
     !board.exists ||
-    !canEdit(board.data(), userId, request.auth!.token.email) ||
+    !['owner', 'editor'].includes((await boardRole(board.data(), userId, verifiedEmail(request))) ?? '') ||
     grant.val()?.userId !== userId ||
     grant.val()?.expiresAt <= Date.now()
   )
@@ -853,7 +973,7 @@ export const commitCloudElements = onCall({ region }, async (request) => {
   return { committed: result.committed }
 })
 
-export async function persistRecoveryScene(boardId: string, elements: any[]) {
+export async function persistRecoveryScene(boardId: string, elements: any[], deltas = false) {
   const db = getFirestore(),
     boardRef = db.doc(`boardShares/${boardId}`)
   const board = await boardRef.get()
@@ -866,17 +986,49 @@ export async function persistRecoveryScene(boardId: string, elements: any[]) {
   )
   const usageRef = db.doc(`accountUsage/${ownerId}`),
     recordRef = usageRef.collection('boards').doc(boardId)
-  await db.runTransaction(async (tx) => {
+  const compacted = await db.runTransaction(async (tx) => {
     const [current, usage, record, pool] = await Promise.all([
       tx.get(boardRef),
       tx.get(usageRef),
       tx.get(recordRef),
       tx.get(poolRef),
     ])
-    if (!current.exists || record.data()?.deleting) return
+    if (!current.exists || record.data()?.deleting) return false
     const data = current.data()!
+    if (data.deletedAt || data.pending) return false
+    if (data.projectId) {
+      const parent = await tx.get(db.doc(`projectShares/${data.projectId}`))
+      if (parent.data()?.deletedAt || parent.data()?.pending) return false
+    }
     const revision = Number(data.snapshotRevision ?? 0) + 1
-    const scene = { ...(data.scene ?? {}), elements: encodeFirestore(elements) }
+    const merged = new Map<string, any>((data.scene?.elements ?? []).map((e: any) => [e.id, e]))
+    if (deltas)
+      for (const record of elements) {
+        if (!record.id || typeof record.data !== 'string') continue
+        let patch
+        try {
+          patch = JSON.parse(record.data)
+        } catch {
+          continue
+        }
+        if (patch.id !== record.id) continue
+        const old = merged.get(patch.id)
+        if (
+          !old &&
+          !(
+            typeof patch.type === 'string' &&
+            ['x', 'y', 'width', 'height'].every((key) => typeof patch[key] === 'number')
+          )
+        )
+          continue
+        if (
+          !old ||
+          patch.version > old.version ||
+          (patch.version === old.version && patch.versionNonce < old.versionNonce)
+        )
+          merged.set(patch.id, { ...old, ...patch })
+      }
+    const scene = { ...(data.scene ?? {}), elements: encodeFirestore(deltas ? [...merged.values()] : elements) }
     const updatedAt = new Date().toISOString()
     const next = { ...data, scene, snapshotRevision: revision, updatedAt }
     const bytes = checkSize(boardRef.path, next, limits)
@@ -915,8 +1067,10 @@ export async function persistRecoveryScene(boardId: string, elements: any[]) {
       reason: 'abandoned-room-compaction',
       createdAt: updatedAt,
     })
+    return true
   })
-  await pruneRecoveryHistory(ownerId)
+  if (compacted) await pruneRecoveryHistory(ownerId)
+  return compacted
 }
 
 async function pruneRecoveryHistory(ownerId: string) {

@@ -1,0 +1,163 @@
+Project general access,Project individual invitation,Board general access,Board individual invitation,Access source,Effective board role
+None,None,None,None,Project + board,None
+None,None,None,None,Board-specific,None
+None,None,None,Viewer,Project + board,Viewer
+None,None,None,Viewer,Board-specific,Viewer
+None,None,None,Editor,Project + board,Editor
+None,None,None,Editor,Board-specific,Editor
+None,None,Viewer,None,Project + board,Viewer
+None,None,Viewer,None,Board-specific,Viewer
+None,None,Viewer,Viewer,Project + board,Viewer
+None,None,Viewer,Viewer,Board-specific,Viewer
+None,None,Viewer,Editor,Project + board,Editor
+None,None,Viewer,Editor,Board-specific,Editor
+None,None,Editor,None,Project + board,Editor
+None,None,Editor,None,Board-specific,Editor
+None,None,Editor,Viewer,Project + board,Editor
+None,None,Editor,Viewer,Board-specific,Editor
+None,None,Editor,Editor,Project + board,Editor
+None,None,Editor,Editor,Board-specific,Editor
+None,Viewer,None,None,Project + board,Viewer
+None,Viewer,None,None,Board-specific,None
+None,Viewer,None,Viewer,Project + board,Viewer
+None,Viewer,None,Viewer,Board-specific,Viewer
+None,Viewer,None,Editor,Project + board,Editor
+None,Viewer,None,Editor,Board-specific,Editor
+None,Viewer,Viewer,None,Project + board,Viewer
+None,Viewer,Viewer,None,Board-specific,Viewer
+None,Viewer,Viewer,Viewer,Project + board,Viewer
+None,Viewer,Viewer,Viewer,Board-specific,Viewer
+None,Viewer,Viewer,Editor,Project + board,Editor
+None,Viewer,Viewer,Editor,Board-specific,Editor
+None,Viewer,Editor,None,Project + board,Editor
+None,Viewer,Editor,None,Board-specific,Editor
+None,Viewer,Editor,Viewer,Project + board,Editor
+None,Viewer,Editor,Viewer,Board-specific,Editor
+None,Viewer,Editor,Editor,Project + board,Editor
+None,Viewer,Editor,Editor,Board-specific,Editor
+None,Editor,None,None,Project + board,Editor
+None,Editor,None,None,Board-specific,None
+None,Editor,None,Viewer,Project + board,Editor
+None,Editor,None,Viewer,Board-specific,Viewer
+None,Editor,None,Editor,Project + board,Editor
+None,Editor,None,Editor,Board-specific,Editor
+None,Editor,Viewer,None,Project + board,Editor
+None,Editor,Viewer,None,Board-specific,Viewer
+None,Editor,Viewer,Viewer,Project + board,Editor
+None,Editor,Viewer,Viewer,Board-specific,Viewer
+None,Editor,Viewer,Editor,Project + board,Editor
+None,Editor,Viewer,Editor,Board-specific,Editor
+None,Editor,Editor,None,Project + board,Editor
+None,Editor,Editor,None,Board-specific,Editor
+None,Editor,Editor,Viewer,Project + board,Editor
+None,Editor,Editor,Viewer,Board-specific,Editor
+None,Editor,Editor,Editor,Project + board,Editor
+None,Editor,Editor,Editor,Board-specific,Editor
+Viewer,None,None,None,Project + board,Viewer
+Viewer,None,None,None,Board-specific,None
+Viewer,None,None,Viewer,Project + board,Viewer
+Viewer,None,None,Viewer,Board-specific,Viewer
+Viewer,None,None,Editor,Project + board,Editor
+Viewer,None,None,Editor,Board-specific,Editor
+Viewer,None,Viewer,None,Project + board,Viewer
+Viewer,None,Viewer,None,Board-specific,Viewer
+Viewer,None,Viewer,Viewer,Project + board,Viewer
+Viewer,None,Viewer,Viewer,Board-specific,Viewer
+Viewer,None,Viewer,Editor,Project + board,Editor
+Viewer,None,Viewer,Editor,Board-specific,Editor
+Viewer,None,Editor,None,Project + board,Editor
+Viewer,None,Editor,None,Board-specific,Editor
+Viewer,None,Editor,Viewer,Project + board,Editor
+Viewer,None,Editor,Viewer,Board-specific,Editor
+Viewer,None,Editor,Editor,Project + board,Editor
+Viewer,None,Editor,Editor,Board-specific,Editor
+Viewer,Viewer,None,None,Project + board,Viewer
+Viewer,Viewer,None,None,Board-specific,None
+Viewer,Viewer,None,Viewer,Project + board,Viewer
+Viewer,Viewer,None,Viewer,Board-specific,Viewer
+Viewer,Viewer,None,Editor,Project + board,Editor
+Viewer,Viewer,None,Editor,Board-specific,Editor
+Viewer,Viewer,Viewer,None,Project + board,Viewer
+Viewer,Viewer,Viewer,None,Board-specific,Viewer
+Viewer,Viewer,Viewer,Viewer,Project + board,Viewer
+Viewer,Viewer,Viewer,Viewer,Board-specific,Viewer
+Viewer,Viewer,Viewer,Editor,Project + board,Editor
+Viewer,Viewer,Viewer,Editor,Board-specific,Editor
+Viewer,Viewer,Editor,None,Project + board,Editor
+Viewer,Viewer,Editor,None,Board-specific,Editor
+Viewer,Viewer,Editor,Viewer,Project + board,Editor
+Viewer,Viewer,Editor,Viewer,Board-specific,Editor
+Viewer,Viewer,Editor,Editor,Project + board,Editor
+Viewer,Viewer,Editor,Editor,Board-specific,Editor
+Viewer,Editor,None,None,Project + board,Editor
+Viewer,Editor,None,None,Board-specific,None
+Viewer,Editor,None,Viewer,Project + board,Editor
+Viewer,Editor,None,Viewer,Board-specific,Viewer
+Viewer,Editor,None,Editor,Project + board,Editor
+Viewer,Editor,None,Editor,Board-specific,Editor
+Viewer,Editor,Viewer,None,Project + board,Editor
+Viewer,Editor,Viewer,None,Board-specific,Viewer
+Viewer,Editor,Viewer,Viewer,Project + board,Editor
+Viewer,Editor,Viewer,Viewer,Board-specific,Viewer
+Viewer,Editor,Viewer,Editor,Project + board,Editor
+Viewer,Editor,Viewer,Editor,Board-specific,Editor
+Viewer,Editor,Editor,None,Project + board,Editor
+Viewer,Editor,Editor,None,Board-specific,Editor
+Viewer,Editor,Editor,Viewer,Project + board,Editor
+Viewer,Editor,Editor,Viewer,Board-specific,Editor
+Viewer,Editor,Editor,Editor,Project + board,Editor
+Viewer,Editor,Editor,Editor,Board-specific,Editor
+Editor,None,None,None,Project + board,Editor
+Editor,None,None,None,Board-specific,None
+Editor,None,None,Viewer,Project + board,Editor
+Editor,None,None,Viewer,Board-specific,Viewer
+Editor,None,None,Editor,Project + board,Editor
+Editor,None,None,Editor,Board-specific,Editor
+Editor,None,Viewer,None,Project + board,Editor
+Editor,None,Viewer,None,Board-specific,Viewer
+Editor,None,Viewer,Viewer,Project + board,Editor
+Editor,None,Viewer,Viewer,Board-specific,Viewer
+Editor,None,Viewer,Editor,Project + board,Editor
+Editor,None,Viewer,Editor,Board-specific,Editor
+Editor,None,Editor,None,Project + board,Editor
+Editor,None,Editor,None,Board-specific,Editor
+Editor,None,Editor,Viewer,Project + board,Editor
+Editor,None,Editor,Viewer,Board-specific,Editor
+Editor,None,Editor,Editor,Project + board,Editor
+Editor,None,Editor,Editor,Board-specific,Editor
+Editor,Viewer,None,None,Project + board,Editor
+Editor,Viewer,None,None,Board-specific,None
+Editor,Viewer,None,Viewer,Project + board,Editor
+Editor,Viewer,None,Viewer,Board-specific,Viewer
+Editor,Viewer,None,Editor,Project + board,Editor
+Editor,Viewer,None,Editor,Board-specific,Editor
+Editor,Viewer,Viewer,None,Project + board,Editor
+Editor,Viewer,Viewer,None,Board-specific,Viewer
+Editor,Viewer,Viewer,Viewer,Project + board,Editor
+Editor,Viewer,Viewer,Viewer,Board-specific,Viewer
+Editor,Viewer,Viewer,Editor,Project + board,Editor
+Editor,Viewer,Viewer,Editor,Board-specific,Editor
+Editor,Viewer,Editor,None,Project + board,Editor
+Editor,Viewer,Editor,None,Board-specific,Editor
+Editor,Viewer,Editor,Viewer,Project + board,Editor
+Editor,Viewer,Editor,Viewer,Board-specific,Editor
+Editor,Viewer,Editor,Editor,Project + board,Editor
+Editor,Viewer,Editor,Editor,Board-specific,Editor
+Editor,Editor,None,None,Project + board,Editor
+Editor,Editor,None,None,Board-specific,None
+Editor,Editor,None,Viewer,Project + board,Editor
+Editor,Editor,None,Viewer,Board-specific,Viewer
+Editor,Editor,None,Editor,Project + board,Editor
+Editor,Editor,None,Editor,Board-specific,Editor
+Editor,Editor,Viewer,None,Project + board,Editor
+Editor,Editor,Viewer,None,Board-specific,Viewer
+Editor,Editor,Viewer,Viewer,Project + board,Editor
+Editor,Editor,Viewer,Viewer,Board-specific,Viewer
+Editor,Editor,Viewer,Editor,Project + board,Editor
+Editor,Editor,Viewer,Editor,Board-specific,Editor
+Editor,Editor,Editor,None,Project + board,Editor
+Editor,Editor,Editor,None,Board-specific,Editor
+Editor,Editor,Editor,Viewer,Project + board,Editor
+Editor,Editor,Editor,Viewer,Board-specific,Editor
+Editor,Editor,Editor,Editor,Project + board,Editor
+Editor,Editor,Editor,Editor,Board-specific,Editor

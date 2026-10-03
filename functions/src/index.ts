@@ -7,9 +7,29 @@ import { HttpsError, onCall } from 'firebase-functions/v2/https'
 import { defineString } from 'firebase-functions/params'
 import { persistRecoveryScene } from './account-usage.js'
 
-export { getAccountUsage, commitCloudBoard, reserveCloudAsset, confirmCloudAsset,
-  accountAssetFinalized, accountAssetDeleted, admitCloudSession, purgeCloudBoard,
-  cleanUsageReservations, commitCloudElements, requestProAccess } from './account-usage.js'
+export {
+  getCloudBoardElements,
+  getAccountUsage,
+  commitCloudBoard,
+  reserveCloudAsset,
+  confirmCloudAsset,
+  accountAssetFinalized,
+  accountAssetDeleted,
+  admitCloudSession,
+  purgeCloudBoard,
+  cleanUsageReservations,
+  commitCloudElements,
+  requestProAccess,
+} from './account-usage.js'
+import { accessProjection, mirrorCurrentPolicy } from './project-access.js'
+export {
+  manageProject,
+  manageBoardAccess,
+  listSharedProjects,
+  createProjectBoard,
+  mirrorProjectAccess,
+  publishProjectBoard,
+} from './project-access.js'
 
 initializeApp()
 
@@ -24,69 +44,6 @@ const syncAccessFunctionRegion = defineString('SYNC_ACCESS_FUNCTION_REGION')
 
 type ElementDeltaRecord = { id?: string; version?: number; versionNonce?: number; data?: string }
 
-function accessPolicyFromConfig(config: Record<string, any>) {
-  const collaborators = config.collaborators ?? {}
-  const readersByEmail: Record<string, true> = {}
-  const editorsByEmail: Record<string, true> = {}
-  for (const [email, collaborator] of Object.entries(collaborators) as [string, { role?: string }][]) {
-    readersByEmail[email.toLowerCase()] = true
-    if (collaborator?.role === 'editor') editorsByEmail[email.toLowerCase()] = true
-  }
-  for (const email of config.invitedEmails ?? []) readersByEmail[String(email).toLowerCase()] = true
-
-  return {
-    ownerId: config.ownerId ?? null,
-    publicRead: config.generalAccess === 'anyone_with_link',
-    publicWrite: config.generalAccess === 'anyone_with_link' && config.generalRole === 'editor',
-    readersByEmail,
-    editorsByEmail,
-  }
-}
-
-async function mirrorBoardAccess(boardId: string, config: Record<string, any>) {
-  await getDatabase().ref(`boardAccess/${boardId}`).set(accessPolicyFromConfig(config))
-}
-
-function mergeDeltas(baseElements: any[], records: ElementDeltaRecord[]): any[] {
-  const elements = new Map<string, any>()
-  for (const element of baseElements) if (element?.id) elements.set(element.id, { ...element })
-
-  for (const record of records) {
-    if (!record.id || typeof record.data !== 'string') continue
-    let patch: any
-    try {
-      patch = JSON.parse(record.data)
-    } catch {
-      continue
-    }
-    if (!patch?.id || patch.id !== record.id) continue
-
-    const existing = elements.get(patch.id)
-    if (!existing) {
-      if (
-        typeof patch.type !== 'string' ||
-        typeof patch.x !== 'number' ||
-        typeof patch.y !== 'number' ||
-        typeof patch.width !== 'number' ||
-        typeof patch.height !== 'number'
-      ) {
-        continue
-      }
-      elements.set(patch.id, patch)
-      continue
-    }
-
-    const version = Number(patch.version ?? record.version ?? 0)
-    const nonce = Number(patch.versionNonce ?? record.versionNonce ?? 0)
-    const existingVersion = Number(existing.version ?? 0)
-    const existingNonce = Number(existing.versionNonce ?? 0)
-    if (version > existingVersion || (version === existingVersion && nonce < existingNonce)) {
-      elements.set(patch.id, { ...existing, ...patch })
-    }
-  }
-  return Array.from(elements.values())
-}
-
 /**
  * Compacts an abandoned live room after a grace period. This is the durable
  * fallback for simultaneous crashes, where no browser remains to flush state.
@@ -96,7 +53,6 @@ export const compactAbandonedCollaborationRoom = onValueDeleted(
   async (event) => {
     const boardId = event.params.boardId
     const rtdb = getDatabase()
-    const firestore = getFirestore()
     const presenceRef = rtdb.ref(`presence/${boardId}`)
 
     if ((await presenceRef.get()).exists()) return
@@ -112,22 +68,16 @@ export const compactAbandonedCollaborationRoom = onValueDeleted(
 
     const elementsRef = rtdb.ref(`boards/${boardId}/elements`)
     try {
-      const [boardSnapshot, deltaSnapshot] = await Promise.all([
-        firestore.doc(`boardShares/${boardId}`).get(),
-        elementsRef.get(),
-      ])
+      const deltaSnapshot = await elementsRef.get()
       if (!deltaSnapshot.exists()) return
 
-      const boardData = boardSnapshot.exists ? (boardSnapshot.data() ?? {}) : {}
-      const baseElements = boardData.scene?.elements ?? []
       const records = Object.values((deltaSnapshot.val() ?? {}) as Record<string, ElementDeltaRecord>)
-      const mergedElements = mergeDeltas(baseElements, records)
 
-      await persistRecoveryScene(boardId, mergedElements)
+      const compacted = await persistRecoveryScene(boardId, records, true)
 
       // A reconnect after the grace period must retain its live data. A newly
       // connected client also seeds full elements, so skipping this prune is safe.
-      if (!(await presenceRef.get()).exists()) await elementsRef.remove()
+      if (compacted && !(await presenceRef.get()).exists()) await elementsRef.remove()
     } finally {
       await lockRef.remove()
     }
@@ -139,16 +89,10 @@ export const mirrorBoardAccessToRtdb = onDocumentWritten(
   { document: 'boardShares/{boardId}', region: firestoreFunctionRegion },
   async (event) => {
     const boardId = event.params.boardId
-    const accessRef = getDatabase().ref(`boardAccess/${boardId}`)
-    const after = event.data?.after
-    if (!after?.exists) {
-      await accessRef.remove()
-      return
-    }
-
-    const beforePolicy = event.data?.before.exists ? accessPolicyFromConfig(event.data.before.data() ?? {}) : null
-    const afterPolicy = accessPolicyFromConfig(after.data() ?? {})
-    if (JSON.stringify(beforePolicy) !== JSON.stringify(afterPolicy)) await mirrorBoardAccess(boardId, after.data() ?? {})
+    const before = event.data?.before.data(),
+      after = event.data?.after.data()
+    if (!after || !before || JSON.stringify(accessProjection(before)) !== JSON.stringify(accessProjection(after)))
+      await mirrorCurrentPolicy('board', boardId)
   },
 )
 
@@ -170,6 +114,6 @@ export const syncBoardAccessToRtdb = onCall({ region: syncAccessFunctionRegion }
     throw new HttpsError('permission-denied', 'Only the board owner can synchronize sharing access.')
   }
 
-  await mirrorBoardAccess(boardId, config)
+  await mirrorCurrentPolicy('board', boardId)
   return { mirrored: true }
 })

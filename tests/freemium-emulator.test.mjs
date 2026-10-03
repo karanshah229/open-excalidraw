@@ -88,6 +88,7 @@ const board = (boardId, revision = 1, value = revision) => ({
     active: true,
     revision,
     scene: scene(value),
+    createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   },
 })
@@ -102,6 +103,7 @@ async function check(name, work) {
   console.log(`PASS ${name}`)
 }
 try {
+  await db.doc(`users/${uid}/projects/project`).set({ ownerId: uid, id: 'project' })
   await check('verified complimentary email required; removal downgrades', async () => {
     await db.doc('adminConfig/complimentaryUsers').set({ emails: [` ${owner.auth.currentUser.email.toUpperCase()} `] })
     assert.equal((await owner.call('getAccountUsage')).plan, 'free')
@@ -371,6 +373,219 @@ try {
     assert.equal((await owner.call('getAccountUsage')).usage.assetBytes, 0)
     await owner.call('commitCloudBoard', board(`${prefix}-replacement`))
     assert.equal((await owner.call('getAccountUsage')).usage.boards, 3)
+  })
+  const projectOwner = await client('project-owner'),
+    projectEditor = await client('project-editor')
+  const projectOwnerId = projectOwner.auth.currentUser.uid,
+    editorId = projectEditor.auth.currentUser.uid
+  const projectKey = `${prefix}-inherited`,
+    inheritedIds = [1, 2, 3, 4].map((n) => `${prefix}-inherited-${n}`)
+  const projectRef = db.doc(`users/${projectOwnerId}/projects/${projectKey}`)
+  await projectRef.set({
+    id: projectKey,
+    ownerId: projectOwnerId,
+    name: 'Inherited quotas',
+    createdAt: new Date().toISOString(),
+  })
+  await projectOwner.call('getAccountUsage')
+  await projectOwner.call('manageProject', {
+    projectId: projectKey,
+    action: 'share',
+    policy: { generalAccess: 'anyone_with_link', generalRole: 'editor' },
+  })
+  let inheritedId
+  await check(
+    'project editors create in original owner namespace; concurrent creations respect owner quota',
+    async () => {
+      const outcomes = await Promise.allSettled(
+        inheritedIds.map((boardId) =>
+          projectEditor.call('createProjectBoard', { projectId: projectKey, boardId, name: 'Editor-created' }),
+        ),
+      )
+      assert.equal(outcomes.filter((outcome) => outcome.status === 'fulfilled').length, 3)
+      assert.equal(
+        outcomes.find((outcome) => outcome.status === 'rejected').reason.code,
+        'functions/resource-exhausted',
+      )
+      inheritedId = outcomes.find((outcome) => outcome.status === 'fulfilled').value.id
+      assert.equal((await projectRef.collection('boards').get()).size, 3)
+      assert.equal((await db.collection(`users/${editorId}/projects`).get()).size, 0)
+      const usage = await projectOwner.call('getAccountUsage')
+      assert.equal(usage.usage.boards, 3)
+      assert.equal(usage.usage.saves, 3)
+      assert.equal((await projectEditor.call('getAccountUsage')).usage.boards, 0)
+      const { firestoreDocumentBytes } = await import('../functions/lib/usage-policy.js')
+      const copies = (await projectRef.collection('boards').get()).docs
+      let expected = 0
+      for (const copy of copies) {
+        const shared = await db.doc(`boardShares/${copy.id}`).get()
+        expected +=
+          firestoreDocumentBytes(copy.ref.path, copy.data()) + firestoreDocumentBytes(shared.ref.path, shared.data())
+      }
+      assert.equal(usage.usage.currentDocumentBytes, expected)
+    },
+  )
+  const sharedRef = db.doc(`boardShares/${inheritedId}`)
+  await check('inherited editors save scenes, upload images and broadcast; owner is charged', async () => {
+    const before = (await projectOwner.call('getAccountUsage')).usage.saves
+    await projectEditor.call('commitCloudBoard', {
+      mode: 'shared-scene',
+      boardId: inheritedId,
+      operationId: 'inherited-save',
+      document: { scene: scene(1) },
+    })
+    await projectEditor.call('admitCloudSession', { boardId: inheritedId, sessionId: 'inherited-session' })
+    await projectEditor.call('commitCloudElements', {
+      boardId: inheritedId,
+      sessionId: 'inherited-session',
+      elements: scene(2).elements,
+    })
+    const grant = await projectEditor.call('reserveCloudAsset', {
+      shared: true,
+      boardId: inheritedId,
+      fileId: 'inherited-image',
+      bytes: 4,
+      mimeType: 'image/png',
+    })
+    await st.uploadBytes(st.ref(projectEditor.storage, grant.storagePath), new Uint8Array(4), {
+      contentType: 'image/png',
+      customMetadata: { quotaGrant: grant.grantId },
+    })
+    await projectEditor.call('confirmCloudAsset', { grantId: grant.grantId })
+    assert.equal((await projectOwner.call('getAccountUsage')).usage.assetBytes, 4)
+    assert.equal((await projectOwner.call('getAccountUsage')).usage.saves, before + 1)
+    assert.equal((await projectEditor.call('getAccountUsage')).usage.assetBytes, 0)
+  })
+  await check('snapshot export includes live edits without creating session grants', async () => {
+    const before = (await rtdb.ref(`sessionGrants/${inheritedId}`).get()).numChildren()
+    const captured = await other.call('getCloudBoardElements', { boardId: inheritedId })
+    assert.ok(captured.elements.rect)
+    assert.equal((await rtdb.ref(`sessionGrants/${inheritedId}`).get()).numChildren(), before)
+    assert.equal((await rtdb.ref(`sessionGrants/${inheritedId}`).get()).val()?.['export-session'], undefined)
+  })
+  await check('policy changes preserve latest scene; custom board restrictions override project access', async () => {
+    const previous = (await sharedRef.get()).data().scene
+    await projectOwner.call('manageBoardAccess', {
+      boardId: inheritedId,
+      projectId: projectKey,
+      action: 'share',
+      policy: { generalAccess: 'restricted', inheritProjectAccess: false },
+    })
+    assert.deepEqual((await sharedRef.get()).data().scene, previous)
+    for (const [name, data] of [
+      [
+        'commitCloudBoard',
+        { mode: 'shared-scene', boardId: inheritedId, operationId: 'revoked-scene', document: { scene: scene(3) } },
+      ],
+      ['commitCloudElements', { boardId: inheritedId, sessionId: 'inherited-session', elements: scene(3).elements }],
+      ['admitCloudSession', { boardId: inheritedId, sessionId: 'revoked-session' }],
+      [
+        'reserveCloudAsset',
+        { shared: true, boardId: inheritedId, fileId: 'revoked-image', bytes: 4, mimeType: 'image/png' },
+      ],
+      ['getCloudBoardElements', { boardId: inheritedId }],
+    ])
+      await rejected(projectEditor.call(name, data), 'permission-denied')
+    await projectOwner.call('manageBoardAccess', { boardId: inheritedId, projectId: projectKey, action: 'inherit' })
+  })
+  await check('pending or deleted parent blocks all cloud mutation and recovery paths', async () => {
+    const parentPolicy = db.doc(`projectShares/${projectKey}`)
+    const handlers = await import('../functions/lib/account-usage.js')
+    for (const gate of [{ pending: true }, { pending: false, deletedAt: new Date().toISOString() }]) {
+      await parentPolicy.update(gate)
+      await rejected(
+        projectEditor.call('admitCloudSession', { boardId: inheritedId, sessionId: 'blocked-parent' }),
+        'permission-denied',
+      )
+      await rejected(
+        projectEditor.call('commitCloudBoard', {
+          mode: 'shared-scene',
+          boardId: inheritedId,
+          operationId: `blocked-${gate.pending}`,
+          document: { scene: scene(3) },
+        }),
+        'permission-denied',
+      )
+      await rejected(
+        projectEditor.call('createProjectBoard', { projectId: projectKey, boardId: `${prefix}-parent-bypass` }),
+        'permission-denied',
+      )
+      const before = (await sharedRef.get()).data()
+      assert.equal(await handlers.persistRecoveryScene(inheritedId, scene(9).elements), false)
+      assert.deepEqual((await sharedRef.get()).data(), before)
+      const privateBoard = (await projectRef.collection('boards').doc(inheritedId).get()).data()
+      await rejected(
+        projectOwner.call('commitCloudBoard', {
+          mode: 'private',
+          projectId: projectKey,
+          boardId: inheritedId,
+          operationId: `blocked-private-${gate.pending}`,
+          baseRevision: privateBoard.revision,
+          document: { ...privateBoard, revision: privateBoard.revision + 1 },
+        }),
+        'permission-denied',
+      )
+    }
+    await parentPolicy.update({ pending: false, deletedAt: af.FieldValue.delete() })
+  })
+  await check('unverified email does not authorize inherited invitation', async () => {
+    await projectOwner.call('manageProject', {
+      projectId: projectKey,
+      action: 'share',
+      policy: {
+        generalAccess: 'restricted',
+        collaborators: { [projectEditor.auth.currentUser.email]: { role: 'editor' } },
+      },
+    })
+    await rejected(
+      projectEditor.call('admitCloudSession', { boardId: inheritedId, sessionId: 'unverified-email' }),
+      'permission-denied',
+    )
+    await adminAuth.updateUser(editorId, { emailVerified: true })
+    await au.signOut(projectEditor.auth)
+    await au.signInWithEmailAndPassword(projectEditor.auth, `${prefix}-project-editor@example.test`, password)
+    await projectEditor.call('admitCloudSession', { boardId: inheritedId, sessionId: 'verified-email' })
+  })
+  await check('owner outbox publication in a shared project counts both copies atomically', async () => {
+    await projectOwner.call('purgeCloudBoard', { boardId: inheritedId })
+    const publishedId = `${prefix}-auto-published`,
+      operation = board(publishedId)
+    operation.projectId = projectKey
+    operation.document.projectId = projectKey
+    await projectOwner.call('commitCloudBoard', operation)
+    const shared = await db.doc(`boardShares/${publishedId}`).get()
+    assert.equal(shared.data().inheritProjectAccess, true)
+    assert.deepEqual(shared.data().scene, operation.document.scene)
+    assert.equal((await projectOwner.call('getAccountUsage')).usage.boards, 3)
+    await projectEditor.call('commitCloudBoard', {
+      mode: 'shared-scene',
+      boardId: publishedId,
+      operationId: 'auto-inherited-save',
+      document: { scene: scene(8) },
+    })
+  })
+  await check('recovery compaction merges against latest canonical scene and keeps newer cloud elements', async () => {
+    const recoveredId = `${prefix}-auto-published`
+    const currentScene = scene(10)
+    currentScene.elements.push({ ...scene(1).elements[0], id: 'cloud-only' })
+    await projectEditor.call('commitCloudBoard', {
+      mode: 'shared-scene',
+      boardId: recoveredId,
+      operationId: 'pre-recovery-latest',
+      document: { scene: currentScene },
+    })
+    const before = (await projectOwner.call('getAccountUsage')).usage.saves
+    const handlers = await import('../functions/lib/account-usage.js')
+    const records = [scene(2).elements[0], { ...scene(1).elements[0], id: 'live-only' }].map((element) => ({
+      id: element.id,
+      data: JSON.stringify(element),
+    }))
+    assert.equal(await handlers.persistRecoveryScene(recoveredId, records, true), true)
+    const sceneAfter = (await db.doc(`boardShares/${recoveredId}`).get()).data().scene
+    assert.equal(sceneAfter.elements.find((element) => element.id === 'rect').version, 10)
+    assert.ok(sceneAfter.elements.find((element) => element.id === 'cloud-only'))
+    assert.ok(sceneAfter.elements.find((element) => element.id === 'live-only'))
+    assert.equal((await projectOwner.call('getAccountUsage')).usage.saves, before + 1)
   })
   console.log(`${passed} freemium integration checks passed`)
 } finally {

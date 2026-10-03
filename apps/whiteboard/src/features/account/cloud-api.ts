@@ -39,7 +39,13 @@ export async function cloudCall<T = any>(name: string, data: unknown): Promise<T
   }
   try {
     const result = await httpsCallable<unknown, T>(functions, name)(data)
-    if (name !== 'getAccountUsage' && name !== 'admitCloudSession' && name !== 'commitCloudElements') {
+    if (
+      name !== 'listSharedProjects' &&
+      name !== 'getCloudBoardElements' &&
+      name !== 'getAccountUsage' &&
+      name !== 'admitCloudSession' &&
+      name !== 'commitCloudElements'
+    ) {
       window.dispatchEvent(new Event('account-usage-changed'))
     }
     const warning = (result.data as any)?.warning

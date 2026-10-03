@@ -140,6 +140,31 @@ try {
   await signer.revoke()
   signer = undefined
   const owner = pages[0]
+  // Project-sharing authorization requires a canonical owned private board first.
+  const project = await owner.evaluate(async () => {
+    const { workspaceApi } = await import('/src/features/workspace/workspace-api.ts')
+    const project = await workspaceApi.createProject('Live collaboration limits')
+    await workspaceApi.flushCloud()
+    return project
+  })
+  const now = new Date().toISOString()
+  await call(owner, 'commitCloudBoard', {
+    mode: 'private',
+    boardId,
+    projectId: project.id,
+    operationId: randomUUID(),
+    baseRevision: 0,
+    document: {
+      id: boardId,
+      projectId: project.id,
+      name: 'Live collaboration limits',
+      active: true,
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+      scene: { elements: [], appState: {}, files: {} },
+    },
+  })
   await call(owner, 'commitCloudBoard', {
     mode: 'share-config',
     boardId,

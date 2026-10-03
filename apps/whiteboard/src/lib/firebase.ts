@@ -100,7 +100,9 @@ function setupEmulators(_currentApp: FirebaseApp) {
   const host = typeof window !== 'undefined' && window.location?.hostname ? window.location.hostname : '127.0.0.1'
 
   if (auth && !connectedEmulators.has('auth')) {
-    connectAuthEmulator(auth, `http://${host}:${Number(env.VITE_FIREBASE_AUTH_EMULATOR_PORT || 9099)}`, { disableWarnings: true })
+    connectAuthEmulator(auth, `http://${host}:${Number(env.VITE_FIREBASE_AUTH_EMULATOR_PORT || 9099)}`, {
+      disableWarnings: true,
+    })
     connectedEmulators.add('auth')
   }
   if (firestore && !connectedEmulators.has('firestore')) {

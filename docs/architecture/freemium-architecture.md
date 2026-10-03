@@ -155,3 +155,5 @@ Reservations count immediately, preventing concurrent uploads from exceeding the
 The Free pool is an application save allowance, not a Firebase billing meter or hard spending cap. Its default is 2,000 logical saves per UTC day; manually granted and complimentary Pro have separate pooled counters. Exact per-user download metering, payment integration, monetary budget automation and the economics agent remain deferred. Local editing, export and local MCP remain free.
 
 See [limits, validation and deployment order](../plans/freemium-rollout.md).
+
+The combined project-sharing and freemium behavior is documented in [integration details](../plans/freemium-project-sharing-integration.md). Current server authorization retains inherited project access and transition gates; editor-created boards and published copies are atomically charged to the owner. Bulk exports use `getCloudBoardElements` to capture live edits without a session slot. These integration changes remain undeployed.

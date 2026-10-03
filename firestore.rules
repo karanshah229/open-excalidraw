@@ -1,38 +1,43 @@
 rules_version = '2';
-
 service cloud.firestore {
   match /databases/{database}/documents {
     function signedIn() { return request.auth != null; }
-    function isOwner(data) { return signedIn() && data.ownerId == request.auth.uid; }
-    function hasInvitedEmail(data) {
-      return signedIn() && request.auth.token.email != null
-        && data.invitedEmails != null && request.auth.token.email in data.invitedEmails;
+    function owner(data) { return signedIn() && data.ownerId == request.auth.uid; }
+    function invited(data) {
+      return signedIn() && request.auth.token.email_verified == true && request.auth.token.email != null
+        && request.auth.token.email in data.get('invitedEmails', []);
     }
-    function canRead(data) {
-      return data.generalAccess == 'anyone_with_link' || isOwner(data) || hasInvitedEmail(data);
+    function live(data) { return data.get('deletedAt', null) == null && data.get('pending', false) == false; }
+    function readPolicy(data) { return live(data) && (owner(data) || data.generalAccess == 'anyone_with_link' || invited(data)); }
+    function editPolicy(data) { return live(data) && (owner(data)
+      || (data.generalAccess == 'anyone_with_link' && data.generalRole == 'editor')
+      || (invited(data) && data.collaborators[request.auth.token.email].role == 'editor')); }
+    function project(data) { return get(/databases/$(database)/documents/projectShares/$(data.projectId)).data; }
+    function parentExists(data) { return data.get('projectId', '') != '' && exists(/databases/$(database)/documents/projectShares/$(data.projectId)); }
+    function parentLive(data) { return !parentExists(data) || live(project(data)); }
+    function readBoard(data) { return parentLive(data) && (readPolicy(data)
+      || (live(data) && parentExists(data) && data.get('inheritProjectAccess', true) && readPolicy(project(data)))); }
+    function editBoard(data) { return parentLive(data) && (editPolicy(data)
+      || (live(data) && parentExists(data) && data.get('inheritProjectAccess', true) && editPolicy(project(data)))); }
+    function privateParentLive(userId, projectId) {
+      return exists(/databases/$(database)/documents/users/$(userId)/projects/$(projectId))
+        && get(/databases/$(database)/documents/users/$(userId)/projects/$(projectId)).data.get('deletedAt', null) == null
+        && (!exists(/databases/$(database)/documents/projectShares/$(projectId))
+          || live(get(/databases/$(database)/documents/projectShares/$(projectId)).data));
     }
-    function parentBoard(boardId) { return get(/databases/$(database)/documents/boardShares/$(boardId)).data; }
-
-    match /users/{userId}/projects/{projectId} {
+    match /users/{userId}/projectPreferences/{projectId} {
       allow read, write: if signedIn() && request.auth.uid == userId;
-
-      match /boards/{boardId} {
-        allow read: if signedIn() && request.auth.uid == userId;
-        allow write: if false;
-      }
     }
-
-    match /boardShares/{boardId} {
-      allow read: if canRead(resource.data);
-      // Cloud Functions own mutations and atomically enforce/account for quotas.
-      allow write: if false;
-
-      match /activeSessions/{sessionId} {
-        allow read: if canRead(parentBoard(boardId));
-        allow write: if false;
-      }
-      match /history/{revisionId} {
-        allow read: if canRead(parentBoard(boardId));
+    match /users/{userId}/projects/{projectId} {
+      allow read: if signedIn() && request.auth.uid == userId;
+      allow create: if signedIn() && request.auth.uid == userId && request.resource.data.ownerId == userId
+        && request.resource.data.get('deletedAt', null) == null;
+      allow update: if signedIn() && request.auth.uid == userId && resource.data.ownerId == userId
+        && resource.data.get('deletedAt', null) == null
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'updatedAt', 'revision']);
+      allow delete: if false;
+      match /boards/{boardId} {
+        allow read: if signedIn() && request.auth.uid == userId && privateParentLive(userId, projectId);
         allow write: if false;
       }
     }
@@ -42,5 +47,23 @@ service cloud.firestore {
     }
     match /adminConfig/{document} { allow read, write: if false; }
     match /assetGrants/{document} { allow read, write: if false; }
+    match /projectShares/{projectId} {
+      allow get: if !exists(/databases/$(database)/documents/projectShares/$(projectId)) || readPolicy(resource.data);
+      allow list: if owner(resource.data);
+      allow write: if false;
+    }
+    match /boardShares/{boardId} {
+      allow get: if !exists(/databases/$(database)/documents/boardShares/$(boardId)) || readBoard(resource.data);
+      allow list: if owner(resource.data) && readBoard(resource.data);
+      allow write: if false;
+      match /activeSessions/{sessionId} {
+        allow read: if readBoard(get(/databases/$(database)/documents/boardShares/$(boardId)).data);
+        allow write: if false;
+      }
+      match /history/{revisionId} {
+        allow read: if readBoard(get(/databases/$(database)/documents/boardShares/$(boardId)).data);
+        allow write: if false;
+      }
+    }
   }
 }
