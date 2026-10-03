@@ -10,11 +10,11 @@ import { workspaceApi, workspaceStore } from './workspace-api'
 export type ProjectAction = 'share' | 'rename' | 'download' | 'archive' | 'delete'
 export function ProjectMenu({
   project,
-  isOwner,
+  canManage,
   onAction,
 }: {
   project: VisibleProject
-  isOwner: boolean
+  canManage: boolean
   onAction: (action: ProjectAction) => void
 }) {
   return (
@@ -26,15 +26,17 @@ export function ProjectMenu({
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
         <DropdownMenu.Content className="google-share-dropdown-menu" align="end" sideOffset={6}>
-          {(isOwner ? ['share', 'rename', 'download', 'archive', 'delete'] : ['download', 'archive']).map((action) => (
-            <DropdownMenu.Item
-              key={action}
-              className={`google-share-dropdown-item ${action === 'delete' ? 'google-share-dropdown-danger' : ''}`}
-              onSelect={() => onAction(action as ProjectAction)}
-            >
-              {action === 'archive' && project.archived ? 'Unarchive' : action[0].toUpperCase() + action.slice(1)}
-            </DropdownMenu.Item>
-          ))}
+          {(canManage ? ['share', 'rename', 'download', 'archive', 'delete'] : ['download', 'archive']).map(
+            (action) => (
+              <DropdownMenu.Item
+                key={action}
+                className={`google-share-dropdown-item ${action === 'delete' ? 'google-share-dropdown-danger' : ''}`}
+                onSelect={() => onAction(action as ProjectAction)}
+              >
+                {action === 'archive' && project.archived ? 'Unarchive' : action[0].toUpperCase() + action.slice(1)}
+              </DropdownMenu.Item>
+            ),
+          )}
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>
@@ -87,13 +89,22 @@ export function ProjectActionModal({
         onShareConfigSaved={() => onComplete()}
         onSaveConfig={async (config) => {
           if (!prepared.current) {
-            await workspaceApi.flushCloud()
-            for (const board of await workspaceStore.listBoards(project.id)) {
+            const unpublished = []
+            for (const board of project.isShared && project.role === 'editor'
+              ? []
+              : await workspaceStore.listBoards(project.id)) {
+              const cached = sharingService.cachedShareConfig(board.id)
+              if (cached?.accessRevision && cached.projectId === project.id) continue
               const policy = await sharingService.getShareConfig(board.id, {
                 boardName: board.name,
                 ownerId: project.ownerId,
               })
-              await sharingService.saveShareConfig({ ...policy, projectId: project.id })
+              if (!policy.accessRevision || policy.projectId !== project.id)
+                unpublished.push({ ...policy, projectId: project.id })
+            }
+            if (unpublished.length) {
+              await workspaceApi.flushCloud()
+              for (const policy of unpublished) await sharingService.saveShareConfig(policy, { workspaceFlushed: true })
             }
             prepared.current = true
           }
@@ -169,12 +180,12 @@ export function ProjectActionModal({
           <div className="project-form-status" role="alert">
             {error}
           </div>
-          <div className="google-share-footer">
+          <div className="google-share-footer project-dialog-footer">
             <button className="google-share-copy-btn" disabled={busy} onClick={onClose}>
               Cancel
             </button>
             <button
-              className={action === 'delete' ? 'modal-btn-danger' : 'google-share-done-btn'}
+              className={action === 'delete' ? 'google-share-done-btn project-delete-btn' : 'google-share-done-btn'}
               disabled={busy || !name.trim()}
               onClick={() => void save()}
             >

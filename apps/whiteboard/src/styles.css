@@ -4091,3 +4091,32 @@ button {
   white-space: nowrap;
   border: 0;
 }
+
+.project-dialog-footer {
+  justify-content: flex-end;
+  gap: 12px;
+}
+.project-delete-btn {
+  background: var(--danger);
+}
+.project-delete-btn:hover:not(:disabled) {
+  background: var(--danger-hover);
+}
+.group-header > .project-menu-trigger {
+  margin-left: 12px;
+}
+.board-card-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.board-card-title-row strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.board-menu-trigger {
+  flex-shrink: 0;
+  margin: -4px 0;
+}

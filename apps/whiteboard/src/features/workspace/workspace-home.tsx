@@ -1,3 +1,4 @@
+import { AccessDenied } from '../../components/access-denied'
 import { useEffect, useDeferredValue, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -236,6 +237,8 @@ export function WorkspaceHome() {
       </main>
     )
 
+  if (isProjectPage && !currentProject) return <AccessDenied resourceType="project" />
+
   return (
     <main className="workspace-shell">
       {navSlot &&
@@ -352,7 +355,9 @@ export function WorkspaceHome() {
                   }
                   badge={
                     project.ownerId !== user?.uid
-                      ? `Shared · ${project.role === 'editor' ? 'Editor' : 'Viewer'}`
+                      ? project.role === 'editor'
+                        ? 'Shared · Editor'
+                        : 'Shared'
                       : project.isShared
                         ? 'Shared by you'
                         : undefined
@@ -360,7 +365,7 @@ export function WorkspaceHome() {
                   actions={
                     <ProjectMenu
                       project={project}
-                      isOwner={project.ownerId === user?.uid}
+                      canManage={project.ownerId === user?.uid || project.role === 'editor'}
                       onAction={(action) => {
                         void handleProjectAction(project, action)
                       }}

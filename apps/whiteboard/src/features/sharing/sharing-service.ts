@@ -33,6 +33,8 @@ export interface BoardShareConfig {
   scene?: BoardScene
   createdAt: string
   updatedAt: string
+  accessRevision?: number
+  projectRole?: 'owner' | ShareRole | null
 }
 
 async function getDocWithTimeout<T>(docRef: any, timeoutMs = 3000): Promise<T> {
@@ -113,7 +115,7 @@ export const sharingService = {
     return sharingService.rememberShareConfig(defaultConfig, requestUser)
   },
 
-  async saveShareConfig(config: BoardShareConfig): Promise<void> {
+  async saveShareConfig(config: BoardShareConfig, options?: { workspaceFlushed?: boolean }): Promise<void> {
     let resolvedScene = config.scene
     if (!resolvedScene || !resolvedScene.elements || resolvedScene.elements.length === 0) {
       try {
@@ -145,8 +147,9 @@ export const sharingService = {
       const projectId = config.projectId ?? local?.projectId
       if (!projectId) throw new Error('Board ownership could not be verified. Reload the board.')
       const { workspaceApi } = await import('../workspace/workspace-api')
-      await workspaceApi.flushCloud()
-      await projectService.boardAccess(config.boardId, projectId, 'share', normalizedConfig)
+      if (!options?.workspaceFlushed) await workspaceApi.flushCloud()
+      const { scene: _scene, ...policy } = normalizedConfig
+      await projectService.boardAccess(config.boardId, projectId, 'share', policy)
       sharingService.rememberShareConfig(normalizedConfig, authenticatedOwnerId ?? 'local-user')
       // Policy changes must never overwrite a newer scene with the modal's snapshot.
     }
@@ -191,39 +194,82 @@ export const sharingService = {
   ): () => void {
     const db = getFirestoreDb()
     if (!db) return () => {}
-    const ref = doc(db, 'boardShares', boardId)
+    const boardRef = doc(db, 'boardShares', boardId)
     let generation = 0
-    let knownFiles: BoardScene['files'] = {}
+    let disposed = false
+    let boardUnsubscribe: (() => void) | undefined
     let parentUnsubscribe: (() => void) | undefined
     let parentId: string | undefined
+    let retryTimer: ReturnType<typeof setTimeout> | undefined
+    let retryAttempt = 0
+    const scheduleRetry = () => {
+      if (disposed || retryTimer) return
+      retryTimer = setTimeout(
+        () => {
+          retryTimer = undefined
+          refresh()
+        },
+        Math.min(250 * 2 ** retryAttempt++, 5000),
+      )
+    }
+    const denied = (error: any) => {
+      if (disposed) return
+      generation++
+      onError?.(error)
+      scheduleRetry()
+    }
+    const attachBoard = () => {
+      if (disposed || boardUnsubscribe) return
+      boardUnsubscribe = onSnapshot(boardRef, refresh, (error) => {
+        boardUnsubscribe = undefined // Firestore terminates a denied listener.
+        denied(error)
+      })
+    }
     const refresh = () => {
+      if (disposed) return
       const current = ++generation
       const user = getFirebaseAuth()?.currentUser
       void sharingService
         .getSharedBoard(boardId, user?.email, user?.uid)
         .then((result) => {
-          if (current !== generation) return
+          if (disposed || current !== generation) return
           if (result.status !== 'allowed' || !result.config) {
             onError?.({ code: 'permission-denied' })
+            scheduleRetry()
             return
           }
-          knownFiles = result.config.scene?.files ?? knownFiles
+          retryAttempt = 0
+          if (retryTimer) clearTimeout(retryTimer)
+          retryTimer = undefined
           onUpdate(result.config)
-          if (result.config.projectId && parentId !== result.config.projectId) {
+          attachBoard()
+          if (
+            result.config.projectId &&
+            result.config.projectRole &&
+            (parentId !== result.config.projectId || !parentUnsubscribe)
+          ) {
             parentUnsubscribe?.()
             parentId = result.config.projectId
-            parentUnsubscribe = onSnapshot(doc(db, 'projectShares', parentId), refresh, () => refresh())
+            parentUnsubscribe = onSnapshot(doc(db, 'projectShares', parentId), refresh, () => {
+              parentUnsubscribe = undefined
+              // A direct board grant can survive loss of project membership.
+              // Reauthorize the board rather than treating the parent as its ACL.
+              scheduleRetry()
+            })
           }
         })
-        .catch((error) => onError?.(error))
+        .catch((error) => {
+          if (disposed || current !== generation) return
+          onError?.(error)
+          scheduleRetry()
+        })
     }
-    const unsubscribe = onSnapshot(ref, refresh, (error) => {
-      generation++
-      onError?.(error)
-    })
+    attachBoard()
     return () => {
+      disposed = true
       generation++
-      unsubscribe()
+      if (retryTimer) clearTimeout(retryTimer)
+      boardUnsubscribe?.()
       parentUnsubscribe?.()
     }
   },
@@ -280,6 +326,7 @@ export const sharingService = {
                 : 'viewer'
       }
     }
+    remoteData.projectRole = inheritedRole
     const email = getFirebaseAuth()?.currentUser?.emailVerified ? currentUserEmail?.toLowerCase() : null
     remoteData.effectiveRole =
       remoteData.ownerId === currentUserId

@@ -86,7 +86,7 @@ async function page(role, path = '') {
   page.on('pageerror', (error) => failures.push({ role, error: error.message }))
   page.on('response', (response) => {
     if (/127\.0\.0\.1:(25001|28080|29099|29199)/.test(response.url()))
-      requests.push({ role, status: response.status(), url: response.url() })
+      requests.push({ role, status: response.status(), method: response.request().method(), url: response.url() })
   })
   await page.setRequestInterception(true)
   page.on('request', (request) => {
@@ -136,6 +136,10 @@ async function clickText(page, text, selector = 'button,[role="menuitem"]') {
 }
 async function menu(page, name, action) {
   await page.click(`[aria-label="Project actions for ${name}"]`)
+  await clickText(page, action, '[role="menuitem"]')
+}
+async function boardMenu(page, boardId, action) {
+  await page.click(`[data-board-id="${boardId}"] [aria-label^="Board actions for"]`)
   await clickText(page, action, '[role="menuitem"]')
 }
 async function until(check, label) {
@@ -274,8 +278,16 @@ try {
     await roleTrigger.asElement().click()
     await clickText(owner, 'Editor', '[role="menuitem"]')
     await owner.waitForFunction(() => !document.querySelector('.google-share-done-btn').disabled)
+    const projectWrites = requests.filter(
+      (request) => request.method === 'POST' && request.url.includes('/manageProject'),
+    ).length
     await clickText(owner, 'Done')
-    await owner.waitForFunction(() => !document.querySelector('[role="dialog"]'), { timeout: 60000 })
+    await owner.waitForFunction(() => !document.querySelector('[role="dialog"]'), { timeout: 1000 })
+    assert.equal(
+      requests.filter((request) => request.method === 'POST' && request.url.includes('/manageProject')).length,
+      projectWrites,
+      'Done must not resave an already persisted project policy',
+    )
     const config = (await db.doc(`projectShares/${project.id}`).get()).data()
     assert.deepEqual(config.invitedEmails.sort(), [identities.editor.email, identities.viewer.email].sort())
     editor = await page('editor')
@@ -288,11 +300,32 @@ try {
         '[aria-label="Project actions for Project Beta"]',
         (node) => node.closest('.group-header').textContent,
       ),
-      /Shared.*Editor/,
+      /Shared/,
     )
     assert.equal(await viewer.$('[aria-label="Delete board"]'), null)
     assert.equal(await editor.$('[aria-label="Make private"]'), null)
     assert.equal(await outsider.$(`[data-board-id="${boardId}"]`), null)
+  })
+  await record('Restricted project links use board denied UI without filters or metadata', async () => {
+    await outsider.goto(`${base}/?projectId=${project.id}`)
+    await outsider.waitForSelector('.access-denied-card')
+    assert.match(await outsider.$eval('.access-denied-card', (node) => node.textContent), /Switch account/)
+    assert.equal(await outsider.$('.workspace-filters'), null)
+    const deniedGuest = await page(null, `/?projectId=${project.id}`)
+    await deniedGuest.waitForSelector('.access-denied-card')
+    assert.match(await deniedGuest.$eval('.access-denied-card', (node) => node.textContent), /Sign in with Google/)
+    assert.equal(await deniedGuest.$('.workspace-filters'), null)
+    await deniedGuest.browserContext().close()
+    await outsider.goto(base)
+  })
+  await record('Shared board cards preserve Share and place privacy in the board menu', async () => {
+    await owner.$eval(`[data-board-id="${boardId}"] [aria-label="Share board"]`, (node) => node.click())
+    await owner.waitForSelector('[role="dialog"] .google-share-copy-btn')
+    await owner.keyboard.press('Escape')
+    await owner.click(`[data-board-id="${boardId}"] [aria-label^="Board actions for"]`)
+    assert.match(await owner.$eval('[role="menu"]', (node) => node.textContent), /Make private/)
+    assert.equal(new URL(owner.url()).pathname, '/')
+    await owner.keyboard.press('Escape')
   })
   await record('Editor creates inherited board owned by project owner; viewer create denied', async () => {
     await clickText(editor, 'New board')
@@ -373,8 +406,66 @@ try {
   })
   await owner.goto(base)
   await owner.waitForSelector('[aria-label="Project actions for Project Beta"]')
-  await record('Recipient cannot spoof ownership or manage project/board permissions', async () => {
-    const rejected = await editor.evaluate(
+  await record('Open board recovers through project policy gates and live viewer/editor changes', async () => {
+    await viewer.goto(`${base}/boards/${boardId}`)
+    await viewer.waitForFunction(() => window.__excalidrawAPI?.getAppState().viewModeEnabled === true)
+    const policyRef = db.doc(`projectShares/${project.id}`)
+    const policy = (await policyRef.get()).data()
+    // Hold the same gate used by the callable long enough to deterministically
+    // terminate the Firestore listener, then commit the role change normally.
+    await policyRef.update({ pending: true })
+    await viewer.waitForSelector('.access-denied-card')
+    policy.collaborators[identities.viewer.email].role = 'editor'
+    await owner.evaluate(
+      async ({ id, policy }) => window.__projectsTest.projects.projectService.manage(id, 'share', { policy }),
+      { id: project.id, policy },
+    )
+    await viewer.waitForFunction(
+      () =>
+        !document.querySelector('.access-denied-card') &&
+        window.__excalidrawAPI?.getAppState().viewModeEnabled === false,
+      { timeout: 10000 },
+    )
+    policy.collaborators[identities.viewer.email].role = 'viewer'
+    await owner.evaluate(
+      async ({ id, policy }) => window.__projectsTest.projects.projectService.manage(id, 'share', { policy }),
+      { id: project.id, policy },
+    )
+    await viewer.waitForFunction(
+      () =>
+        !document.querySelector('.access-denied-card') &&
+        window.__excalidrawAPI?.getAppState().viewModeEnabled === true,
+      { timeout: 10000 },
+    )
+    policy.generalAccess = 'anyone_with_link'
+    policy.generalRole = 'editor'
+    await owner.evaluate(
+      async ({ id, policy }) => window.__projectsTest.projects.projectService.manage(id, 'share', { policy }),
+      { id: project.id, policy },
+    )
+    await viewer.waitForFunction(
+      () =>
+        !document.querySelector('.access-denied-card') &&
+        window.__excalidrawAPI?.getAppState().viewModeEnabled === false,
+      { timeout: 10000 },
+    )
+    policy.generalAccess = 'restricted'
+    policy.generalRole = 'viewer'
+    await owner.evaluate(
+      async ({ id, policy }) => window.__projectsTest.projects.projectService.manage(id, 'share', { policy }),
+      { id: project.id, policy },
+    )
+    await viewer.waitForFunction(
+      () =>
+        !document.querySelector('.access-denied-card') &&
+        window.__excalidrawAPI?.getAppState().viewModeEnabled === true,
+      { timeout: 10000 },
+    )
+    await viewer.goto(base)
+    await viewer.waitForSelector(`[data-board-id="${boardId}"]`)
+  })
+  await record('Viewers cannot manage projects; editors cannot change individual board privacy', async () => {
+    const rejected = await viewer.evaluate(
       async ({ projectId, boardId }) => {
         const service = window.__projectsTest.projects.projectService
         const attempts = [
@@ -395,7 +486,61 @@ try {
       { projectId: project.id, boardId },
     )
     assert.deepEqual(rejected, [true, true])
+    assert.equal(
+      await editor.evaluate(
+        async ({ projectId, boardId }) => {
+          try {
+            await window.__projectsTest.projects.projectService.boardAccess(boardId, projectId, 'private')
+            return false
+          } catch {
+            return true
+          }
+        },
+        { projectId: project.id, boardId },
+      ),
+      true,
+    )
     assert.equal((await db.doc(`boardShares/${boardId}`).get()).data().inheritProjectAccess, true)
+  })
+  await record('Project editors get all menu actions and can rename/share without taking ownership', async () => {
+    await editor.goto(base)
+    await editor.waitForSelector('[aria-label="Project actions for Project Beta"]')
+    await editor.click('[aria-label="Project actions for Project Beta"]')
+    assert.deepEqual(
+      await editor.$$eval('[role="menuitem"]', (nodes) => nodes.map((node) => node.textContent.trim())),
+      ['Share', 'Rename', 'Download', 'Archive', 'Delete'],
+    )
+    await clickText(editor, 'Rename', '[role="menuitem"]')
+    await editor.$eval('[aria-label="Project name"]', (node) => node.select())
+    await editor.type('[aria-label="Project name"]', 'Editor renamed project')
+    await clickText(editor, 'Save')
+    await editor.waitForSelector('[aria-label="Project actions for Editor renamed project"]')
+    assert.equal((await project.ref.get()).data().ownerId, identities.owner.uid)
+    assert.equal(
+      await editor.evaluate(
+        async (id) =>
+          (await window.__projectsTest.workspace.workspaceStore.listProjects()).some((project) => project.id === id),
+        project.id,
+      ),
+      false,
+    )
+    await menu(editor, 'Editor renamed project', 'Share')
+    assert.match(await editor.$eval('.google-share-user-row', (node) => node.textContent), /Owner/)
+    assert.equal(await editor.$eval('.google-share-user-row', (node) => node.textContent.includes('(you)')), false)
+    await editor.click('[aria-label="General access setting"]')
+    await clickText(editor, 'Anyone with the link', '[role="menuitem"]')
+    await editor.waitForFunction(() => !document.querySelector('.google-share-done-btn').disabled)
+    await editor.click('[aria-label="General access setting"]')
+    await clickText(editor, 'Restricted', '[role="menuitem"]')
+    await editor.waitForFunction(() => !document.querySelector('.google-share-done-btn').disabled)
+    await clickText(editor, 'Done')
+    await editor.evaluate(
+      async (id) => window.__projectsTest.workspace.workspaceApi.renameProject(id, 'Project Beta'),
+      project.id,
+    )
+    assert.equal((await project.ref.get()).data().name, 'Project Beta')
+    await owner.reload()
+    await owner.waitForSelector('[aria-label="Project actions for Project Beta"]')
   })
   await record('Direct board sharing survives inheritance; collaborator removal revokes all stores', async () => {
     await owner.evaluate(
@@ -410,6 +555,13 @@ try {
         await t.sharing.sharingService.saveShareConfig(config)
       },
       { boardId, projectId: project.id, outsider: identities.outsider.email, viewer: identities.viewer.email },
+    )
+    await outsider.goto(`${base}/boards/${boardId}`)
+    await outsider.waitForFunction(() => window.__excalidrawAPI?.getAppState().viewModeEnabled === false)
+    assert.equal(
+      await outsider.$('.access-denied-card'),
+      null,
+      'Direct board grants must not require project membership',
     )
     assert.equal(
       await outsider.evaluate(
@@ -530,7 +682,7 @@ try {
   await record('Owner makes board private with confirmation; no recipient metadata leaks', async () => {
     await owner.reload()
     await owner.waitForSelector(`[data-board-id="${boardId}"]`)
-    await owner.$eval(`[data-board-id="${boardId}"] [aria-label="Make private"]`, (node) => node.click())
+    await boardMenu(owner, boardId, 'Make private')
     await owner.waitForSelector('[role="dialog"]')
     assert.match(
       await owner.$eval('[role="dialog"]', (node) => node.textContent),
@@ -591,7 +743,7 @@ try {
     assert.equal(response.status, 401, 'RTDB must reject inherited access after privacy change')
   })
   await record('Restore inheritance and preserve existing board IDs', async () => {
-    await owner.$eval(`[data-board-id="${boardId}"] [aria-label="Use project access"]`, (node) => node.click())
+    await boardMenu(owner, boardId, 'Use project access')
     await until(
       async () => (await db.doc(`boardShares/${boardId}`).get()).data().inheritProjectAccess === true,
       'restored inheritance',
@@ -601,7 +753,7 @@ try {
   })
   await record('Failed privacy network request leaves committed access unchanged and shows an error', async () => {
     owner.failFunction = 'manageBoardAccess'
-    await owner.$eval(`[data-board-id="${boardId}"] [aria-label="Make private"]`, (node) => node.click())
+    await boardMenu(owner, boardId, 'Make private')
     await clickText(owner, 'Make private')
     await owner.waitForSelector('[role="dialog"] [role="alert"]')
     assert.equal((await db.doc(`boardShares/${boardId}`).get()).data().inheritProjectAccess, true)
@@ -635,6 +787,9 @@ try {
     await menu(viewer, 'Project Beta', 'Unarchive')
   })
   await record('Public project links open the filtered homepage without sign-in', async () => {
+    const boardWrites = requests.filter(
+      (request) => request.method === 'POST' && request.url.includes('/manageBoardAccess'),
+    ).length
     await menu(owner, 'Project Beta', 'Share')
     await owner.click('[aria-label="General access setting"]')
     await clickText(owner, 'Anyone with the link', '[role="menuitem"]')
@@ -642,10 +797,51 @@ try {
     await clickText(owner, 'Done')
     await owner.waitForFunction(() => !document.querySelector('[role="dialog"]'), { timeout: 60000 })
     assert.equal((await db.doc(`projectShares/${project.id}`).get()).data().generalAccess, 'anyone_with_link')
+    assert.equal(
+      requests.filter((request) => request.method === 'POST' && request.url.includes('/manageBoardAccess')).length,
+      boardWrites,
+      'Project policy updates must not republish existing boards',
+    )
     anonymous = await page(null, `/?projectId=${project.id}`)
     await anonymous.waitForSelector(`[data-board-id="${boardId}"]`)
     assert.equal(new URL(anonymous.url()).pathname, '/')
     assert.equal(new URL(anonymous.url()).searchParams.get('projectId'), project.id)
+  })
+  await record('Anyone-with-link project editors receive the full menu and board editing', async () => {
+    const policy = (await db.doc(`projectShares/${project.id}`).get()).data()
+    policy.generalRole = 'editor'
+    await owner.evaluate(
+      async ({ id, policy }) => window.__projectsTest.projects.projectService.manage(id, 'share', { policy }),
+      { id: project.id, policy },
+    )
+    await outsider.goto(`${base}/?projectId=${project.id}`)
+    await outsider.waitForSelector('[aria-label="Project actions for Project Beta"]')
+    await outsider.click('[aria-label="Project actions for Project Beta"]')
+    assert.deepEqual(
+      await outsider.$$eval('[role="menuitem"]', (nodes) => nodes.map((node) => node.textContent.trim())),
+      ['Share', 'Rename', 'Download', 'Archive', 'Delete'],
+    )
+    await outsider.keyboard.press('Escape')
+    assert.equal(
+      await outsider.$$eval(
+        'button',
+        (nodes) => nodes.find((node) => node.textContent.trim() === 'New board').disabled,
+      ),
+      false,
+    )
+    await outsider.goto(`${base}/boards/${boardId}`)
+    await outsider.waitForFunction(() => window.__excalidrawAPI?.getAppState().viewModeEnabled === false)
+    policy.generalRole = 'viewer'
+    await owner.evaluate(
+      async ({ id, policy }) => window.__projectsTest.projects.projectService.manage(id, 'share', { policy }),
+      { id: project.id, policy },
+    )
+    await outsider.waitForFunction(
+      () =>
+        !document.querySelector('.access-denied-card') &&
+        window.__excalidrawAPI?.getAppState().viewModeEnabled === true,
+      { timeout: 10000 },
+    )
   })
   await record('Project download offers multiple formats and produces a ZIP', async () => {
     const downloads = `${out}/downloads-${Date.now()}`
@@ -807,9 +1003,25 @@ try {
     },
   )
   await record('Soft delete blocks direct links and stale scene saves; data retained', async () => {
-    await menu(owner, 'Project Beta', 'Delete')
-    await clickText(owner, 'Delete project')
-    await owner.waitForFunction(() => !document.querySelector('[role="dialog"]'), { timeout: 60000 })
+    await editor.goto(base)
+    await editor.waitForSelector('[aria-label="Project actions for Project Beta"]')
+    await menu(editor, 'Project Beta', 'Delete')
+    const controls = await editor.$$eval('.project-dialog-footer button', (nodes) =>
+      nodes.map((node) => ({
+        radius: getComputedStyle(node).borderRadius,
+        height: node.offsetHeight,
+        top: node.offsetTop,
+      })),
+    )
+    assert.equal(controls[0].radius, controls[1].radius)
+    assert.equal(controls[0].height, controls[1].height)
+    assert.equal(controls[0].top, controls[1].top)
+    assert.equal(
+      await editor.$eval('.project-dialog-footer', (node) => getComputedStyle(node).justifyContent),
+      'flex-end',
+    )
+    await clickText(editor, 'Delete project')
+    await editor.waitForFunction(() => !document.querySelector('[role="dialog"]'), { timeout: 60000 })
     assert.ok((await project.ref.get()).data().deletedAt)
     assert.equal((await project.ref.collection('boards').get()).size, 2)
     const rejected = await editor.evaluate(async (id) => {

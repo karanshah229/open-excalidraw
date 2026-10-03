@@ -63,7 +63,7 @@ Personal archive writes only the current user's preferences, with a localStorage
 
 ## Sharing dialogs and homepage updates
 
-Projects and boards use the same `ShareModal`; projects supply their save action and filtered homepage URL. The workspace retains project policies and account-scoped board policies from its Firestore reads. Board loading also retains either the authorized policy or a verified restricted default when no share document exists. Opening a known share dialog does not fetch permissions again or restore scene images. Explicit service reads remain fresh, and every mutation still runs through owner-validated backend callables.
+Projects and boards use the same `ShareModal`; projects supply their save action and filtered homepage URL. The workspace retains project policies and account-scoped board policies from its Firestore reads. Board loading also retains either the authorized policy or a verified restricted default when no share document exists. Opening a known share dialog does not fetch permissions again or restore scene images. Explicit service reads remain fresh, and every mutation still runs through backend authorization. Project management accepts the current owner or editor; individual board management requires its owner.
 
 Sharing metadata lives in `projectShares` / `boardShares`, separately from private workspace documents. `boardShares` also contains the shared scene, so a Firestore document read still transfers that scene; caching the policy avoids a duplicate modal read but does not introduce a lightweight metadata projection. Images are not fetched to initialize the dialog. Account changes discard late policy reads rather than caching them under the new identity.
 
@@ -87,7 +87,7 @@ flowchart TD
   Role -->|Editor| Edit["Read and edit scene"]
 ```
 
-Only the owner can change sharing, privacy or deletion. **Make private** sets inheritance to false, clears invitations and disables public links. **Use project access** restores inheritance; it does not restore invitations removed by Make private. Email invitation grants require a verified email.
+Project owners and editors can manage project sharing, rename, and soft deletion. The server resolves the original owner’s private project and rechecks editor access inside the policy/rename transaction, without transferring ownership. Viewers cannot manage projects. Individual board sharing, privacy, and deletion remain owner-only. **Make private** sets inheritance to false, clears invitations and disables public links. **Use project access** restores inheritance; it does not restore invitations removed by Make private. Email invitation grants require a verified email.
 
 ## How a sharing or privacy change crosses databases
 
@@ -98,7 +98,7 @@ sequenceDiagram
   participant FS as Firestore policy
   participant RT as RTDB access projection
   UI->>Fn: Change project or board policy
-  Fn->>Fn: Verify real ownership and parent lifecycle
+  Fn->>Fn: Verify project owner/editor or board owner, and parent lifecycle
   Fn->>FS: Transaction: revision + 1, new policy, pending = true
   Note over FS: Firestore and Storage deny while pending
   Fn->>RT: Mirror current revision with blocked = true
@@ -110,6 +110,12 @@ sequenceDiagram
 ```
 
 There is no cross-database transaction. Pending gates and monotonically increasing projection versions coordinate changes; the UI reports errors instead of claiming success early. A failed transition can leave access blocked until an owner retry or repair completes.
+
+## Live access recovery and sharing calls
+
+A project policy transition temporarily blocks Firestore/Storage and mirrors the pending state into RTDB. Firestore can terminate snapshot listeners during that denial. The client stays denied while retrying authorization with bounded backoff, then reconnects terminated board/parent listeners and applies the newly effective role. Cleanup cancels retries and ignores late reads. Direct board grants do not require project membership; a denied parent listener rechecks the board instead of revoking a valid direct grant. Restoring the canvas uses its current elements/files, preserving pending edits through the temporary denied view.
+
+Sharing changes autosave once. Done performs no extra policy write after a successful autosave. Project policy changes skip already-published boards; first publication flushes pending workspace data once before publishing missing boards. Board sharing sends only policy metadata to its callable; the backend preserves its canonical scene. Tests assert no board mutations for an existing project update and no repeat save on Done. Server acknowledgment of the Firestore/RTDB access transition is still required before controls re-enable.
 
 ## How bulk export works
 

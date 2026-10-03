@@ -82,12 +82,14 @@ export async function mirrorCurrentPolicy(kind, targetId) {
         return projection;
     });
 }
-async function mutatePolicy(kind, targetId, ownerId, patch, initial = {}) {
+async function mutatePolicy(kind, targetId, ownerId, patch, initial = {}, actor) {
     const db = getFirestore(), ref = db.doc(`${kind}Shares/${targetId}`);
     const revision = await db.runTransaction(async (tx) => {
         const current = await tx.get(ref), data = current.data() ?? initial;
         if (data.ownerId && data.ownerId !== ownerId)
-            fail('Only the owner can manage sharing.');
+            fail('Project ownership changed.');
+        if (actor && actor.uid !== ownerId && policyRole({ ...data, pending: false }, actor.uid, actor.email) !== 'editor')
+            fail('Project editor access required.');
         if (data.deletedAt && !patch.deletedAt)
             fail('This item was deleted.');
         const revision = Number(data.accessRevision ?? 0) + 1;
@@ -109,10 +111,17 @@ export const mirrorProjectAccess = onDocumentWritten({ document: 'projectShares/
 });
 export const manageProject = onCall({ region }, async (request) => {
     const uid = identity(request), projectId = id(request.data?.projectId), action = request.data?.action;
-    const db = getFirestore(), ref = db.doc(`users/${uid}/projects/${projectId}`);
+    const db = getFirestore();
+    const currentPolicy = await db.doc(`projectShares/${projectId}`).get();
+    const ownerId = currentPolicy.data()?.ownerId ?? uid;
+    const email = verifiedEmail(request);
+    const canManage = uid === ownerId || policyRole({ ...currentPolicy.data(), pending: false }, uid, email) === 'editor';
+    if (!canManage)
+        fail('Project editor access required.');
+    const ref = db.doc(`users/${ownerId}/projects/${projectId}`);
     const snapshot = await ref.get();
-    if (!snapshot.exists || snapshot.data()?.ownerId !== uid || snapshot.data()?.deletedAt)
-        fail('Project owner access required.');
+    if (!snapshot.exists || snapshot.data()?.ownerId !== ownerId || snapshot.data()?.deletedAt)
+        fail('Project management access required.');
     const project = snapshot.data();
     if (action === 'rename') {
         const name = String(request.data.name ?? '')
@@ -122,6 +131,8 @@ export const manageProject = onCall({ region }, async (request) => {
             throw new HttpsError('invalid-argument', 'Enter a project name.');
         await db.runTransaction(async (tx) => {
             const latest = await tx.get(ref), share = await tx.get(db.doc(`projectShares/${projectId}`));
+            if (uid !== ownerId && policyRole({ ...share.data(), pending: false }, uid, email) !== 'editor')
+                fail('Project editor access required.');
             if (latest.data()?.deletedAt)
                 fail('Project was deleted.');
             tx.update(ref, { name, updatedAt: timestamp(), revision: Number(latest.data()?.revision ?? 0) + 1 });
@@ -131,14 +142,14 @@ export const manageProject = onCall({ region }, async (request) => {
     }
     else if (action === 'share' || action === 'delete') {
         if (action === 'delete') {
-            const boards = await db.collection(`users/${uid}/projects/${projectId}/boards`).get();
+            const boards = await db.collection(`users/${ownerId}/projects/${projectId}/boards`).get();
             for (const board of boards.docs) {
                 const share = db.doc(`boardShares/${board.id}`);
                 if (!(await share.get()).exists)
                     await share.create({
                         boardId: board.id,
                         projectId,
-                        ownerId: uid,
+                        ownerId,
                         boardName: board.data().name,
                         generalAccess: 'restricted',
                         generalRole: 'viewer',
@@ -153,17 +164,18 @@ export const manageProject = onCall({ region }, async (request) => {
                 await mirrorCurrentPolicy('board', board.id);
             }
         }
-        await mutatePolicy('project', projectId, uid, action === 'delete' ? { deletedAt: timestamp() } : sanitizePolicy(request.data.policy ?? {}), {
+        await mutatePolicy('project', projectId, ownerId, action === 'delete' ? { deletedAt: timestamp() } : sanitizePolicy(request.data.policy ?? {}), {
             projectId,
             name: project.name,
-            ownerId: uid,
+            ownerId,
             ownerName: request.auth?.token.name ?? 'Owner',
+            ownerEmail: request.auth?.token.email ?? '',
             createdAt: project.createdAt,
             generalAccess: 'restricted',
             generalRole: 'viewer',
             collaborators: {},
             invitedEmails: [],
-        });
+        }, { uid, email });
         if (action === 'delete')
             await ref.update({ deletedAt: timestamp(), updatedAt: timestamp() });
     }
@@ -253,6 +265,17 @@ export const listSharedProjects = onCall({ region }, async (request) => {
             updatedAt: policy.updatedAt,
             role,
             isShared: true,
+            ...(role === 'owner' || role === 'editor'
+                ? {
+                    sharePolicy: {
+                        generalAccess: policy.generalAccess,
+                        generalRole: policy.generalRole,
+                        collaborators: policy.collaborators ?? {},
+                        invitedEmails: policy.invitedEmails ?? [],
+                        ownerEmail: policy.ownerEmail ?? '',
+                    },
+                }
+                : {}),
         });
         for (let index = 0; index < boardSnapshots.docs.length; index++) {
             const board = boardSnapshots.docs[index], config = configs[index].data();

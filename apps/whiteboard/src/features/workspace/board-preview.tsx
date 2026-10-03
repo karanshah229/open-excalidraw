@@ -2,7 +2,8 @@ import { memo, useEffect, useRef, useState } from 'react'
 import { Link } from '@tanstack/react-router'
 import type { BinaryFiles } from '@excalidraw/excalidraw/types'
 import { exportToSvg } from '@excalidraw/excalidraw'
-import { Share2, Trash2, Lock, Unlock } from 'lucide-react'
+import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
+import { Share2, Trash2, Lock, Unlock, MoreVertical } from 'lucide-react'
 import { useAuth } from '../../lib/auth-context'
 import { useTheme } from '../../lib/theme-context'
 import type { BoardScene } from '@agentic-whiteboard/storage'
@@ -225,24 +226,13 @@ export const BoardPreview = memo(function BoardPreview({
             onClick={(e) => {
               e.preventDefault()
               e.stopPropagation()
-              if (board.project.isShared && onPrivacy) onPrivacy(board)
-              else onShare(board)
+              onShare(board)
             }}
             disabled={busy}
-            title={board.project.isShared ? (board.isPrivate ? 'Use project access' : 'Make private') : 'Share board'}
-            aria-label={
-              board.project.isShared ? (board.isPrivate ? 'Use project access' : 'Make private') : 'Share board'
-            }
+            title="Share board"
+            aria-label="Share board"
           >
-            {board.project.isShared ? (
-              board.isPrivate ? (
-                <Unlock size={14} />
-              ) : (
-                <Lock size={14} />
-              )
-            ) : (
-              <Share2 size={14} />
-            )}
+            <Share2 size={14} />
           </button>
         ) : null}
         {isOwner && onDelete ? (
@@ -259,7 +249,41 @@ export const BoardPreview = memo(function BoardPreview({
         ) : null}
       </div>
       <div className="board-card__content">
-        <strong>{board.name}</strong>
+        <div className="board-card-title-row">
+          <strong>{board.name}</strong>
+          {isOwner && board.project.isShared && onPrivacy && (
+            <DropdownMenu.Root modal={false}>
+              <DropdownMenu.Trigger asChild>
+                <button
+                  type="button"
+                  className="project-menu-trigger board-menu-trigger"
+                  aria-label={`Board actions for ${board.name}`}
+                  disabled={busy}
+                  onClick={(event) => {
+                    event.preventDefault()
+                    event.stopPropagation()
+                  }}
+                  onPointerDown={(event) => event.stopPropagation()}
+                >
+                  <MoreVertical size={16} />
+                </button>
+              </DropdownMenu.Trigger>
+              <DropdownMenu.Portal>
+                <DropdownMenu.Content
+                  className="google-share-dropdown-menu"
+                  align="end"
+                  sideOffset={6}
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <DropdownMenu.Item className="google-share-dropdown-item" onSelect={() => onPrivacy(board)}>
+                    {board.isPrivate ? <Unlock size={14} /> : <Lock size={14} />}
+                    {board.isPrivate ? 'Use project access' : 'Make private'}
+                  </DropdownMenu.Item>
+                </DropdownMenu.Content>
+              </DropdownMenu.Portal>
+            </DropdownMenu.Root>
+          )}
+        </div>
         <span>
           {board.project.name} · Edited {relativeTime(board.updatedAt)}
         </span>

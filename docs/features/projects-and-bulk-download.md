@@ -84,7 +84,7 @@ The board inheritance flag is authoritative server-managed policy and must be ho
 
 ### Board-card privacy action
 
-Accepted placement: replace hover Share beside Delete for boards inside shared projects. Proposed precise labels: Make private for inherited or custom-shared boards; Use project access for owner-only private boards. The second action restores inheritance, not historical invitations/public links. Keep full custom sharing controls in the board editor Share dialog and retain the existing card Share action for boards outside shared projects.
+Updated placement (confirmed in UI review): keep hover Share beside Delete for all owned boards, so owners can open sharing and copy the board link. Add a three-dot menu beside the board name for boards in shared projects, with the privacy action. Labels: Make private for inherited or custom-shared boards; Use project access for owner-only private boards. The second action restores inheritance, not historical invitations/public links. Both the board editor and the card Share action open the existing sharing dialog.
 
 Show privacy and board-delete controls only to the authorized owner; editor creation does not imply permission-management or deletion rights. Enforce this server-side as well. Keep a persistent lock indicator on private cards and ensure hover controls also appear on keyboard focus and touch. Make private requires confirmation explaining that direct invitations/public access will be removed. Explain that Use project access grants the current project audience access; a separate confirmation for restoring inheritance remains a proposal.
 
@@ -94,11 +94,19 @@ Treat this as an asynchronous action with pending/failed states, not an optimist
 
 These are proposals, not accepted user decisions:
 
-- Recommend only the owner can share/manage the project, rename, delete the project, or manage direct board grants. Owner-only board privacy/deletion and editor board creation/ownership are confirmed. Personal archive/unarchive is available to each user independently of project role.
+- Confirmed update: project editors have the same Share, Rename, Download, Archive, and Delete project actions as owners, including editors granted access through a public editor link. Individual board privacy/deletion/direct sharing remain owner-only. Project deletion by an editor still disables all child board links; project/board ownership stays with the original owner. Personal archive/unarchive remains per-user.
 - Project deletion blocks all contained board links. Confirm the restore/retention policy; do not implement physical purging until specified.
 - Readable boards remain downloadable unless the product explicitly introduces a download restriction. Account-wide export still includes only owned boards.
 - Recommend including archived owned projects in account-wide download, excluding deleted content by default; confirm scope.
 - Determine the supported format list from the installed editor/export capabilities. Do not promise PDF or other formats without implementing and validating them. The checkbox dropdown must keep selections open, prevent an empty selection, and report per-board/per-format failures.
+
+## Additional UI and live-access review
+
+- Delete confirmation places both actions together on the right, with matching pill shapes and centered text.
+- Restricted project links reuse the board permission-denied component for signed-in and signed-out visitors, without homepage filters or inaccessible project metadata.
+- Shared viewers display “Shared”; editor badges retain the editor indication. Leave space between accordion chevrons and project menu triggers.
+- Already-open boards must recover automatically after revisioned policy updates temporarily deny reads. Verified viewer/editor changes and restricted/public transitions update the canvas without refresh; genuine revocation remains denied.
+- Project sharing autosaves each change. Done closes without saving an already-committed policy. Published boards must not be republished during project policy changes. Initial publication may flush the workspace once, and sharing callables receive policy fields rather than drawing payloads.
 
 ## Current architecture and consequences
 
@@ -218,3 +226,5 @@ Validation passed: 19 Puppeteer browser/network scenarios via Firebase CLI, `pnp
 On 2026-10-03, the feature Functions and Firestore/Storage/RTDB rules were deployed to `open-excalidraw-dev-2`; production remains unchanged. The manual preview runs on `http://localhost:5174` with the existing ignored dev configuration and real Google sign-in. The public discovery callable smoke check returned successfully.
 
 The dev backfill inspected 61 existing board-share records: five were bound to private project/board documents, while 56 had no matching private parent and were preserved without inventing ownership bindings. Their direct grants remain projected; management through the new owner-validated callables requires a genuine private parent. Backups and migration diagnostics are kept in ignored local logs. These legacy records need separate data cleanup before claiming the entire dev dataset has valid ownership links.
+
+On 2026-10-03, UI review follow-ups extended project management to editors, retained Share on board cards with a separate privacy menu, and fixed live permission-listener recovery. `manageProject` and `listSharedProjects` were redeployed to the dev project; no additional rules changes or production deployment were made. The expanded suite passed 24 Puppeteer/browser/network scenarios, including editor management, public editor access, restricted-link presentation, live viewer/editor/public transitions, and no redundant Done/board-publication writes.

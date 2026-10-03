@@ -47,9 +47,13 @@ export function ShareModal({
   const { fullName, user: localUser } = useUser()
 
   const resolvedOwnerId = ownerId && ownerId !== 'local-user' ? ownerId : (authUser?.uid ?? 'local-user')
-  const resolvedOwnerName = ownerName || fullName || authUser?.displayName || 'User'
-  const resolvedOwnerEmail = ownerEmail || authUser?.email || localUser?.email || ''
-  const resolvedOwnerPhoto = ownerPhotoURL || authUser?.photoURL || undefined
+  const isCurrentOwner = resolvedOwnerId === (authUser?.uid ?? 'local-user')
+  const resolvedOwnerName =
+    ownerName || initialConfig?.ownerName || (isCurrentOwner ? fullName || authUser?.displayName || 'User' : 'Owner')
+  const resolvedOwnerEmail =
+    ownerEmail || initialConfig?.ownerEmail || (isCurrentOwner ? authUser?.email || localUser?.email || '' : '')
+  const resolvedOwnerPhoto =
+    ownerPhotoURL || initialConfig?.ownerPhotoURL || (isCurrentOwner ? authUser?.photoURL : undefined) || undefined
 
   const [shareConfig, setShareConfig] = useState<BoardShareConfig | null>(
     () => initialConfig ?? sharingService.cachedShareConfig(boardId) ?? null,
@@ -62,6 +66,7 @@ export function ShareModal({
   const [isLoading, setIsLoading] = useState(!initialConfig && !sharingService.cachedShareConfig(boardId))
   const [imgError, setImgError] = useState(false)
   const copyTimeoutRef = useRef<number>()
+  const needsSave = useRef(false)
 
   // Load current sharing configuration when modal opens
   useEffect(() => {
@@ -152,11 +157,13 @@ export function ShareModal({
   ])
 
   const persistShare = async (config: BoardShareConfig) => {
+    needsSave.current = true
     setIsSaving(true)
     setSaveError('')
     try {
       if (onSaveConfig) await onSaveConfig(config)
       else await sharingService.saveShareConfig(config)
+      needsSave.current = false
     } catch (error) {
       setShareConfig(effectiveConfig)
       setSaveError(error instanceof Error ? error.message : 'Sharing could not be saved.')
@@ -306,6 +313,10 @@ export function ShareModal({
   }
 
   const handleDone = async () => {
+    if (!needsSave.current) {
+      onOpenChange(false)
+      return
+    }
     setIsSaving(true)
     try {
       await persistShare({
@@ -447,23 +458,26 @@ export function ShareModal({
                     {resolvedOwnerPhoto && !imgError ? (
                       <img
                         src={resolvedOwnerPhoto}
-                        alt={resolvedOwnerName}
+                        alt={effectiveConfig.ownerName}
                         className="google-share-avatar-img"
                         referrerPolicy="no-referrer"
                         onError={() => setImgError(true)}
                       />
                     ) : (
                       <div className="google-share-avatar-placeholder">
-                        {resolvedOwnerName.charAt(0).toUpperCase() || <UserIcon size={16} />}
+                        {effectiveConfig.ownerName.charAt(0).toUpperCase() || <UserIcon size={16} />}
                       </div>
                     )}
                   </div>
 
                   <div className="google-share-user-info">
                     <div className="google-share-user-name">
-                      {resolvedOwnerName} <span className="google-share-you-tag">(you)</span>
+                      {effectiveConfig.ownerName}{' '}
+                      {isCurrentOwner && <span className="google-share-you-tag">(you)</span>}
                     </div>
-                    {resolvedOwnerEmail && <div className="google-share-user-email">{resolvedOwnerEmail}</div>}
+                    {effectiveConfig.ownerEmail && (
+                      <div className="google-share-user-email">{effectiveConfig.ownerEmail}</div>
+                    )}
                   </div>
 
                   <div className="google-share-role-col">

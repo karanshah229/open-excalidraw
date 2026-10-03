@@ -439,8 +439,16 @@ export const workspaceApi = {
     await syncWorkspace(activeUserId)
   },
   async renameProject(projectId: string, name: string) {
-    const project = (await workspaceStore.listProjects()).find((project) => project.id === projectId)
-    if (!project || !isOwnerProject(project)) throw new Error('Only the owner can rename a project.')
+    const local = (await workspaceStore.listProjects()).find((project) => project.id === projectId)
+    const project: VisibleProject | undefined =
+      local ?? (await projectService.list(projectId)).projects.find((project) => project.id === projectId)
+    if (!project || (!isOwnerProject(project) && project.role !== 'editor'))
+      throw new Error('Project editor access required.')
+    if (!isOwnerProject(project)) {
+      await projectService.manage(projectId, 'rename', { name })
+      emitWorkspaceChange()
+      return
+    }
     if (getFirestoreDb()) {
       const parent = await getDoc(doc(getFirestoreDb()!, 'users', activeUserId!, 'projects', projectId))
       if (!parent.exists()) await workspaceApi.flushCloud()
@@ -467,8 +475,16 @@ export const workspaceApi = {
     } else void pending.catch((error) => console.error('Archive preference sync failed:', error))
   },
   async deleteProject(projectId: string) {
-    const project = (await workspaceStore.listProjects()).find((project) => project.id === projectId)
-    if (!project || !isOwnerProject(project)) throw new Error('Only the owner can delete a project.')
+    const local = (await workspaceStore.listProjects()).find((project) => project.id === projectId)
+    const project: VisibleProject | undefined =
+      local ?? (await projectService.list(projectId)).projects.find((project) => project.id === projectId)
+    if (!project || (!isOwnerProject(project) && project.role !== 'editor'))
+      throw new Error('Project editor access required.')
+    if (!isOwnerProject(project)) {
+      await projectService.manage(projectId, 'delete')
+      emitWorkspaceChange()
+      return
+    }
     await workspaceApi.flushCloud()
     await projectService.manage(projectId, 'delete')
     await workspaceStore.upsertProject({ ...project, deletedAt: new Date().toISOString() })
