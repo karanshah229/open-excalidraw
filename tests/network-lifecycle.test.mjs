@@ -118,13 +118,12 @@ async function runNetworkLifecycleTest() {
         updatedAt: new Date().toISOString(),
       })
     }, boardId)
-    await seedPage.close()
 
     // -------------------------------------------------------------
     // STEP 1: Solo mode keeps only the connection-owned session lobby alive.
     // -------------------------------------------------------------
     console.log('▶ Step 1: Open board URL in Window 1 (Solo mode)...')
-    const page1 = await browser.newPage()
+    const page1 = seedPage
     await page1.setViewport({ width: 1440, height: 900 })
 
     const cdp1 = await page1.createCDPSession()
