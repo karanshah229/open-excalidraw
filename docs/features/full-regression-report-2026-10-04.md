@@ -4,6 +4,14 @@
 
 The initial run failed 17 of 19 older browser suites during setup, with identical outcomes on archived main (`faea109`); its feature branch was `4008c5f`. The follow-up tests fixture commit `e92aa68`; application runtime is unchanged.
 
+## Single test command
+
+Run `npm test` (or `pnpm test`) from the repository root. It builds the workspace, runs typecheck/lint, collaboration unit/load tests, MCP tools, image policy, all 35 project scenarios, local/cloud image persistence, all nine formats in three modes, deleted-project sync, and all 19 older browser suites. Stages run sequentially to avoid emulator/port collisions; failures produce a nonzero exit code and logs/results under `.system_generated/all-tests/`.
+
+The command requires installed workspace dependencies, pnpm, Firebase CLI, Java and Google Chrome. Project/image emulators use an isolated copy of the compiled Functions source with demo parameters, so the developer's `.env.local` cannot override their test configuration. Live development/production account checks, deployment utilities, migration scripts and historical security exploit probes remain separate; a passing functional run does not resolve the known security findings below.
+
+Latest `npm test` at `c0bb1a6` completed with **exit code 0: 13/13 stages passed**, including 19 older browser suites, 35 project scenarios and 180 image-format checks. The first integrated run correctly exited nonzero when the network-lifecycle fixture intermittently timed out after closing its setup tab. Preserving that tab fixed the handoff race; its six network assertions remain intact. The final result comes from a complete fresh run, without automatic retries or skipped functional stages.
+
 ## Fixture repair follow-up
 
 The older suites were written before server-owned project management. The initial failures happened before their behavioral assertions: anonymous owners cannot manage projects, localStorage share records do not create owned cloud boards, and the dropdown fixture used a mock identity instead of Firebase authentication.
