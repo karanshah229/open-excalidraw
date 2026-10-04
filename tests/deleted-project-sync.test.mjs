@@ -50,8 +50,7 @@ try {
     const { workspaceApi } = await import('/src/features/workspace/workspace-api.ts')
     await createFormatBoard('deleted parent regression', true, false)
     const boardId = await createPrivateImageBoard(dataURL)
-    const { getFirebaseAuth } = await import('/src/lib/firebase.ts')
-    await workspaceApi.ensureCloudBoardSynced(boardId, getFirebaseAuth().currentUser.uid)
+    await workspaceApi.flushCloud()
     return boardId
   }, dataURL)
   await page.goto(`http://127.0.0.1:15188/boards/${boardId}`, { waitUntil: 'domcontentloaded' })

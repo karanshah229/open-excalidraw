@@ -15,6 +15,8 @@ export type Project = {
   members: ProjectMember[]
   createdAt: string
   updatedAt: string
+  deletedAt?: string | null
+  revision?: number
 }
 export type Board = {
   id: string
@@ -53,7 +55,7 @@ export type WorkspaceBootstrap = { project: Project | null; board: BoardDocument
 /** Product-level boundary for local, desktop, and cloud persistence adapters. */
 export interface WorkspaceStore {
   bootstrap(): Promise<WorkspaceBootstrap>
-  listProjects(): Promise<Project[]>
+  listProjects(includeDeleted?: boolean): Promise<Project[]>
   claimLocalProjects(ownerId: string): Promise<string[]>
   createProject(name: string, ownerId: string): Promise<Project>
   listBoards(projectId: string): Promise<Board[]>
@@ -69,12 +71,16 @@ export interface WorkspaceStore {
   resumeBoardSync(boardId: string): Promise<void>
   markBoardConflict(boardId: string, error: string): Promise<void>
   requeueConflictedBoard(boardId: string, remoteRevision: number): Promise<void>
-  listBoardsForSync(): Promise<Board[]>
+  listBoardsForSync(includeDeletedProjects?: boolean): Promise<Board[]>
   deleteBoard(boardId: string): Promise<void>
 }
 
 type RxCollections = { projects: unknown; boards: unknown }
 const LOCAL_PRINCIPAL_ID = 'local-user'
+let workspaceIdentity = LOCAL_PRINCIPAL_ID
+export function setWorkspaceIdentity(userId: string | null) {
+  workspaceIdentity = userId ?? LOCAL_PRINCIPAL_ID
+}
 const DATABASE_NAME = 'agentic-whiteboard-v2'
 const LEGACY_DATABASE_NAME = 'agentic-whiteboard-v1'
 const now = () => new Date().toISOString()
@@ -85,7 +91,7 @@ addRxPlugin(RxDBMigrationSchemaPlugin)
 
 const projectSchema: RxJsonSchema<Project> = {
   title: 'project schema',
-  version: 0,
+  version: 1,
   primaryKey: 'id',
   type: 'object',
   properties: {
@@ -93,6 +99,8 @@ const projectSchema: RxJsonSchema<Project> = {
     name: { type: 'string' },
     ownerId: { type: 'string' },
     members: { type: 'array', items: { type: 'object', additionalProperties: true } },
+    deletedAt: { type: ['string', 'null'] },
+    revision: { type: 'number' },
     createdAt: { type: 'string' },
     updatedAt: { type: 'string' },
   },
@@ -150,7 +158,16 @@ const database = () => {
     closeDuplicates: true,
   }).then(async (instance) => {
     await instance.addCollections({
-      projects: { schema: projectSchema },
+      projects: {
+        schema: projectSchema,
+        migrationStrategies: {
+          1: (project: Project) => ({
+            ...project,
+            deletedAt: project.deletedAt ?? null,
+            revision: project.revision ?? 0,
+          }),
+        },
+      },
       boards: {
         schema: boardSchema,
         migrationStrategies: {
@@ -196,7 +213,15 @@ async function migrateLegacyLocalStorage(instance: RxDatabase<RxCollections>) {
   try {
     const { active: _active, ...legacyProperties } = boardSchema.properties
     await legacy.addCollections({
-      projects: { schema: projectSchema },
+      projects: {
+        schema: {
+          ...projectSchema,
+          version: 0,
+          properties: Object.fromEntries(
+            Object.entries(projectSchema.properties).filter(([key]) => key !== 'deletedAt' && key !== 'revision'),
+          ),
+        },
+      },
       boards: {
         schema: {
           ...boardSchema,
@@ -239,11 +264,12 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
     return { project: null, board: null }
   }
 
-  async listProjects(): Promise<Project[]> {
+  async listProjects(includeDeleted?: boolean): Promise<Project[]> {
     const db = await database()
     const documents = await (db.projects as any).find().exec()
     return documents
       .map(plain<Project>)
+      .filter((project: Project) => project.ownerId === workspaceIdentity && (includeDeleted || !project.deletedAt))
       .toSorted((left: Project, right: Project) => right.updatedAt.localeCompare(left.updatedAt))
   }
 
@@ -252,18 +278,7 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
     const db = await database()
     const documents = await (db.projects as any).find({ selector: { ownerId: LOCAL_PRINCIPAL_ID } }).exec()
 
-    const legitimateDocs: any[] = []
-    for (const document of documents) {
-      const project = plain<Project>(document)
-      // Clean up any stale legacy bootstrap placeholder projects from previous sessions
-      if (['Product design', 'Research', 'Personal'].includes(project.name)) {
-        await document.remove()
-        const relatedBoards = await (db.boards as any).find({ selector: { projectId: project.id } }).exec()
-        await Promise.all(relatedBoards.map((b: any) => b.remove()))
-      } else {
-        legitimateDocs.push(document)
-      }
-    }
+    const legitimateDocs: any[] = documents
 
     await Promise.all(
       legitimateDocs.map(async (document: any) => {
@@ -298,6 +313,7 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
 
   async listBoards(projectId: string): Promise<Board[]> {
     const db = await database()
+    if (!(await this.listProjects()).some((project) => project.id === projectId)) return []
     const documents = await (db.boards as any).find({ selector: { projectId, active: true } }).exec()
     return documents
       .map((document: any) => toBoard(plain<BoardDocument>(document)))
@@ -305,6 +321,8 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
   }
 
   async createBoard(projectId: string, name: string): Promise<BoardDocument> {
+    const parent = (await this.listProjects()).find((project) => project.id === projectId)
+    if (!parent) throw new Error('Project is unavailable.')
     const timestamp = now()
     const document: BoardDocument = {
       id: newId(),
@@ -330,13 +348,19 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
   async loadBoard(boardId: string): Promise<BoardDocument | null> {
     const db = await database()
     const document = await (db.boards as any).findOne(boardId).exec()
-    return document ? plain<BoardDocument>(document) : null
+    if (!document) return null
+    const board = plain<BoardDocument>(document)
+    const parent = (await this.listProjects(true)).find((project) => project.id === board.projectId)
+    return parent ? board : null
   }
 
   async saveBoard(document: BoardDocument): Promise<BoardDocument> {
+    if (!(await this.listProjects(true)).some((project) => project.id === document.projectId))
+      throw new Error('Project is unavailable.')
     const db = await database()
     const existingDocument = await (db.boards as any).findOne(document.id).exec()
     const current = existingDocument ? plain<BoardDocument>(existingDocument) : normalizedBoard(document)
+    if (current.active === false) throw new Error('Board was deleted.')
     const nextRevision = Math.max(current.revision ?? 0, document.revision ?? 0) + 1
     const updated: BoardDocument = {
       ...document,
@@ -371,10 +395,13 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
     else await (db.boards as any).insert(normalized)
   }
 
-  async listBoardsForSync(): Promise<Board[]> {
+  async listBoardsForSync(includeDeletedProjects?: boolean): Promise<Board[]> {
     const db = await database()
     const documents = await (db.boards as any).find().exec()
-    return documents.map((document: any) => toBoard(plain<BoardDocument>(document)))
+    const projects = new Set((await this.listProjects(includeDeletedProjects)).map((project) => project.id))
+    return documents
+      .map((document: any) => toBoard(plain<BoardDocument>(document)))
+      .filter((board: Board) => projects.has(board.projectId))
   }
 
   async deleteBoard(boardId: string): Promise<void> {

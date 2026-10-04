@@ -5,6 +5,15 @@ import { onValueDeleted } from 'firebase-functions/v2/database'
 import { onDocumentWritten } from 'firebase-functions/v2/firestore'
 import { HttpsError, onCall } from 'firebase-functions/v2/https'
 import { defineString } from 'firebase-functions/params'
+import { mirrorCurrentPolicy } from './project-access.js'
+export {
+  manageProject,
+  manageBoardAccess,
+  listSharedProjects,
+  createProjectBoard,
+  mirrorProjectAccess,
+  publishProjectBoard,
+} from './project-access.js'
 
 initializeApp()
 
@@ -20,29 +29,6 @@ const firestoreFunctionRegion = defineString('FIRESTORE_FUNCTION_REGION')
 const syncAccessFunctionRegion = defineString('SYNC_ACCESS_FUNCTION_REGION')
 
 type ElementDeltaRecord = { id?: string; version?: number; versionNonce?: number; data?: string }
-
-function accessPolicyFromConfig(config: Record<string, any>) {
-  const collaborators = config.collaborators ?? {}
-  const readersByEmail: Record<string, true> = {}
-  const editorsByEmail: Record<string, true> = {}
-  for (const [email, collaborator] of Object.entries(collaborators) as [string, { role?: string }][]) {
-    readersByEmail[email.toLowerCase()] = true
-    if (collaborator?.role === 'editor') editorsByEmail[email.toLowerCase()] = true
-  }
-  for (const email of config.invitedEmails ?? []) readersByEmail[String(email).toLowerCase()] = true
-
-  return {
-    ownerId: config.ownerId ?? null,
-    publicRead: config.generalAccess === 'anyone_with_link',
-    publicWrite: config.generalAccess === 'anyone_with_link' && config.generalRole === 'editor',
-    readersByEmail,
-    editorsByEmail,
-  }
-}
-
-async function mirrorBoardAccess(boardId: string, config: Record<string, any>) {
-  await getDatabase().ref(`boardAccess/${boardId}`).set(accessPolicyFromConfig(config))
-}
 
 function mergeDeltas(baseElements: any[], records: ElementDeltaRecord[]): any[] {
   const elements = new Map<string, any>()
@@ -109,24 +95,26 @@ export const compactAbandonedCollaborationRoom = onValueDeleted(
 
     const elementsRef = rtdb.ref(`boards/${boardId}/elements`)
     try {
-      const [boardSnapshot, deltaSnapshot] = await Promise.all([
-        firestore.doc(`boardShares/${boardId}`).get(),
-        elementsRef.get(),
-      ])
+      const deltaSnapshot = await elementsRef.get()
       if (!deltaSnapshot.exists()) return
 
-      const boardData = boardSnapshot.exists ? (boardSnapshot.data() ?? {}) : {}
-      const baseElements = boardData.scene?.elements ?? []
       const records = Object.values((deltaSnapshot.val() ?? {}) as Record<string, ElementDeltaRecord>)
-      const mergedElements = mergeDeltas(baseElements, records)
 
-      await firestore.runTransaction(async (transaction) => {
+      const compacted = await firestore.runTransaction(async (transaction) => {
         const boardRef = firestore.doc(`boardShares/${boardId}`)
         const current = await transaction.get(boardRef)
-        if (!current.exists) return
+        if (!current.exists) return false
         const currentData = current.data() ?? {}
+        if (currentData.deletedAt || currentData.pending) return false
+        if (currentData.projectId) {
+          const parent = await transaction.get(firestore.doc(`projectShares/${currentData.projectId}`))
+          if (parent.data()?.deletedAt || parent.data()?.pending) return false
+        }
         const revision = Number(currentData.snapshotRevision ?? 0) + 1
-        const scene = { ...(currentData.scene ?? {}), elements: mergedElements }
+        const scene = {
+          ...(currentData.scene ?? {}),
+          elements: mergeDeltas(currentData.scene?.elements ?? [], records),
+        }
         const updatedAt = new Date().toISOString()
         transaction.update(boardRef, { scene, snapshotRevision: revision, updatedAt })
         transaction.set(firestore.doc(`boardShares/${boardId}/history/${String(revision).padStart(12, '0')}`), {
@@ -135,11 +123,12 @@ export const compactAbandonedCollaborationRoom = onValueDeleted(
           reason: 'abandoned-room-compaction',
           createdAt: updatedAt,
         })
+        return true
       })
 
       // A reconnect after the grace period must retain its live data. A newly
       // connected client also seeds full elements, so skipping this prune is safe.
-      if (!(await presenceRef.get()).exists()) await elementsRef.remove()
+      if (compacted && !(await presenceRef.get()).exists()) await elementsRef.remove()
     } finally {
       await lockRef.remove()
     }
@@ -151,14 +140,7 @@ export const mirrorBoardAccessToRtdb = onDocumentWritten(
   { document: 'boardShares/{boardId}', region: firestoreFunctionRegion },
   async (event) => {
     const boardId = event.params.boardId
-    const accessRef = getDatabase().ref(`boardAccess/${boardId}`)
-    const after = event.data?.after
-    if (!after?.exists) {
-      await accessRef.remove()
-      return
-    }
-
-    await mirrorBoardAccess(boardId, after.data() ?? {})
+    await mirrorCurrentPolicy('board', boardId)
   },
 )
 
@@ -180,6 +162,6 @@ export const syncBoardAccessToRtdb = onCall({ region: syncAccessFunctionRegion }
     throw new HttpsError('permission-denied', 'Only the board owner can synchronize sharing access.')
   }
 
-  await mirrorBoardAccess(boardId, config)
+  await mirrorCurrentPolicy('board', boardId)
   return { mirrored: true }
 })

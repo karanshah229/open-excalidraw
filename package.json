@@ -40,7 +40,8 @@
     "test:images:formats:cloud": "pnpm --filter @agentic-whiteboard/functions build && firebase emulators:exec --only auth,firestore,storage,database,functions --project demo-image-persistence --config image-persistence.firebase.json 'node tests/image-formats.test.mjs --cloud'",
     "test:images:formats:dev": "node tests/image-formats.test.mjs --live=development",
     "test:images:formats:prod-bundle": "node tests/image-formats.test.mjs --production-bundle",
-    "test:sync:deleted-project": "pnpm --filter @agentic-whiteboard/functions build && firebase emulators:exec --only auth,firestore,storage,database,functions --project demo-image-persistence --config image-persistence.firebase.json 'node tests/deleted-project-sync.test.mjs'"
+    "test:sync:deleted-project": "pnpm --filter @agentic-whiteboard/functions build && firebase emulators:exec --only auth,firestore,storage,database,functions --project demo-image-persistence --config image-persistence.firebase.json 'node tests/deleted-project-sync.test.mjs'",
+    "test:e2e:projects": "node tests/run-projects-e2e.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

@@ -36,3 +36,6 @@ yarn-error.log*
 
 # Scratch directory
 scratch/
+
+# Generated browser screenshots and test diagnostics
+.system_generated/

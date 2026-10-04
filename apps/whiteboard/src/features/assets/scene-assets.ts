@@ -1,10 +1,8 @@
 import type { BoardFile, BoardScene } from '@agentic-whiteboard/storage'
-import { connectFunctionsEmulator, getFunctions, httpsCallable } from 'firebase/functions'
-import { getFirebaseApp, getSyncAccessFunctionRegion } from '../../lib/firebase'
+import { projectCall } from '../sharing/project-service'
 
 const uploads = new Map<string, Promise<void>>()
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024
-const emulatorConnections = new WeakSet<object>()
 
 /** Server authorization applies to every byte transfer; locators are not public URLs. */
 export async function requestBoardAsset(input: {
@@ -14,16 +12,7 @@ export async function requestBoardAsset(input: {
   dataURL?: string
   mimeType?: string
 }): Promise<{ exists?: boolean; dataURL?: string }> {
-  const app = getFirebaseApp()
-  const region = getSyncAccessFunctionRegion()
-  if (!app || !region) throw new Error('Firebase image functions are not configured.')
-  const functions = getFunctions(app, region)
-  if (import.meta.env.VITE_USE_FIREBASE_EMULATOR === 'true' && !emulatorConnections.has(functions)) {
-    connectFunctionsEmulator(functions, window.location.hostname, 5001)
-    emulatorConnections.add(functions)
-  }
-  return (await httpsCallable<typeof input, { exists?: boolean; dataURL?: string }>(functions, 'boardAsset')(input))
-    .data
+  return projectCall('boardAsset', input)
 }
 
 /** Keep image bytes out of Firestore's size-limited scene documents. */
@@ -32,8 +21,16 @@ export async function storeSceneAssets(scene: BoardScene, assetRoot: string, pro
   const entries = await Promise.all(
     Object.entries(scene.files ?? {}).map(async ([id, file]) => {
       const storagePath = `${assetRoot}/${encodeURIComponent(id)}`
-      // A restored Storage locator is an upload receipt for this immutable file.
-      if (file.storagePath === storagePath) return [id, { ...file, dataURL: '', storagePath }] as const
+      // Publishing a board may retain its owner's private-root receipt. The
+      // gateway authorizes that same object for recipients using current policy.
+      const privateReceipt = /^users\/[^/]+\/boards\/([^/]+)\/assets\/([^/]+)$/.exec(file.storagePath ?? '')
+      const sharedBoardId = /^boards\/([^/]+)\/assets$/.exec(assetRoot)?.[1]
+      if (
+        file.storagePath === storagePath ||
+        (privateReceipt?.[1] === sharedBoardId && privateReceipt?.[2] === encodeURIComponent(id))
+      ) {
+        return [id, { ...file, dataURL: '' }] as const
+      }
       // Excalidraw file IDs identify immutable content. Deduplicate concurrent saves.
       let upload = uploads.get(storagePath)
       if (!upload) {

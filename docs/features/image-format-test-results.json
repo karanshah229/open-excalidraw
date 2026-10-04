@@ -1,11 +1,11 @@
 {
-  "date": "2026-10-03",
+  "date": "2026-10-04",
   "browser": "Chrome/154.0.8037.95",
   "local": {
     "formats": ["png", "jpg", "svg", "gif", "webp", "bmp", "ico", "avif", "jfif"],
     "excalidrawBundle": "development",
-    "startedAt": "2026-10-03T12:16:07.250Z",
-    "finishedAt": "2026-10-03T12:16:38.563Z",
+    "startedAt": "2026-10-04T02:42:31.159Z",
+    "finishedAt": "2026-10-04T02:43:01.084Z",
     "mode": "local",
     "browserVersion": "Chrome/154.0.8037.95",
     "project": null,
@@ -34,10 +34,10 @@
           "type": "image/png",
           "size": 175
         },
-        "boardId": "3824ac2e-790f-4b2b-bb3c-77e48df38cb8",
+        "boardId": "f051eeb4-981a-49bf-965d-f2109d03dbea",
         "fileId": "c7a30d1e99b5b79659ee8b87fcb3b5538cd87cc4",
         "storedMimeType": "image/png",
-        "durationMs": 4258
+        "durationMs": 4045
       },
       {
         "format": "jpg",
@@ -61,10 +61,10 @@
           "type": "image/jpeg",
           "size": 703
         },
-        "boardId": "a9d13fda-9996-475b-b7d7-167526fb4698",
+        "boardId": "4867f3b3-9cd5-4dcc-a551-f4e709ec0fa0",
         "fileId": "5f5c6e611f11289caae4d67f8bd501eecb3a044b",
         "storedMimeType": "image/jpeg",
-        "durationMs": 3631
+        "durationMs": 3139
       },
       {
         "format": "svg",
@@ -88,10 +88,10 @@
           "type": "image/svg+xml",
           "size": 170
         },
-        "boardId": "2b0cdd46-0176-4fbd-bfd7-8c041a3e3f03",
+        "boardId": "718972b4-87ee-465a-8508-193b719ad93b",
         "fileId": "b76ea8df9a81891e417ca38d7acef010e53838e1",
         "storedMimeType": "image/svg+xml",
-        "durationMs": 3088
+        "durationMs": 2914
       },
       {
         "format": "gif",
@@ -115,10 +115,10 @@
           "type": "image/gif",
           "size": 163
         },
-        "boardId": "e392c6b5-bc79-457f-869f-970f3a413b1f",
+        "boardId": "72112f9c-7cd0-42b2-bdab-4a421ed9f937",
         "fileId": "63aa575642cfaa45774936bcd3a5157c87c7480a",
         "storedMimeType": "image/gif",
-        "durationMs": 3095
+        "durationMs": 3062
       },
       {
         "format": "webp",
@@ -142,10 +142,10 @@
           "type": "image/webp",
           "size": 122
         },
-        "boardId": "0a0df230-c107-4a73-937d-29d8db2dd73b",
+        "boardId": "9e31bd92-9f9a-4b72-88cf-07d09a964bda",
         "fileId": "79ede5dc4fa2d9633f4b7c5cfaa79304338c761f",
         "storedMimeType": "image/webp",
-        "durationMs": 3056
+        "durationMs": 3071
       },
       {
         "format": "bmp",
@@ -169,10 +169,10 @@
           "type": "image/bmp",
           "size": 9270
         },
-        "boardId": "68722e5f-d8d5-43b2-8e54-76ff22bd34fa",
+        "boardId": "987f86c5-9e66-47c3-908c-12b8520af0e8",
         "fileId": "2e4f1fa6e5ad2d645e04d5a6bcd3be7329fe8a17",
         "storedMimeType": "image/bmp",
-        "durationMs": 3245
+        "durationMs": 2975
       },
       {
         "format": "ico",
@@ -196,10 +196,10 @@
           "type": "image/vnd.microsoft.icon",
           "size": 399
         },
-        "boardId": "20564ebc-609d-47de-baba-56054a561a72",
+        "boardId": "c095365e-b49c-4c98-92e0-73e4cf8d837f",
         "fileId": "79ffa35ef3fd23801748e23fbe127a57bf54d20c",
         "storedMimeType": "image/vnd.microsoft.icon",
-        "durationMs": 3141
+        "durationMs": 3035
       },
       {
         "format": "avif",
@@ -223,10 +223,10 @@
           "type": "image/avif",
           "size": 326
         },
-        "boardId": "4756c3e3-27de-4d61-a285-52cc831543d4",
+        "boardId": "cfe41791-2e11-461f-b8d7-301b050fef8a",
         "fileId": "4e312a9b5e37e31d017ccd1771966b41551a35ce",
         "storedMimeType": "image/avif",
-        "durationMs": 3384
+        "durationMs": 2911
       },
       {
         "format": "jfif",
@@ -250,18 +250,18 @@
           "type": "image/jpeg",
           "size": 703
         },
-        "boardId": "6ede76ec-6f4a-4fe1-a73f-dbce1f9884ad",
+        "boardId": "f0553bb8-06fc-440c-9901-1f96733d558d",
         "fileId": "5f5c6e611f11289caae4d67f8bd501eecb3a044b",
         "storedMimeType": "image/jpeg",
-        "durationMs": 3146
+        "durationMs": 3077
       }
     ]
   },
   "firebaseEmulators": {
     "formats": ["png", "jpg", "svg", "gif", "webp", "bmp", "ico", "avif", "jfif"],
     "excalidrawBundle": "development",
-    "startedAt": "2026-10-03T12:16:24.994Z",
-    "finishedAt": "2026-10-03T12:17:15.532Z",
+    "startedAt": "2026-10-03T12:51:34.645Z",
+    "finishedAt": "2026-10-03T12:52:42.856Z",
     "mode": "emulators",
     "browserVersion": "Chrome/154.0.8037.95",
     "project": "demo-image-persistence",
@@ -282,7 +282,7 @@
           "real mouse movement persists position with zero image byte transfers"
         ],
         "network": {
-          "uploads": 2,
+          "uploads": 1,
           "reads": 7,
           "movementTransfers": 0
         },
@@ -292,10 +292,10 @@
           "type": "image/png",
           "size": 175
         },
-        "boardId": "bc10fb2d-8bbc-4b34-a9a0-80f95ccc604a",
+        "boardId": "e54de56c-a11a-4c44-a111-2d9ebad3e2f9",
         "fileId": "c7a30d1e99b5b79659ee8b87fcb3b5538cd87cc4",
         "storedMimeType": "image/png",
-        "durationMs": 8530
+        "durationMs": 8438
       },
       {
         "format": "jpg",
@@ -311,7 +311,7 @@
           "real mouse movement persists position with zero image byte transfers"
         ],
         "network": {
-          "uploads": 2,
+          "uploads": 1,
           "reads": 7,
           "movementTransfers": 0
         },
@@ -321,10 +321,10 @@
           "type": "image/jpeg",
           "size": 703
         },
-        "boardId": "e1e2b9d0-1037-484b-9614-c76eb564385d",
+        "boardId": "9102374f-e0e2-4570-b141-8f196f0eb5dc",
         "fileId": "5f5c6e611f11289caae4d67f8bd501eecb3a044b",
         "storedMimeType": "image/jpeg",
-        "durationMs": 4708
+        "durationMs": 22243
       },
       {
         "format": "svg",
@@ -340,8 +340,8 @@
           "real mouse movement persists position with zero image byte transfers"
         ],
         "network": {
-          "uploads": 2,
-          "reads": 7,
+          "uploads": 1,
+          "reads": 6,
           "movementTransfers": 0
         },
         "errors": [],
@@ -350,10 +350,10 @@
           "type": "image/svg+xml",
           "size": 170
         },
-        "boardId": "afb8eaff-edb2-4f7a-9804-8a96642f9948",
+        "boardId": "6cb144b1-e921-46ab-9920-52cec1cd5313",
         "fileId": "b76ea8df9a81891e417ca38d7acef010e53838e1",
         "storedMimeType": "image/svg+xml",
-        "durationMs": 5428
+        "durationMs": 5488
       },
       {
         "format": "gif",
@@ -369,7 +369,7 @@
           "real mouse movement persists position with zero image byte transfers"
         ],
         "network": {
-          "uploads": 2,
+          "uploads": 1,
           "reads": 6,
           "movementTransfers": 0
         },
@@ -379,10 +379,10 @@
           "type": "image/gif",
           "size": 163
         },
-        "boardId": "7b29d3ce-f11b-4840-bbb5-cd1e88ef68e4",
+        "boardId": "5f111302-0d2b-4caf-837e-339d86b20997",
         "fileId": "63aa575642cfaa45774936bcd3a5157c87c7480a",
         "storedMimeType": "image/gif",
-        "durationMs": 5443
+        "durationMs": 5551
       },
       {
         "format": "webp",
@@ -398,7 +398,7 @@
           "real mouse movement persists position with zero image byte transfers"
         ],
         "network": {
-          "uploads": 2,
+          "uploads": 1,
           "reads": 6,
           "movementTransfers": 0
         },
@@ -408,10 +408,10 @@
           "type": "image/webp",
           "size": 122
         },
-        "boardId": "650b0029-3c76-48da-8f6a-c9d9623f2eb9",
+        "boardId": "4c5e3ce3-9003-436f-8b06-9a029a51dc89",
         "fileId": "79ede5dc4fa2d9633f4b7c5cfaa79304338c761f",
         "storedMimeType": "image/webp",
-        "durationMs": 5461
+        "durationMs": 5477
       },
       {
         "format": "bmp",
@@ -427,8 +427,8 @@
           "real mouse movement persists position with zero image byte transfers"
         ],
         "network": {
-          "uploads": 2,
-          "reads": 7,
+          "uploads": 1,
+          "reads": 6,
           "movementTransfers": 0
         },
         "errors": [],
@@ -437,10 +437,10 @@
           "type": "image/bmp",
           "size": 9270
         },
-        "boardId": "6edd787a-ddfe-4790-93bb-50c5b81d12ed",
+        "boardId": "636b0b77-e35a-4b9c-a5dc-65a0694a97cc",
         "fileId": "2e4f1fa6e5ad2d645e04d5a6bcd3be7329fe8a17",
         "storedMimeType": "image/bmp",
-        "durationMs": 4593
+        "durationMs": 4527
       },
       {
         "format": "ico",
@@ -456,7 +456,7 @@
           "real mouse movement persists position with zero image byte transfers"
         ],
         "network": {
-          "uploads": 2,
+          "uploads": 1,
           "reads": 6,
           "movementTransfers": 0
         },
@@ -466,10 +466,10 @@
           "type": "image/vnd.microsoft.icon",
           "size": 399
         },
-        "boardId": "c7f82681-ea43-4bbc-ba5e-9a00910df436",
+        "boardId": "d1130613-ceaf-4809-9864-afd6a7d9e323",
         "fileId": "79ffa35ef3fd23801748e23fbe127a57bf54d20c",
         "storedMimeType": "image/vnd.microsoft.icon",
-        "durationMs": 4429
+        "durationMs": 4458
       },
       {
         "format": "avif",
@@ -485,7 +485,7 @@
           "real mouse movement persists position with zero image byte transfers"
         ],
         "network": {
-          "uploads": 2,
+          "uploads": 1,
           "reads": 6,
           "movementTransfers": 0
         },
@@ -495,10 +495,10 @@
           "type": "image/avif",
           "size": 326
         },
-        "boardId": "bbc556bf-4205-4bfb-92fc-ffcd4ef98573",
+        "boardId": "ca80de55-121d-4e84-a276-37f178f62869",
         "fileId": "4e312a9b5e37e31d017ccd1771966b41551a35ce",
         "storedMimeType": "image/avif",
-        "durationMs": 5448
+        "durationMs": 5531
       },
       {
         "format": "jfif",
@@ -514,7 +514,7 @@
           "real mouse movement persists position with zero image byte transfers"
         ],
         "network": {
-          "uploads": 2,
+          "uploads": 1,
           "reads": 6,
           "movementTransfers": 0
         },
@@ -524,10 +524,10 @@
           "type": "image/jpeg",
           "size": 703
         },
-        "boardId": "33b9fe36-6da4-47a3-a0df-86afe3e4c1d9",
+        "boardId": "40c0c859-9b39-4ef8-8a30-74816c56e059",
         "fileId": "5f5c6e611f11289caae4d67f8bd501eecb3a044b",
         "storedMimeType": "image/jpeg",
-        "durationMs": 5421
+        "durationMs": 5457
       }
     ]
   },
@@ -1109,8 +1109,8 @@
   "productionExcalidrawBundleLocal": {
     "formats": ["png", "jpg", "svg", "gif", "webp", "bmp", "ico", "avif", "jfif"],
     "excalidrawBundle": "production",
-    "startedAt": "2026-10-03T12:16:07.250Z",
-    "finishedAt": "2026-10-03T12:16:38.274Z",
+    "startedAt": "2026-10-04T02:43:01.495Z",
+    "finishedAt": "2026-10-04T02:43:31.633Z",
     "mode": "local-production-bundle",
     "browserVersion": "Chrome/154.0.8037.95",
     "project": null,
@@ -1139,10 +1139,10 @@
           "type": "image/png",
           "size": 175
         },
-        "boardId": "3161901b-c046-4b13-9384-74291ac31cb9",
+        "boardId": "14ad2a87-eaaa-41a6-97cf-e5a7e7a92cc6",
         "fileId": "c7a30d1e99b5b79659ee8b87fcb3b5538cd87cc4",
         "storedMimeType": "image/png",
-        "durationMs": 4293
+        "durationMs": 3624
       },
       {
         "format": "jpg",
@@ -1166,10 +1166,10 @@
           "type": "image/jpeg",
           "size": 703
         },
-        "boardId": "95c0990e-5c66-4624-80e8-bda9a3c3630f",
+        "boardId": "7728cc90-abc8-4d85-90e4-656087a8c268",
         "fileId": "5f5c6e611f11289caae4d67f8bd501eecb3a044b",
         "storedMimeType": "image/jpeg",
-        "durationMs": 3627
+        "durationMs": 2941
       },
       {
         "format": "svg",
@@ -1193,10 +1193,10 @@
           "type": "image/svg+xml",
           "size": 170
         },
-        "boardId": "dab6a08d-975c-49ca-a2b9-f79091d5778d",
+        "boardId": "a40b1507-d460-4864-87f0-0ef44d7f4ef9",
         "fileId": "b76ea8df9a81891e417ca38d7acef010e53838e1",
         "storedMimeType": "image/svg+xml",
-        "durationMs": 3035
+        "durationMs": 3388
       },
       {
         "format": "gif",
@@ -1220,10 +1220,10 @@
           "type": "image/gif",
           "size": 163
         },
-        "boardId": "df345348-2b7b-4d0f-ae9e-9c90f3860987",
+        "boardId": "b16ff19f-e01d-4908-92df-a09f98c4451d",
         "fileId": "63aa575642cfaa45774936bcd3a5157c87c7480a",
         "storedMimeType": "image/gif",
-        "durationMs": 3057
+        "durationMs": 2964
       },
       {
         "format": "webp",
@@ -1247,10 +1247,10 @@
           "type": "image/webp",
           "size": 122
         },
-        "boardId": "cbf656b0-a189-42bd-8430-9f3d682d7640",
+        "boardId": "92f2a321-fca3-43f4-a02f-20d9d187568a",
         "fileId": "79ede5dc4fa2d9633f4b7c5cfaa79304338c761f",
         "storedMimeType": "image/webp",
-        "durationMs": 3021
+        "durationMs": 3338
       },
       {
         "format": "bmp",
@@ -1274,10 +1274,10 @@
           "type": "image/bmp",
           "size": 9270
         },
-        "boardId": "d62ad0d3-ffca-4e4d-b163-c2705c11b364",
+        "boardId": "4970e838-8f0b-4c58-aa6e-90df600406cd",
         "fileId": "2e4f1fa6e5ad2d645e04d5a6bcd3be7329fe8a17",
         "storedMimeType": "image/bmp",
-        "durationMs": 3284
+        "durationMs": 3757
       },
       {
         "format": "ico",
@@ -1301,10 +1301,10 @@
           "type": "image/vnd.microsoft.icon",
           "size": 399
         },
-        "boardId": "b8b74a49-642e-4317-a033-ef52ee82ae7e",
+        "boardId": "fd375e2e-44ed-40bd-8b71-3185d5300150",
         "fileId": "79ffa35ef3fd23801748e23fbe127a57bf54d20c",
         "storedMimeType": "image/vnd.microsoft.icon",
-        "durationMs": 3127
+        "durationMs": 3197
       },
       {
         "format": "avif",
@@ -1328,10 +1328,10 @@
           "type": "image/avif",
           "size": 326
         },
-        "boardId": "1139ab01-9fd5-4ba0-87b6-8d5bbe7d412c",
+        "boardId": "187def9b-1c87-4b91-b35b-b7147077d759",
         "fileId": "4e312a9b5e37e31d017ccd1771966b41551a35ce",
         "storedMimeType": "image/avif",
-        "durationMs": 3257
+        "durationMs": 3160
       },
       {
         "format": "jfif",
@@ -1355,10 +1355,10 @@
           "type": "image/jpeg",
           "size": 703
         },
-        "boardId": "c2f2ead3-1adc-4f3a-b051-0b3bae1cd4cb",
+        "boardId": "6ed90ee2-2c3e-4668-a429-dc1e89bfa0e0",
         "fileId": "5f5c6e611f11289caae4d67f8bd501eecb3a044b",
         "storedMimeType": "image/jpeg",
-        "durationMs": 3090
+        "durationMs": 3149
       }
     ]
   },
@@ -1374,5 +1374,13 @@
     "productionBuild": "passed",
     "regression": "All nine formats assert move before placement and pending image cleared/no wait cursor after placement",
     "redRepro": "node tests/image-formats.test.mjs --format=png failed waiting for move before patch"
+  },
+  "integration": {
+    "mainCommit": "faea109",
+    "projectSharingScenariosPassed": 35,
+    "uploadsPerFormat": 1,
+    "movementImageTransfers": 0,
+    "deletedProjectRestore": "passed",
+    "mergedBranchDeployed": false
   }
 }

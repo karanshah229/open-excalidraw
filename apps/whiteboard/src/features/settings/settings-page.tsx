@@ -1,3 +1,5 @@
+import { useState } from 'react'
+import { DownloadBoardsModal } from '../workspace/download-boards-modal'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import {
   Cpu,
@@ -24,6 +26,7 @@ function isSettingsTab(tab: string | undefined): tab is SettingsTab {
 
 export function SettingsPage() {
   const navigate = useNavigate()
+  const [downloadOpen, setDownloadOpen] = useState(false)
   const search = useSearch({ strict: false }) as { tab?: string }
   const activeTab = isSettingsTab(search.tab) ? search.tab : 'preferences'
   const { mode, setMode } = useTheme()
@@ -36,6 +39,7 @@ export function SettingsPage() {
 
   return (
     <div className="settings-shell">
+      {downloadOpen && <DownloadBoardsModal name="your boards" onClose={() => setDownloadOpen(false)} />}
       <div className="settings-container">
         <header className="settings-header">
           <h1>Settings</h1>
@@ -355,6 +359,21 @@ export function SettingsPage() {
                       </label>
                       <input id="settings-email" type="email" className="ui-input" value={user.email} readOnly />
                     </div>
+                  </div>
+                </div>
+                <div className="settings-section-header" style={{ marginTop: 24 }}>
+                  <h2>Your data</h2>
+                  <p>Keep a copy of the boards you own.</p>
+                </div>
+                <div className="settings-card">
+                  <div className="settings-field">
+                    <div className="settings-field-label">
+                      <strong>Download your boards</strong>
+                      <span>Download all owned boards, including archived projects, local edits, and images.</span>
+                    </div>
+                    <button className="ui-button ui-button--default" onClick={() => setDownloadOpen(true)}>
+                      Download
+                    </button>
                   </div>
                 </div>
               </section>

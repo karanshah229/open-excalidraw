@@ -229,6 +229,11 @@ try {
         assert.ok(calls.slice(beforeReload).includes('read'), 'Reload must actually fetch stored image bytes')
         await page.click('button[title="Share board"]')
         await page.waitForSelector('.google-share-dialog')
+        // The merged sharing dialog saves policy changes once; unchanged Done only closes.
+        await page.click('[aria-label="General access setting"]')
+        await page.click('.google-share-dropdown-item:last-child')
+        await page.waitForFunction(() => !document.querySelector('button.google-share-done-btn')?.disabled)
+
         await page.click('button.google-share-done-btn')
         await page.waitForSelector('.google-share-dialog', { hidden: true })
         assert.ok(!result.sharingError, result.sharingError)
@@ -295,7 +300,11 @@ try {
       assert.equal(movementTransfers, 0, 'Movement must not transfer image bytes')
       result.checks.push('real mouse movement persists position with zero image byte transfers')
       if (cloud)
-        assert.equal(calls.filter((op) => op === 'upload').length, 2, 'One upload each for private and shared paths')
+        assert.equal(
+          calls.filter((op) => op === 'upload').length,
+          1,
+          'Sharing and moving reuse the initial private object',
+        )
       result.network = {
         uploads: calls.filter((op) => op === 'upload').length,
         reads: calls.filter((op) => op === 'read').length,

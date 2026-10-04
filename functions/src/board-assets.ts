@@ -74,29 +74,37 @@ export const boardAsset = onCall(
       throw new HttpsError('invalid-argument', 'Invalid asset path.')
     }
     const identity = request.auth as AssetIdentity
+    const db = getFirestore()
+    const config = (await db.doc(`boardShares/${boardId}`).get()).data()
+    const parentPolicy = config?.projectId
+      ? (await db.doc(`projectShares/${config.projectId}`).get()).data()
+      : undefined
+    const sharedAllowed = Boolean(
+      config &&
+      typeof config.ownerId === 'string' &&
+      ID.test(config.ownerId) &&
+      canAccessAsset(config, identity, operation === 'upload', parentPolicy),
+    )
     if (privatePath) {
       const ownerId = privatePath[1]
-      if (!ID.test(ownerId) || identity?.uid !== ownerId) {
-        throw new HttpsError('permission-denied', 'Only the owner can access private assets.')
+      if (!ID.test(ownerId)) throw new HttpsError('invalid-argument', 'Invalid owner ID.')
+      // Initial project publication keeps the existing private-root descriptor.
+      // Readers receive those bytes through the board's current sharing policy.
+      // Only its owner may upload into the private namespace.
+      if (config && (config.ownerId !== ownerId || !sharedAllowed)) {
+        throw new HttpsError('permission-denied', 'Board access is required.')
       }
-      const location = await locateBoard(ownerId, boardId, projectId)
-      // The first upload precedes the board scene commit. Only a validated
-      // parent project permits that write; reads require the committed board.
+      if (identity?.uid !== ownerId && (operation === 'upload' || !sharedAllowed)) {
+        throw new HttpsError('permission-denied', 'Board access is required.')
+      }
+      const location = await locateBoard(ownerId, boardId, projectId ?? config?.projectId ?? config?.sourceProjectId)
       if (!location || (!location.boardExists && operation === 'read')) {
         throw new HttpsError('permission-denied', 'Board was not found.')
       }
     } else {
-      const config = (await getFirestore().doc(`boardShares/${boardId}`).get()).data()
-      if (
-        !config ||
-        typeof config.ownerId !== 'string' ||
-        !ID.test(config.ownerId) ||
-        !canAccessAsset(config, identity, operation === 'upload')
-      ) {
-        throw new HttpsError('permission-denied', 'Board access is required.')
-      }
-      const location = await locateBoard(config.ownerId, boardId, config.sourceProjectId)
-      if (location && !location.boardExists && (operation === 'read' || identity?.uid !== config.ownerId)) {
+      if (!sharedAllowed) throw new HttpsError('permission-denied', 'Board access is required.')
+      const location = await locateBoard(config!.ownerId, boardId, config!.projectId ?? config!.sourceProjectId)
+      if (location && !location.boardExists && (operation === 'read' || identity?.uid !== config!.ownerId)) {
         throw new HttpsError('permission-denied', 'Board was not found.')
       }
     }

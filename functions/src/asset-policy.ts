@@ -5,17 +5,24 @@ export function isAssetParentActive(data: Record<string, unknown> | undefined): 
   return Boolean(data && data.active !== false && !data.deletedAt)
 }
 
-export function canAccessAsset(config: Record<string, any>, identity: AssetIdentity, write: boolean): boolean {
-  if (!isAssetParentActive(config)) return false
-  if (identity && identity.uid === config.ownerId) return true
-  if (config.generalAccess === 'anyone_with_link' && (!write || config.generalRole === 'editor')) return true
-  // An unverified email claim must not impersonate an invited collaborator.
-  const email =
-    identity?.token.email_verified === true && typeof identity.token.email === 'string'
-      ? identity.token.email.toLowerCase()
-      : undefined
-  if (!email) return false
-  return write
-    ? config.collaborators?.[email]?.role === 'editor'
-    : Boolean(config.invitedEmails?.includes(email) || config.collaborators?.[email])
+/** Board grants and inherited project grants use the same live-policy gates. */
+export function canAccessAsset(
+  config: Record<string, any>,
+  identity: AssetIdentity,
+  write: boolean,
+  parent?: Record<string, any>,
+): boolean {
+  if (!isAssetParentActive(config) || config.pending) return false
+  if (parent && (!isAssetParentActive(parent) || parent.pending || parent.ownerId !== config.ownerId)) return false
+  const allows = (policy: Record<string, any>) => {
+    if (identity && identity.uid === policy.ownerId) return true
+    if (policy.generalAccess === 'anyone_with_link' && (!write || policy.generalRole === 'editor')) return true
+    const email =
+      identity?.token.email_verified === true && typeof identity.token.email === 'string'
+        ? identity.token.email.toLowerCase()
+        : undefined
+    if (!email || !policy.invitedEmails?.includes(email)) return false
+    return !write || policy.collaborators?.[email]?.role === 'editor'
+  }
+  return allows(config) || Boolean(parent && config.inheritProjectAccess !== false && allows(parent))
 }

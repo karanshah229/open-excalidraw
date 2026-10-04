@@ -13,7 +13,7 @@ Use a Firebase callable `boardAsset` for image existence checks, uploads, and re
 
 Storage rules deny direct image reads, metadata access, and writes, including for the owner. This prevents browser clients from issuing `getDownloadURL` or creating new token-bearing uploads. Existing image download tokens are revoked during migration. Snapshot paths retain their separate existing policy; this decision covers image asset paths.
 
-An Admin-only `boardAssetLocations/{boardId}` document binds a board ID to its owner/project. New private uploads provide the project ID; legacy descriptors are resolved from the owner's projects. New share metadata includes `sourceProjectId`. Each request checks fresh board/project records, so restoring an active parent restores access without copying its images. Missing indexed parents deny reads. Legacy standalone shared boards continue using their share policy.
+An Admin-only `boardAssetLocations/{boardId}` document binds a board ID to its owner/project. New private uploads provide the project ID; legacy descriptors are resolved from the owner's projects. Sharing metadata uses the project feature’s authoritative `projectId`; `sourceProjectId` remains a legacy fallback. Each request checks fresh board/project records, so restoring an active parent restores access without copying its images. Missing indexed parents deny reads. Legacy standalone shared boards continue using their share policy.
 
 Soft deletion retains immutable objects:
 
@@ -26,7 +26,7 @@ Soft deletion retains immutable objects:
 
 No retention timer, lifecycle purge, or permanent asset deletion is introduced. An individually deleted image remains readable to authorized active-board users because the editor needs its bytes for undo. This is a recoverable tombstone, not per-image access revocation. Access changes cannot erase bytes a browser already downloaded.
 
-The project-deletion worktree must persist the project tombstone in Firestore at `users/{uid}/projects/{projectId}`. Local-only deletion cannot affect remote access. It must use `active: false` or `deletedAt`; restoring a project must preserve independently deleted boards. This change does not implement that worktree's UI or deletion workflow.
+The integrated project-deletion callable persists the project tombstone in Firestore at `users/{uid}/projects/{projectId}`. Local-only deletion cannot affect remote access. It must use `active: false` or `deletedAt`; restoring a project must preserve independently deleted boards. Image access consumes the existing deletion workflow; it adds no permanent object deletion.
 
 ## Alternatives Considered
 
@@ -59,6 +59,12 @@ The development project-deletion deployment revealed a stale-client failure: an 
 
 The client now persists `sync-blocked` for boards whose cloud parent has `active: false` or a nonempty `deletedAt`. This is distinct from a transient `sync-failed` retry. It retains local scene/image bytes, clears retry scheduling, and shows **Project deleted** with a read-only cached view. Deleted parents are omitted from the workspace list and their child-board subscriptions are stopped. A subsequent live project restoration, or restoration discovered after reload, requeues retained changes without clearing independently deleted boards' `active` flag.
 
-Project metadata writes use a transaction and merge, preserving server-owned fields and checking the tombstone before writing. Board transactions also check the parent; a permission-denied image request caused by a concurrent deletion is classified as blocked only after checking the actual project record. Cached blocked parent IDs prevent repeated full-workspace scans on ordinary project updates. No server deletion flag, permission, image object, or deployed rule was modified by this follow-up.
+Project metadata transactions create only missing private records and check existing tombstones; policy changes stay server-owned. Board transactions also check the parent; a permission-denied image request caused by a concurrent deletion is classified as blocked only after checking the actual project record. Cached blocked parent IDs prevent repeated full-workspace scans on ordinary project updates. No server deletion flag, permission, image object, or deployed rule was modified by this follow-up.
 
 `pnpm test:sync:deleted-project` uses the Firebase emulators and a real editor to verify the blocked status/read-only view, no image gateway calls during a blocked save, no loss of the project tombstone, pending image bytes surviving reload, and successful upload/sync after restoring the generated test project's parent. The existing cloud image suite and all nine format tests also passed after the change.
+
+## Integration with inherited project sharing
+
+After merging the first-class project feature, the gateway also evaluates `projectShares` and its `pending`/`deletedAt` gates. Direct board grants and inherited project grants combine only while the parent is live and ownership agrees; a custom board override disables inheritance. A published scene may retain its private-root locator: authorized board/project recipients can read that object through the gateway, but only its owner can upload to the private namespace. New owner images use the private root for both private and shared saves, deduplicating concurrent uploads; non-owner editors use the shared root. Reusing the existing locator avoids copying bytes on sharing or the first image move. The immutable location index and source parent checks continue to gate reads after deletion.
+
+Policy mutations use `manageBoardAccess`/`manageProject`. Image synchronization does not write policy fields or replace a newer scene with a sharing modal’s snapshot. The Storage snapshot policy preserves the project feature’s inherited grants, while image paths retain gateway-only access.

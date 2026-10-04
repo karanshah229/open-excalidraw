@@ -56,5 +56,21 @@
     },
     "production_new_images_token_free": true,
     "targeted_lint": "passed; two pre-existing unused-variable warnings in workspace/collaboration files"
+  },
+  "first_class_project_integration": {
+    "date": "2026-10-04",
+    "main_commit": "faea109",
+    "image_persistence_e2e": "passed",
+    "deleted_project_sync_e2e": "passed",
+    "project_sharing_scenarios": 35,
+    "formats_passed": {
+      "local": 9,
+      "firebase_emulators": 9,
+      "production_bundle_local": 9
+    },
+    "uploads_per_format": 1,
+    "movement_image_transfers": 0,
+    "merged_branch_live_tests": "not run",
+    "merged_branch_deployed": false
   }
 }

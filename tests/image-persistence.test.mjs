@@ -163,6 +163,11 @@ try {
     await page.waitForFunction(() => Boolean(window.__excalidrawAPI?.getFiles().asset?.dataURL))
     await page.click('button[title="Share board"]')
     await page.waitForSelector('.google-share-dialog')
+    // The merged sharing dialog saves policy changes once; unchanged Done only closes.
+    await page.click('[aria-label="General access setting"]')
+    await page.click('.google-share-dropdown-item:last-child')
+    await page.waitForFunction(() => !document.querySelector('button.google-share-done-btn')?.disabled)
+
     const done = await page.$('button.google-share-done-btn')
     assert.ok(done, 'Sharing dialog exposes Done')
     await done.click()
@@ -170,7 +175,7 @@ try {
     await page.waitForFunction(
       async (boardId) => {
         const { readSharedImagePath } = await import('/tests/image-cloud-fixture.ts')
-        return (await readSharedImagePath(boardId)) === `boards/${boardId}/assets/asset`
+        return (await readSharedImagePath(boardId))?.endsWith(`/boards/${boardId}/assets/asset`)
       },
       {},
       dialogBoardId,

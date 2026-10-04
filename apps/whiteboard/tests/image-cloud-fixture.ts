@@ -12,6 +12,8 @@ import {
   getSyncAccessFunctionRegion,
 } from '../src/lib/firebase'
 import { storeSceneAssets, restoreSceneAssets, requestBoardAsset } from '../src/features/assets/scene-assets'
+import { patchEmulatorDocument } from './emulator-document-fixture'
+import { projectService } from '../src/features/sharing/project-service'
 import { sharingService } from '../src/features/sharing/sharing-service'
 import { workspaceApi, workspaceValue } from '../src/features/workspace/workspace-api'
 import type { BoardScene } from '@agentic-whiteboard/storage'
@@ -38,6 +40,7 @@ export async function exerciseCloudAssets(dataURL: string, live?: string) {
   const project = await workspaceApi.createProject('Cloud image regression')
   const board = await workspaceApi.createBoard(project.id, 'Private image')
   await workspaceApi.saveBoard({ ...board, scene })
+  await workspaceApi.flushCloud()
   const privateRef = doc(db, 'users', user.uid, 'projects', project.id, 'boards', board.id)
   let privateScene: BoardScene | undefined
   for (let attempt = 0; attempt < 100; attempt++) {
@@ -50,8 +53,11 @@ export async function exerciseCloudAssets(dataURL: string, live?: string) {
   }
   if (!privateScene?.files?.asset?.storagePath) throw new Error('Private board failed to sync image to Storage')
   const restored = await restoreSceneAssets(privateScene)
-  const sharedId = `shared-${board.id}`
-  await setDoc(doc(db, 'boardShares', sharedId), {
+  const sharedBoard = await workspaceApi.createBoard(project.id, 'Shared image')
+  await workspaceApi.flushCloud()
+  const sharedId = sharedBoard.id
+  await sharingService.saveShareConfig({
+    projectId: project.id,
     boardId: sharedId,
     boardName: 'Shared image',
     ownerId: user.uid,
@@ -117,7 +123,7 @@ export async function moveSharedImage(boardId: string) {
   // The object already exists: metadata must prevent a duplicate upload.
   await storeSceneAssets(
     { ...scene, files: { asset: { ...file, storagePath: undefined } } },
-    `boards/${boardId}/assets`,
+    file.storagePath!.slice(0, file.storagePath!.lastIndexOf('/')),
   )
   for (let move = 1; move <= 3; move++) {
     scene.elements = scene.elements.map((element) => ({ ...element, x: move * 20, y: move * 10, version: move + 1 }))
@@ -135,6 +141,11 @@ export async function readSharedPosition(boardId: string) {
 export async function createPrivateImageBoard(dataURL: string) {
   const auth = getFirebaseAuth()!
   await auth.authStateReady()
+  // Project-management callables deliberately reject anonymous identities.
+  if (auth.currentUser?.isAnonymous && import.meta.env.VITE_USE_FIREBASE_EMULATOR === 'true') {
+    await signOut(auth)
+    await createUserWithEmailAndPassword(auth, `image-owner-${Date.now()}@example.com`, 'test-password')
+  }
   // The application intentionally hides anonymous users from its account UI.
   // Use its existing development-only identity hook with the real test UID.
   localStorage.setItem(
@@ -170,14 +181,26 @@ export async function persistMetadataOnlyLocalScene(boardId: string) {
 }
 
 export async function exerciseAssetLifecycle(boardId: string) {
+  const board = (await workspaceApi.loadBoard(boardId))!
   workspaceApi.deactivateCloudWorkspace()
   const auth = getFirebaseAuth()!
   const db = getFirestoreDb()!
-  const board = (await workspaceApi.loadBoard(boardId))!
   const privateRef = doc(db, 'users', auth.currentUser!.uid, 'projects', board.projectId, 'boards', boardId)
   const shareRef = doc(db, 'boardShares', boardId)
   const projectRef = doc(db, 'users', auth.currentUser!.uid, 'projects', board.projectId)
-  const sharedPath = await readSharedImagePath(boardId)
+  // Exercise the shared namespace separately: initial publication now reuses
+  // its private receipt, whose uploads correctly remain owner-only.
+  const sourceScene = await restoreSceneAssets((await getDoc(shareRef)).data()!.scene)
+  const lifecycleScene = await storeSceneAssets(
+    {
+      ...sourceScene,
+      files: {
+        asset: { ...sourceScene.files!.asset, storagePath: undefined },
+      },
+    },
+    `boards/${boardId}/assets`,
+  )
+  const sharedPath = lifecycleScene.files!.asset.storagePath!
   const privatePath = `users/${auth.currentUser!.uid}/boards/${boardId}/assets/asset`
   const read = (storagePath: string) => requestBoardAsset({ operation: 'read', storagePath })
   const denied = async (path: string) => {
@@ -201,14 +224,22 @@ export async function exerciseAssetLifecycle(boardId: string) {
       return error.code === 'functions/permission-denied'
     }
   }
-  await setDoc(shareRef, { generalAccess: 'restricted' }, { merge: true })
+  const sharePolicy = (generalAccess: 'restricted' | 'anyone_with_link', generalRole: 'viewer' | 'editor') =>
+    projectService.boardAccess(boardId, board.projectId, 'share', {
+      generalAccess,
+      generalRole,
+      invitedEmails: [],
+      collaborators: {},
+      inheritProjectAccess: false,
+    })
+  await sharePolicy('restricted', 'viewer')
   const restrictedDeniesVisitor = (await visitorDenied('read')) && (await visitorDenied('upload'))
-  await setDoc(shareRef, { generalAccess: 'anyone_with_link', generalRole: 'viewer' }, { merge: true })
+  await sharePolicy('anyone_with_link', 'viewer')
   const publicViewerCanRead = Boolean((await visitorAsset({ operation: 'read', storagePath: sharedPath })).data)
   const publicViewerCannotUpload = await visitorDenied('upload')
-  await setDoc(shareRef, { generalAccess: 'anyone_with_link', generalRole: 'editor' }, { merge: true })
+  await sharePolicy('anyone_with_link', 'editor')
   const publicEditorCanReuseAsset = Boolean((await visitorAsset({ operation: 'upload', storagePath: sharedPath })).data)
-  await setDoc(shareRef, { generalAccess: 'restricted', generalRole: 'viewer' }, { merge: true })
+  await sharePolicy('restricted', 'viewer')
   const revokedVisitorCannotRead = await visitorDenied('read')
   await deleteApp(visitorApp)
   const before = (await read(sharedPath)).dataURL
@@ -235,17 +266,18 @@ export async function exerciseAssetLifecycle(boardId: string) {
     tokenCreationDenied = error.code === 'storage/unauthorized'
   }
   try {
-    await setDoc(privateRef, { active: false }, { merge: true })
+    await patchEmulatorDocument(privateRef.path, { active: false })
     const boardDeleteDeniesBoth = (await denied(privatePath)) && (await denied(sharedPath))
-    await setDoc(privateRef, { active: true }, { merge: true })
+    await patchEmulatorDocument(privateRef.path, { active: true })
+    await patchEmulatorDocument(shareRef.path, { deletedAt: null })
     const boardRestoreReusesBytes = (await read(sharedPath)).dataURL === before
-    await setDoc(projectRef, { active: false }, { merge: true })
+    await patchEmulatorDocument(projectRef.path, { active: false })
     const projectDeleteDeniesBoth = (await denied(privatePath)) && (await denied(sharedPath))
-    await setDoc(projectRef, { active: true }, { merge: true })
+    await patchEmulatorDocument(projectRef.path, { active: true })
     const projectRestoreReusesBytes = (await read(sharedPath)).dataURL === before
-    await setDoc(shareRef, { active: false }, { merge: true })
+    await patchEmulatorDocument(shareRef.path, { active: false })
     const sharedDeleteDenied = await denied(sharedPath)
-    await setDoc(shareRef, { active: true }, { merge: true })
+    await patchEmulatorDocument(shareRef.path, { active: true })
     return {
       restrictedDeniesVisitor,
       publicViewerCanRead,
@@ -264,9 +296,9 @@ export async function exerciseAssetLifecycle(boardId: string) {
     }
   } finally {
     await Promise.all([
-      setDoc(privateRef, { active: true }, { merge: true }),
-      setDoc(projectRef, { active: true }, { merge: true }),
-      setDoc(shareRef, { active: true }, { merge: true }),
+      patchEmulatorDocument(privateRef.path, { active: true }),
+      patchEmulatorDocument(projectRef.path, { active: true }),
+      patchEmulatorDocument(shareRef.path, { active: true, deletedAt: null }),
     ])
   }
 }

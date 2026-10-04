@@ -1,3 +1,5 @@
+import { WorkspaceLoading } from '../../components/workspace-loading'
+import { AccessDenied } from '../../components/access-denied'
 import { useEffect, useDeferredValue, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -10,12 +12,24 @@ import { DeleteBoardModal } from './delete-board-modal'
 import { ShareModal } from '../../components/share-modal'
 import { GroupHeader, type SortOrder, WorkspaceFilters } from './workspace-filters'
 import { workspaceApi, type WorkspaceBoard } from './workspace-api'
+import { useAuth } from '../../lib/auth-context'
+import { type VisibleProject } from '../sharing/project-service'
+import { ProjectMenu, ProjectActionModal, type ProjectAction } from './project-actions'
+import { DownloadBoardsModal } from './download-boards-modal'
 import { WorkspaceEmptyState } from './workspace-empty-state'
 
 const workspaceQueryKey = ['workspace'] as const
 
 export function WorkspaceHome() {
   const queryClient = useQueryClient()
+  const { user } = useAuth()
+  const [projectAction, setProjectAction] = useState<{
+    project: VisibleProject
+    action: Exclude<ProjectAction, 'archive'>
+  } | null>(null)
+  const [archiveFilter, setArchiveFilter] = useState(false)
+  const [ownershipFilter, setOwnershipFilter] = useState<'all' | 'owned' | 'shared'>('all')
+  const [actionError, setActionError] = useState('')
   const navigate = useNavigate()
   const searchParams = useSearch({ strict: false }) as { projectId?: string }
   const params = useParams({ strict: false }) as { projectId?: string }
@@ -36,16 +50,6 @@ export function WorkspaceHome() {
       setNavSlot(document.getElementById('header-nav-slot'))
     }
   }, [navSlot])
-
-  useEffect(() => {
-    if (searchParams.projectId && !params.projectId) {
-      navigate({
-        to: '/projects/$projectId',
-        params: { projectId: searchParams.projectId },
-        replace: true,
-      })
-    }
-  }, [searchParams.projectId, params.projectId, navigate])
 
   useEffect(() => {
     setProjectIds(queryProjectId ? new Set([queryProjectId]) : new Set())
@@ -75,8 +79,55 @@ export function WorkspaceHome() {
     })
   }
 
-  const workspace = useQuery({ queryKey: workspaceQueryKey, queryFn: workspaceApi.listWorkspace, staleTime: Infinity })
+  const workspace = useQuery({
+    queryKey: [...workspaceQueryKey, user?.uid ?? 'guest', queryProjectId ?? 'all'],
+    queryFn: () => workspaceApi.listWorkspace(queryProjectId),
+    staleTime: 5_000,
+    refetchOnMount: 'always',
+    refetchInterval: 10_000,
+  })
 
+  useEffect(() => {
+    const refresh = () => {
+      void queryClient.invalidateQueries({ queryKey: workspaceQueryKey })
+    }
+    window.addEventListener('workspace-changed', refresh)
+    return () => window.removeEventListener('workspace-changed', refresh)
+  }, [queryClient])
+
+  const complete = (patch?: Partial<VisibleProject>, refresh = true) => {
+    if (patch?.id)
+      queryClient.setQueriesData<{ projects: VisibleProject[]; boards: WorkspaceBoard[] }>(
+        { queryKey: workspaceQueryKey },
+        (previous) =>
+          previous
+            ? {
+                projects: previous.projects.map((project) =>
+                  project.id === patch.id ? { ...project, ...patch } : project,
+                ),
+                boards: previous.boards.map((board) =>
+                  board.projectId === patch.id ? { ...board, project: { ...board.project, ...patch } } : board,
+                ),
+              }
+            : previous,
+      )
+    if (refresh) void queryClient.invalidateQueries({ queryKey: workspaceQueryKey })
+  }
+  const handleProjectAction = async (project: VisibleProject, action: ProjectAction) => {
+    setActionError('')
+    if (action !== 'archive') {
+      setProjectAction({ project, action })
+      return
+    }
+    try {
+      complete({ id: project.id, archived: !project.archived }, false)
+      await workspaceApi.archiveProject(project.id, !project.archived)
+      complete({ id: project.id, archived: !project.archived })
+    } catch (error) {
+      complete({ id: project.id, archived: project.archived })
+      setActionError(error instanceof Error ? error.message : 'Archive failed.')
+    }
+  }
   const handleCreateBoard = async ({
     boardName,
     projectId,
@@ -124,39 +175,27 @@ export function WorkspaceHome() {
   const byProject = useMemo(
     () =>
       (workspace.data?.projects ?? [])
+        .filter(
+          (project) =>
+            (projectIds.size === 0 || projectIds.has(project.id)) &&
+            (queryProjectId === project.id || archiveFilter || !project.archived) &&
+            (ownershipFilter === 'all' ||
+              (ownershipFilter === 'owned' ? project.ownerId === user?.uid : project.ownerId !== user?.uid)),
+        )
         .map((project) => ({ project, boards: boards.filter((board) => board.projectId === project.id) }))
-        .filter((group) => group.boards.length > 0 || (isProjectPage && group.project.id === queryProjectId)),
-    [workspace.data?.projects, boards, isProjectPage, queryProjectId],
+        .filter((group) => !search.trim() || group.boards.length > 0),
+    [workspace.data?.projects, boards, projectIds, queryProjectId, archiveFilter, ownershipFilter, user?.uid, search],
   )
 
-  if (workspace.isPending)
-    return (
-      <main className="workspace-shell">
-        {navSlot &&
-          isProjectPage &&
-          createPortal(
-            <nav className="header-breadcrumb" aria-label="Breadcrumb">
-              <Link to="/" className="breadcrumb-item breadcrumb-link" title="Workspace">
-                Workspace
-              </Link>
-              <span className="breadcrumb-separator" aria-hidden="true">
-                /
-              </span>
-              <span className="breadcrumb-item breadcrumb-current" title="Loading…">
-                Loading…
-              </span>
-            </nav>,
-            navSlot,
-          )}
-        <div className="workspace-loading">Loading your workspace…</div>
-      </main>
-    )
+  if (workspace.isPending) return <WorkspaceLoading />
   if (workspace.isError)
     return (
       <main className="workspace-shell">
         <div className="workspace-loading">Could not load the local workspace.</div>
       </main>
     )
+
+  if (isProjectPage && !currentProject) return <AccessDenied resourceType="project" />
 
   return (
     <main className="workspace-shell">
@@ -188,19 +227,30 @@ export function WorkspaceHome() {
               <span>Create and organize boards by project. Every change is saved to your workspace automatically.</span>
             )}
           </div>
-          <Button onClick={() => openCreateModal()}>
+          <Button
+            onClick={() => openCreateModal()}
+            disabled={!user || (isProjectPage && (!currentProject || currentProject.role === 'viewer'))}
+          >
             <Plus size={16} />
             New board
           </Button>
         </div>
       </section>
 
-      {!isProjectPage && (workspace.data.boards?.length ?? 0) === 0 ? (
+      {actionError && <p role="alert">{actionError}</p>}
+      {!isProjectPage && (workspace.data.projects?.length ?? 0) === 0 ? (
         <WorkspaceEmptyState onCreateBoard={openCreateModal} />
       ) : (
         <>
           <WorkspaceFilters
             projects={workspace.data.projects}
+            archived={archiveFilter}
+            onArchivedChange={(value) => {
+              setArchiveFilter(value)
+              setProjectIds(new Set())
+            }}
+            ownership={ownershipFilter}
+            onOwnershipChange={setOwnershipFilter}
             query={search}
             onQueryChange={setSearch}
             selectedProjectIds={projectIds}
@@ -213,6 +263,8 @@ export function WorkspaceHome() {
             }}
             onClearFilters={() => {
               setProjectIds(new Set())
+              setArchiveFilter(false)
+              setOwnershipFilter('all')
               if (isProjectPage) {
                 navigate({ to: '/' })
               }
@@ -220,23 +272,26 @@ export function WorkspaceHome() {
             sortOrder={sortOrder}
             onSort={setSortOrder}
           />
-          {projectIds.size === 0 && recentBoards.length > 0 && (
-            <section className="board-group">
-              <GroupHeader
-                name="Last 7 days"
-                count={recentBoards.length}
-                isOpen={!collapsedGroups.has('recent')}
-                onToggle={() => toggleGroup('recent')}
-              />
-              {!collapsedGroups.has('recent') && (
-                <BoardGrid
-                  boards={recentBoards}
-                  onDelete={(board) => setBoardToDelete(board)}
-                  onShare={(board) => setBoardToShare(board)}
+          {projectIds.size === 0 &&
+            !archiveFilter &&
+            ownershipFilter === 'all' &&
+            recentBoards.filter((board) => !board.project.archived).length > 0 && (
+              <section className="board-group">
+                <GroupHeader
+                  name="Last 7 days"
+                  count={recentBoards.filter((board) => !board.project.archived).length}
+                  isOpen={!collapsedGroups.has('recent')}
+                  onToggle={() => toggleGroup('recent')}
                 />
-              )}
-            </section>
-          )}
+                {!collapsedGroups.has('recent') && (
+                  <BoardGrid
+                    boards={recentBoards.filter((board) => !board.project.archived)}
+                    onDelete={(board) => setBoardToDelete(board)}
+                    onShare={(board) => setBoardToShare(board)}
+                  />
+                )}
+              </section>
+            )}
           {byProject.map(({ project, boards: groupBoards }) => {
             const isGroupOpen = !collapsedGroups.has(project.id)
             return (
@@ -244,7 +299,34 @@ export function WorkspaceHome() {
                 <GroupHeader
                   name={project.name}
                   count={groupBoards.length}
-                  newest={groupBoards[0] ? editedLabel(groupBoards[0].updatedAt) : undefined}
+                  newest={
+                    groupBoards.length
+                      ? editedLabel(
+                          groupBoards.reduce(
+                            (latest, board) => (board.updatedAt > latest ? board.updatedAt : latest),
+                            '',
+                          ),
+                        )
+                      : undefined
+                  }
+                  badge={
+                    project.ownerId !== user?.uid
+                      ? project.role === 'editor'
+                        ? 'Shared · Editor'
+                        : 'Shared'
+                      : project.isShared
+                        ? 'Shared by you'
+                        : undefined
+                  }
+                  actions={
+                    <ProjectMenu
+                      project={project}
+                      canManage={project.ownerId === user?.uid || project.role === 'editor'}
+                      onAction={(action) => {
+                        void handleProjectAction(project, action)
+                      }}
+                    />
+                  }
                   isOpen={isGroupOpen}
                   onToggle={() => toggleGroup(project.id)}
                 />
@@ -259,20 +341,22 @@ export function WorkspaceHome() {
             )
           })}
           {byProject.length === 0 &&
-            (search || projectIds.size > 0 ? (
+            (search || projectIds.size > 0 || archiveFilter || ownershipFilter !== 'all' ? (
               <div className="empty-boards empty-boards--filtered">
                 <SearchIcon size={24} className="empty-filtered-icon" />
-                <p className="empty-filtered-title">No matching boards</p>
+                <p className="empty-filtered-title">No matching projects or boards</p>
                 <p className="empty-filtered-desc">
                   {search
                     ? `No boards match "${search}". Try another search term or clear filters.`
-                    : 'No boards match the selected filters.'}
+                    : 'No projects or boards match the selected filters.'}
                 </p>
                 <Button
                   variant="outline"
                   onClick={() => {
                     setSearch('')
                     setProjectIds(new Set())
+                    setArchiveFilter(false)
+                    setOwnershipFilter('all')
                     if (isProjectPage) navigate({ to: '/' })
                   }}
                 >
@@ -291,12 +375,26 @@ export function WorkspaceHome() {
       <CreateBoardModal
         open={isCreateModalOpen}
         onOpenChange={setIsCreateModalOpen}
-        projects={workspace.data.projects}
+        projects={workspace.data.projects.filter((project) => project.role !== 'viewer')}
         defaultProjectId={queryProjectId}
         initialBoardName={initialBoardName}
         onCreateBoard={handleCreateBoard}
       />
 
+      {projectAction?.action === 'download' ? (
+        <DownloadBoardsModal
+          projectId={projectAction.project.id}
+          name={projectAction.project.name}
+          onClose={() => setProjectAction(null)}
+        />
+      ) : projectAction ? (
+        <ProjectActionModal
+          project={projectAction.project}
+          action={projectAction.action}
+          onClose={() => setProjectAction(null)}
+          onComplete={complete}
+        />
+      ) : null}
       <DeleteBoardModal
         open={!!boardToDelete}
         onOpenChange={(open) => {

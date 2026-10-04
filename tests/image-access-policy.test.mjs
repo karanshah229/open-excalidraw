@@ -5,7 +5,7 @@ const config = {
   ownerId: 'owner',
   generalAccess: 'restricted',
   generalRole: 'viewer',
-  invitedEmails: ['viewer@example.com'],
+  invitedEmails: ['viewer@example.com', 'editor@example.com'],
   collaborators: { 'editor@example.com': { role: 'editor' } },
 }
 const owner = { uid: 'owner', token: {} }
@@ -27,11 +27,20 @@ assert.equal(
   canAccessAsset({ ...config, generalAccess: 'anyone_with_link', generalRole: 'editor' }, undefined, true),
   true,
 )
-for (const tombstone of [{ active: false }, { deletedAt: '2026-10-03T00:00:00Z' }]) {
+for (const tombstone of [{ active: false }, { deletedAt: '2026-10-03T00:00:00Z' }, { pending: true }]) {
   assert.equal(canAccessAsset({ ...config, ...tombstone }, owner, false), false)
   assert.equal(canAccessAsset({ ...config, generalAccess: 'anyone_with_link', ...tombstone }, undefined, false), false)
-  assert.equal(isAssetParentActive(tombstone), false)
+  if (!tombstone.pending) assert.equal(isAssetParentActive(tombstone), false)
 }
 assert.equal(isAssetParentActive(undefined), false)
 assert.equal(isAssetParentActive({}), true)
 console.log('PASS: owner, invited viewer/editor, verified email, public roles, and soft-delete access policies')
+
+const parent = { ...config, generalAccess: 'anyone_with_link', generalRole: 'editor' }
+assert.equal(canAccessAsset(config, undefined, false, parent), true)
+assert.equal(canAccessAsset(config, undefined, true, parent), true)
+assert.equal(canAccessAsset({ ...config, inheritProjectAccess: false }, undefined, false, parent), false)
+for (const gate of [{ pending: true }, { deletedAt: 'deleted' }, { ownerId: 'foreign-owner' }]) {
+  assert.equal(canAccessAsset(config, owner, false, { ...parent, ...gate }), false)
+}
+console.log('PASS: inherited project roles, custom board grants, pending gates, and owner binding')
