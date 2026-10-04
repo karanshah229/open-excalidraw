@@ -42,7 +42,8 @@
     "test:images:formats:prod-bundle": "node tests/image-formats.test.mjs --production-bundle",
     "test:sync:deleted-project": "pnpm --filter @agentic-whiteboard/functions build && firebase emulators:exec --only auth,firestore,storage,database,functions --project demo-image-persistence --config image-persistence.firebase.json 'node tests/deleted-project-sync.test.mjs'",
     "test:e2e:projects": "node tests/run-projects-e2e.mjs",
-    "test:e2e:regression": "node tests/run-regression-tests.mjs"
+    "test:e2e:regression": "node tests/run-regression-tests.mjs",
+    "test": "node tests/run-all-tests.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

@@ -38,7 +38,7 @@ try {
     '--project',
     'demo-projects',
     '--config',
-    'projects.firebase.json',
+    process.argv.find((arg) => arg.startsWith('--config='))?.slice(9) || 'projects.firebase.json',
     'node tests/projects.e2e.mjs',
   ])
 } finally {
