@@ -1,3 +1,4 @@
+const BASE_URL = process.env.E2E_BASE_URL || 'http://localhost:5173'
 import puppeteer from 'puppeteer-core'
 
 async function runBrowserVerification() {
@@ -14,7 +15,7 @@ async function runBrowserVerification() {
 
   try {
     const boardId = `collab-test-${Date.now().toString(36)}`
-    const boardUrl = `http://localhost:5173/boards/${boardId}`
+    const boardUrl = `${BASE_URL}/boards/${boardId}`
     console.log(`Setting up shared board: ${boardUrl}`)
 
     const shareConfig = {
@@ -57,10 +58,15 @@ async function runBrowserVerification() {
     const page1 = await browser.newPage()
     await page1.setViewport({ width: 1200, height: 800 })
 
-    await page1.goto('http://localhost:5173', { waitUntil: 'domcontentloaded' })
+    await page1.goto(process.env.E2E_BASE_URL || 'http://localhost:5173', { waitUntil: 'domcontentloaded' })
     await page1.evaluate((cfg) => {
       localStorage.setItem('agentic-whiteboard:library:v1', '[]')
       localStorage.setItem(`agentic-whiteboard:share:${cfg.boardId}`, JSON.stringify(cfg))
+    }, shareConfig)
+
+    await page1.evaluate(async (cfg) => {
+      const { seedSharedBoard } = await import('/tests/regression-fixture.ts')
+      await seedSharedBoard(cfg)
     }, shareConfig)
 
     await page1.goto(boardUrl, { waitUntil: 'domcontentloaded' })
@@ -69,11 +75,13 @@ async function runBrowserVerification() {
 
     // --- TAB 2 (Collaborator: Anonymous User) ---
     console.log('\n2. Launching Tab 2 (Anonymous Collaborator)...')
-    const page2 = await browser.newPage()
+    const guestContext = await browser.createBrowserContext()
+    const page2 = await guestContext.newPage()
     await page2.setViewport({ width: 1200, height: 800 })
 
-    await page2.goto('http://localhost:5173', { waitUntil: 'domcontentloaded' })
-    await page2.evaluate((cfg) => {
+    await page2.goto(process.env.E2E_BASE_URL || 'http://localhost:5173', { waitUntil: 'domcontentloaded' })
+    await page2.evaluate(async (cfg) => {
+      await (await import('/tests/regression-fixture.ts')).signInGuest()
       localStorage.setItem('agentic-whiteboard:library:v1', '[]')
       localStorage.setItem(`agentic-whiteboard:share:${cfg.boardId}`, JSON.stringify(cfg))
     }, shareConfig)

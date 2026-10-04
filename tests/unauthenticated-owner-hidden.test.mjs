@@ -2,7 +2,7 @@ import puppeteer from 'puppeteer-core'
 import assert from 'node:assert/strict'
 
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
-const BASE_URL = 'http://localhost:5173'
+const BASE_URL = process.env.E2E_BASE_URL || 'http://localhost:5173'
 
 async function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -29,17 +29,16 @@ async function runUnauthenticatedOwnerHiddenTest() {
 
     await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' })
 
-    // Seed shared board with anonymous user's UID as ownerId
+    // Seed shared board with registered user's UID as ownerId
     const seededOwnerId = await page.evaluate(async (id) => {
       const { getFirebaseAuth } = await import('/src/lib/firebase.ts')
-      const { signInAnonymously } = await import('/src/features/collaboration/anonymous-user.ts')
+      const { signInOwner: signInAnonymously } = await import('/tests/regression-fixture.ts')
       const auth = getFirebaseAuth()
-      if (auth && !auth.currentUser) await signInAnonymously(auth)
+      if (auth && (!auth.currentUser || auth.currentUser.isAnonymous)) await signInAnonymously(auth)
 
       const currentUid = auth.currentUser.uid
 
       const { workspaceApi } = await import('/src/features/workspace/workspace-api.ts')
-      const { sharingService } = await import('/src/features/sharing/sharing-service.ts')
 
       const proj = await workspaceApi.createProject('Unauth Test WS')
       await workspaceApi.saveBoard({
@@ -74,7 +73,9 @@ async function runUnauthenticatedOwnerHiddenTest() {
         updatedAt: new Date().toISOString(),
       })
 
-      await sharingService.saveShareConfig({
+      await (
+        await import('/tests/regression-fixture.ts')
+      ).seedSharedBoard({
         boardId: id,
         boardName: 'Unauth Owner Test Board',
         ownerId: currentUid,
@@ -112,7 +113,7 @@ async function runUnauthenticatedOwnerHiddenTest() {
       return currentUid
     }, boardId)
 
-    console.log(`   Seeded board with anonymous ownerId: ${seededOwnerId}`)
+    console.log(`   Seeded board with registered ownerId: ${seededOwnerId}`)
 
     // Now open a new incognito context (unauthenticated guest/viewer)
     const incognitoCtx = await browser.createBrowserContext()
@@ -176,6 +177,13 @@ async function runUnauthenticatedOwnerHiddenTest() {
     // PART 2: Verify seed window (creator/local user) also does NOT see raw UID or owner
     // -------------------------------------------------------------
     console.log('▶ Testing seed window...')
+    await page.evaluate(async () => {
+      const { getFirebaseAuth } = await import('/src/lib/firebase.ts')
+      const { signOut, signInAnonymously } = await import('/tests/regression-fixture.ts')
+      const auth = getFirebaseAuth()
+      await signOut(auth)
+      await signInAnonymously(auth)
+    })
     await page.goto(boardUrl, { waitUntil: 'domcontentloaded' })
     await sleep(2500)
 

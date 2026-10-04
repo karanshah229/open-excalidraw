@@ -1,7 +1,7 @@
 import puppeteer from 'puppeteer-core'
 import assert from 'node:assert'
 
-const BASE_URL = 'http://localhost:5173'
+const BASE_URL = process.env.E2E_BASE_URL || 'http://localhost:5173'
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -32,11 +32,11 @@ async function run() {
     await page1.evaluate(async (id) => {
       const { workspaceApi } = await import('/src/features/workspace/workspace-api.ts')
       const { getFirebaseAuth } = await import('/src/lib/firebase.ts')
-      const { signInAnonymously, updateProfile } = await import('/src/features/collaboration/anonymous-user.ts')
+      const { signInOwner: signInAnonymously, updateProfile } = await import('/tests/regression-fixture.ts')
 
       const auth = getFirebaseAuth()
       let u = auth?.currentUser
-      if (!u && auth) {
+      if ((!u || u.isAnonymous) && auth) {
         const cred = await signInAnonymously(auth)
         u = cred.user
       }
@@ -86,12 +86,18 @@ async function run() {
     await page1.evaluate(async (id) => {
       const { sharingService } = await import('/src/features/sharing/sharing-service.ts')
       const config = await sharingService.getShareConfig(id)
-      await sharingService.saveShareConfig({
+      await (
+        await import('/tests/regression-fixture.ts')
+      ).seedSharedBoard({
         ...config,
         generalAccess: 'anyone_with_link',
         generalRole: 'editor',
       })
     }, boardId)
+
+    // API fixture publication precedes the editor's shared-board bootstrap.
+    await page1.reload({ waitUntil: 'domcontentloaded' })
+    await page1.waitForFunction(() => Boolean(window.__excalidrawAPI))
 
     // Open Page 2 in incognito context
     const incognito = await browser.createBrowserContext()

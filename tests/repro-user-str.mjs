@@ -2,7 +2,7 @@ import puppeteer from 'puppeteer-core'
 import assert from 'node:assert/strict'
 
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
-const BASE_URL = 'http://localhost:5173'
+const BASE_URL = process.env.E2E_BASE_URL || 'http://localhost:5173'
 
 async function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -37,11 +37,11 @@ async function runUserSTRVerification() {
     await page1.evaluate(async (id) => {
       const { workspaceApi } = await import('/src/features/workspace/workspace-api.ts')
       const { getFirebaseAuth } = await import('/src/lib/firebase.ts')
-      const { signInAnonymously, updateProfile } = await import('/src/features/collaboration/anonymous-user.ts')
+      const { signInOwner: signInAnonymously, updateProfile } = await import('/tests/regression-fixture.ts')
 
       const auth = getFirebaseAuth()
       let u = auth?.currentUser
-      if (!u && auth) {
+      if ((!u || u.isAnonymous) && auth) {
         const cred = await signInAnonymously(auth)
         u = cred.user
       }
@@ -105,20 +105,19 @@ async function runUserSTRVerification() {
     await page1.click('.header-share-btn')
     await page1.waitForSelector('[role="dialog"]', { timeout: 5000 })
 
-    // Trigger share config save to Firestore as "anyone_with_link" + "editor"
-    await page1.evaluate(async (id) => {
-      const { sharingService } = await import('/src/features/sharing/sharing-service.ts')
-      const config = await sharingService.getShareConfig(id)
-      await sharingService.saveShareConfig({
-        ...config,
-        generalAccess: 'anyone_with_link',
-        generalRole: 'editor',
-      })
-    }, boardId)
-
-    // Close share modal
-    await page1.keyboard.press('Escape')
-    await sleep(1000)
+    await page1.click('[aria-label="General access setting"]')
+    await page1.click('.google-share-dropdown-item:last-child')
+    await page1.waitForFunction(() => !document.querySelector('.google-share-done-btn').disabled)
+    await page1.click('[aria-label="General access role"]')
+    await page1.click('.google-share-dropdown-item:last-child')
+    await page1.waitForFunction(() => !document.querySelector('.google-share-done-btn').disabled)
+    // Policy mutation temporarily blocks reads; wait for the dialog to recover.
+    await page1.waitForFunction(() => {
+      const done = document.querySelector('.google-share-dialog .google-share-done-btn')
+      return done && !done.disabled && done.textContent === 'Done'
+    })
+    await page1.click('.google-share-dialog .google-share-done-btn')
+    await page1.waitForSelector('.google-share-dialog', { hidden: true })
     console.log('   ✓ Board shared as "anyone_with_link" with role "editor"')
 
     // -------------------------------------------------------------

@@ -2,18 +2,22 @@ import puppeteer from 'puppeteer-core'
 import assert from 'node:assert/strict'
 
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
-const BASE_URL = 'http://localhost:5173'
+const BASE_URL = process.env.E2E_BASE_URL || 'http://localhost:5173'
 
 async function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function isRtdbWsUrl(url) {
-  return Boolean(url && url.includes('firebasedatabase.app') && url.includes('.ws?v='))
+  return Boolean(url && url.includes('/.ws?v='))
 }
 
 function isFirestoreApiRequest(url) {
-  return Boolean(url && url.includes('firestore.googleapis.com') && !url.includes('Listen'))
+  return Boolean(
+    url &&
+    (url.includes('firestore.googleapis.com') || url.includes('/google.firestore.v1.Firestore/')) &&
+    !url.includes('Listen'),
+  )
 }
 
 async function runNetworkLifecycleTest() {
@@ -39,9 +43,9 @@ async function runNetworkLifecycleTest() {
     await seedPage.goto(BASE_URL, { waitUntil: 'domcontentloaded' })
     await seedPage.evaluate(async (id) => {
       const { getFirebaseAuth } = await import('/src/lib/firebase.ts')
-      const { signInAnonymously } = await import('/src/features/collaboration/anonymous-user.ts')
+      const { signInOwner: signInAnonymously } = await import('/tests/regression-fixture.ts')
       const auth = getFirebaseAuth()
-      if (auth && !auth.currentUser) await signInAnonymously(auth)
+      if (auth && (!auth.currentUser || auth.currentUser.isAnonymous)) await signInAnonymously(auth)
 
       const { workspaceApi } = await import('/src/features/workspace/workspace-api.ts')
       const proj = await workspaceApi.createProject('Network Test WS')
@@ -77,8 +81,9 @@ async function runNetworkLifecycleTest() {
         updatedAt: new Date().toISOString(),
       })
 
-      const { sharingService } = await import('/src/features/sharing/sharing-service.ts')
-      await sharingService.saveShareConfig({
+      await (
+        await import('/tests/regression-fixture.ts')
+      ).seedSharedBoard({
         boardId: id,
         boardName: 'Network Test Canvas',
         ownerId: auth.currentUser.uid,

@@ -2,14 +2,14 @@ import puppeteer from 'puppeteer-core'
 import assert from 'node:assert/strict'
 
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
-const BASE_URL = 'http://localhost:5173'
+const BASE_URL = process.env.E2E_BASE_URL || 'http://localhost:5173'
 
 async function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function isRtdbWsUrl(url) {
-  return Boolean(url && url.includes('firebasedatabase.app') && url.includes('.ws?v='))
+  return Boolean(url && url.includes('/.ws?v='))
 }
 
 async function runSoloCollabBannerTest() {
@@ -35,9 +35,9 @@ async function runSoloCollabBannerTest() {
     await seedPage.goto(BASE_URL, { waitUntil: 'domcontentloaded' })
     await seedPage.evaluate(async (id) => {
       const { getFirebaseAuth } = await import('/src/lib/firebase.ts')
-      const { signInAnonymously } = await import('/src/features/collaboration/anonymous-user.ts')
+      const { signInOwner: signInAnonymously } = await import('/tests/regression-fixture.ts')
       const auth = getFirebaseAuth()
-      if (auth && !auth.currentUser) await signInAnonymously(auth)
+      if (auth && (!auth.currentUser || auth.currentUser.isAnonymous)) await signInAnonymously(auth)
 
       const { workspaceApi } = await import('/src/features/workspace/workspace-api.ts')
       const proj = await workspaceApi.createProject('Solo Test WS')
@@ -73,8 +73,9 @@ async function runSoloCollabBannerTest() {
         updatedAt: new Date().toISOString(),
       })
 
-      const { sharingService } = await import('/src/features/sharing/sharing-service.ts')
-      await sharingService.saveShareConfig({
+      await (
+        await import('/tests/regression-fixture.ts')
+      ).seedSharedBoard({
         boardId: id,
         boardName: 'Solo Test Canvas',
         ownerId: auth.currentUser.uid,
@@ -109,24 +110,36 @@ async function runSoloCollabBannerTest() {
         updatedAt: new Date().toISOString(),
       })
     }, boardId)
-    await seedPage.close()
 
     // -------------------------------------------------------------
     // TEST 1: Open board URL in solo mode
     // -------------------------------------------------------------
     console.log('▶ Test 1: Open board URL as solo user...')
-    const page1 = await browser.newPage()
+    const page1 = seedPage
     await page1.setViewport({ width: 1440, height: 900 })
 
     const cdp1 = await page1.createCDPSession()
     await cdp1.send('Network.enable')
     const p1Sockets = new Map()
+    const collabSubscriptions = []
 
     cdp1.on('Network.webSocketCreated', (e) => {
       if (isRtdbWsUrl(e.url)) {
         p1Sockets.set(e.requestId, { url: e.url, open: true })
       }
     })
+    cdp1.on('Network.webSocketFrameSent', (e) => {
+      if (!p1Sockets.has(e.requestId)) return
+      try {
+        const message = JSON.parse(e.response.payloadData)?.d
+        if (['q', 'n'].includes(message?.a) && /^(presence|boards)\//.test(message?.b?.p?.replace(/^\//, ''))) {
+          collabSubscriptions.push(message.b.p)
+        }
+      } catch {
+        // RTDB also sends transport control frames.
+      }
+    })
+
     cdp1.on('Network.webSocketClosed', (e) => {
       if (p1Sockets.has(e.requestId)) {
         p1Sockets.get(e.requestId).open = false
@@ -166,8 +179,12 @@ async function runSoloCollabBannerTest() {
     assert.equal(lazyState?.isTransitioningCollab, false, 'FAIL: isTransitioningCollab must be false for solo user')
 
     const openSockets = Array.from(p1Sockets.values()).filter((s) => s.open)
-    assert.equal(openSockets.length, 0, 'FAIL: RTDB WebSocket must not be opened for solo user')
-    console.log('   ✅ Test 1 Passed: Solo user never sees transition banner, 0 WebSockets opened!\n')
+    assert.equal(openSockets.length, 1, 'Solo shared board must retain its active-session connection')
+    assert.equal(lazyState?.activeSessions?.length, 1, 'Only the solo session may be registered')
+    assert.deepEqual(collabSubscriptions, [], 'Solo board must not subscribe to live presence or element channels')
+    console.log(
+      '   ✅ Test 1 Passed: Solo user never sees transition banner or opens live collaboration subscriptions!\n',
+    )
 
     // -------------------------------------------------------------
     // TEST 2: Reload solo board - verify no cached banner on reload

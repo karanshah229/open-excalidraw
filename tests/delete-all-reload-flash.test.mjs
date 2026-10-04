@@ -2,7 +2,7 @@ import puppeteer from 'puppeteer-core'
 import assert from 'node:assert/strict'
 
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
-const BASE_URL = 'http://localhost:5173'
+const BASE_URL = process.env.E2E_BASE_URL || 'http://localhost:5173'
 
 async function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))

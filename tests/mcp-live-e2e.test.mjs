@@ -5,7 +5,7 @@ import { Client } from '../packages/mcp/node_modules/@modelcontextprotocol/sdk/d
 import { StdioClientTransport } from '../packages/mcp/node_modules/@modelcontextprotocol/sdk/dist/esm/client/stdio.js'
 
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
-const BASE_URL = 'http://localhost:5173'
+const BASE_URL = process.env.E2E_BASE_URL || 'http://localhost:5173'
 const BRIDGE_PORT = 8787
 
 async function sleep(ms) {
@@ -78,17 +78,16 @@ async function runLiveMcpE2ETest() {
       localStorage.setItem('agentic-whiteboard:library:v1', '[]')
       localStorage.setItem(`agentic-whiteboard:share:${cfg.boardId}`, JSON.stringify(cfg))
       const { getFirebaseAuth } = await import('/src/lib/firebase.ts')
-      const { signInAnonymously } = await import('/src/features/collaboration/anonymous-user.ts')
-      const { sharingService } = await import('/src/features/sharing/sharing-service.ts')
+      const { signInOwner: signInAnonymously } = await import('/tests/regression-fixture.ts')
       const auth = getFirebaseAuth()
       let u = auth?.currentUser
-      if (!u && auth) {
+      if ((!u || u.isAnonymous) && auth) {
         const cred = await signInAnonymously(auth)
         u = cred.user
       }
       const actualConfig = { ...cfg, ownerId: u ? u.uid : cfg.ownerId }
       try {
-        await sharingService.saveShareConfig(actualConfig)
+        await (await import('/tests/regression-fixture.ts')).seedSharedBoard(actualConfig)
       } catch (e) {
         console.warn('Share config firestore save deferred:', e?.message)
       }

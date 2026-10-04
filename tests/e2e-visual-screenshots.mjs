@@ -3,9 +3,9 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 
-const ARTIFACT_DIR = '/Users/karan/.gemini/antigravity/brain/fe8f1bf4-fd58-4286-b699-ea41b3fc8e5b/screenshots'
+const ARTIFACT_DIR = process.env.E2E_ARTIFACT_DIR || '.system_generated/regression-screenshots'
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
-const BASE_URL = 'http://localhost:5173'
+const BASE_URL = process.env.E2E_BASE_URL || 'http://localhost:5173'
 
 async function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -105,11 +105,10 @@ async function runVisualE2ESuite() {
     // Authenticate Host user with custom profile and save shareConfig to Firestore
     const hostUid = await page1.evaluate(async (cfg) => {
       const { getFirebaseAuth } = await import('/src/lib/firebase.ts')
-      const { signInAnonymously, updateProfile } = await import('/src/features/collaboration/anonymous-user.ts')
-      const { sharingService } = await import('/src/features/sharing/sharing-service.ts')
+      const { signInOwner: signInAnonymously, updateProfile } = await import('/tests/regression-fixture.ts')
       const auth = getFirebaseAuth()
       let u = auth?.currentUser
-      if (!u && auth) {
+      if ((!u || u.isAnonymous) && auth) {
         const cred = await signInAnonymously(auth)
         u = cred.user
       }
@@ -121,7 +120,7 @@ async function runVisualE2ESuite() {
       }
       const actualConfig = { ...cfg, ownerId: u ? u.uid : cfg.ownerId }
       try {
-        await sharingService.saveShareConfig(actualConfig)
+        await (await import('/tests/regression-fixture.ts')).seedSharedBoard(actualConfig)
       } catch (e) {
         console.warn('Share config firestore save deferred:', e?.message)
       }
@@ -211,7 +210,8 @@ async function runVisualE2ESuite() {
     })
 
     await page2.goto(BASE_URL, { waitUntil: 'domcontentloaded' })
-    await page2.evaluate((cfg) => {
+    await page2.evaluate(async (cfg) => {
+      await (await import('/tests/regression-fixture.ts')).signInGuest()
       localStorage.setItem('agentic-whiteboard:library:v1', '[]')
       localStorage.setItem(`agentic-whiteboard:share:${cfg.boardId}`, JSON.stringify(cfg))
     }, shareConfig)
