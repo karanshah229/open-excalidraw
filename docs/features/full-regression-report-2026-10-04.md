@@ -1,6 +1,20 @@
 # Full regression run — 4 October 2026
 
-**The full test inventory is not green.** The image/project suites pass, but 17 of 19 older browser suites fail during setup. All 19 have identical pass/fail outcomes against archived main (`faea109`); the feature branch tested was `4008c5f`. These failures do not demonstrate an image-upload regression, but they prevent assurance for the workflows whose assertions never run.
+**All 19 repaired browser regression suites now pass.** Collaboration unit tests (17 cases), MCP tool tests (four groups), image access policy, TypeScript, production build and lint also pass; lint retains four existing warnings. The full inventory still has live-authentication and security gaps described below.
+
+The initial run failed 17 of 19 older browser suites during setup, with identical outcomes on archived main (`faea109`); its feature branch was `4008c5f`. The follow-up tests fixture commit `e92aa68`; application runtime is unchanged.
+
+## Fixture repair follow-up
+
+The older suites were written before server-owned project management. The initial failures happened before their behavioral assertions: anonymous owners cannot manage projects, localStorage share records do not create owned cloud boards, and the dropdown fixture used a mock identity instead of Firebase authentication.
+
+The repair adds `apps/whiteboard/tests/regression-fixture.ts`, restricted to localhost demo emulators. Owners use registered Firebase accounts; guests use isolated anonymous accounts. Boards are saved under actual owned projects, cloud writes are flushed, sharing is published through the application callable, and the initial shared scene is saved separately from policy changes. Tests that publish an already-open private board reload before testing collaboration. Solo fixtures keep their setup tab to avoid racing its teardown with another tab's persistent storage initialization.
+
+The Share-dialog test now selects public/editor access through the UI and waits for the real dialog's Done button after policy changes. The access-denied screen also uses `.google-share-done-btn`; the old broad selector could click its Go to workspace button while reads were temporarily blocked during a policy mutation. The test retains its avatar, editing and downgrade assertions.
+
+Network probes now recognize emulator Firestore requests and RTDB sockets. The obsolete solo expectation of zero RTDB sockets is replaced by stronger semantic checks: one active session, no live presence/element subscriptions, no transition banner and no live collaboration. Shared boards need the lobby connection to detect another participant.
+
+Run `pnpm test:e2e:regression` for all 19 suites, or an individual existing package test command. The runner builds Functions/MCP, launches isolated demo emulators and a frontend on port 15190, installs the repository rules, preserves any existing demo parameter file, and writes per-suite logs/screenshots/results under `.system_generated/regression/`. It does not target development or production Firebase accounts. Application runtime and deployed rules are unchanged by these repairs.
 
 ## Passing coverage
 
@@ -14,7 +28,7 @@
 - Auto zoom/centering and delete-all/reload without a flash.
 - TypeScript and production build; lint has zero errors and four existing unused-variable warnings.
 
-## Older browser suites and main comparison
+## Initial older-browser run and main comparison
 
 Tests used isolated synthetic Firebase demo data. Original assertions were preserved; temporary copies redirected only server URLs, Node import locations and screenshot output. The main comparison used an archived checkout, its own frontend/storage modules and compiled MCP server, with the unchanged project-policy backend in demo emulators. The MCP comparison was rerun after its missing compiled artifact was corrected.
 
@@ -40,7 +54,7 @@ Tests used isolated synthetic Firebase demo data. Original assertions were prese
 | browser-collab-verify.mjs                   | Fail           | Fail | Synthetic board never reaches editor; outdated share setup |
 | e2e-visual-screenshots.mjs                  | Fail           | Fail | Synthetic board never reaches editor; outdated share setup |
 
-The anonymous-owner fixtures now conflict with server-owned project management. Other fixtures create only a localStorage share configuration without a real owned board/project, or use an outdated workspace setup/selector. Undo, multi-user collaboration, network lifecycle, inactive presence, owner visibility and MCP UI checks remain unverified where setup failed. Migrate those fixtures to registered owners and actual project/board/share callables, preserving isolated anonymous guest contexts and the existing behavioral assertions, before treating the full regression suite as a release gate.
+The anonymous-owner fixtures now conflict with server-owned project management. Other fixtures create only a localStorage share configuration without a real owned board/project, or use an outdated workspace setup/selector. Those failures initially prevented undo, collaboration, network, presence, owner visibility and MCP UI assertions from running. The fixture repair described above now exercises these workflows successfully in all 19 suites.
 
 ## Live development and deployment audit
 
@@ -58,8 +72,14 @@ These scripts assert the presence of vulnerabilities; a `REPRODUCED` verdict is 
 
 These concern existing presence, snapshot/database and MCP paths documented in the earlier security audit. No first-party changes in this feature alter the RTDB validation or MCP adapter implementation. The nine remaining audit findings were inconclusive or stopped by protections: some rely on old share mutation APIs or outdated fixtures, so they are not verified fixes. Standalone Firestore and local-cache exploit scripts also stopped at their former prerequisites; the standalone MCP exploit reproduced. This audit does not establish the deployed production configuration's exposure.
 
+## Remaining fixes outside the regression fixture repair
+
+The live development format runner needs a registered owner from an explicitly authenticated browser session or dedicated test-account setup. Its anonymous-account provisioning cannot create projects under the current policy; emulator owner creation must not be reused against live accounts. This follow-up does not claim new live development or production validation.
+
+The reproduced security findings require application changes: bind presence/editor-slot admission to authorized, bounded sessions; validate snapshot type/size and RTDB element shape/size; and require adapter pairing/authentication plus command-bound acknowledgements in MCP. Those findings are not repaired by fixture migration and should have separate negative security tests before being marked fixed.
+
 ## Evidence and reproduction
 
-The durable machine-readable companion is `full-regression-results-2026-10-04.json`. Raw stdout/stderr, temporary runners, baseline comparison and screenshots are retained in `.system_generated/full-regression/`; format matrices also remain in `.system_generated/image-formats/`. Product source and original test assertions were not changed in this run.
+The durable machine-readable companion is `full-regression-results-2026-10-04.json`. Raw stdout/stderr, temporary runners, baseline comparison and screenshots are retained in `.system_generated/full-regression/`; format matrices also remain in `.system_generated/image-formats/`. Application runtime is unchanged by the fixture repair. Behavioral assertions are retained, with the obsolete solo zero-socket assertion corrected to check active-session and live-channel behavior. Fresh logs, screenshots and all 19 passing results are in `.system_generated/regression/`; the JSON companion retains the original failing run and main comparison.
 
 Core commands: `pnpm test:collab`, `pnpm test:mcp`, `node packages/mcp/node_modules/tsx/dist/cli.mjs tests/collab-load-simulation.test.ts`, `node tests/image-access-policy.test.mjs`, `pnpm test:e2e:projects`, `pnpm test:images`, all three image-format modes, and `pnpm check && pnpm build && pnpm lint`. Image cloud persistence, cloud formats and deleted-project sync ran sequentially under Auth, Firestore, Storage, RTDB and Functions emulators. Older browser scripts ran through the retained `run-legacy.mjs` harness; the same scripts were compared through `run-baseline.mjs`.
