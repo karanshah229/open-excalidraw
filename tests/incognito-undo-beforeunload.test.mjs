@@ -1,3 +1,4 @@
+import { reloadAllowingPendingChanges } from './browser-navigation.mjs'
 import puppeteer from 'puppeteer-core'
 import assert from 'node:assert'
 
@@ -89,7 +90,7 @@ async function runTest() {
     console.log('   ✓ Board shared as anyone_with_link + editor')
 
     // API fixture publication precedes the editor's shared-board bootstrap.
-    await page1.reload({ waitUntil: 'domcontentloaded' })
+    await reloadAllowingPendingChanges(page1, { waitUntil: 'domcontentloaded' })
     await page1.waitForFunction(() => Boolean(window.__excalidrawAPI))
 
     // -------------------------------------------------------------
@@ -169,7 +170,13 @@ async function runTest() {
     // Step 5: Close Incognito Tab with beforeunload enabled
     // -------------------------------------------------------------
     console.log('\n▶ Step 5: Closing Incognito tab (verifying NO beforeunload dialog)...')
+    const actuallyClosed = within(
+      new Promise((resolve) => page2.once('close', resolve)),
+      'Closing incognito after completed undo',
+      5000,
+    )
     await page2.close({ runBeforeUnload: true })
+    await actuallyClosed
     console.log('   ✓ Tab closed successfully')
 
     assert.equal(dialogAppeared, false, 'No confirmation dialog should appear before leaving site!')

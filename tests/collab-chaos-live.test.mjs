@@ -1,3 +1,4 @@
+import { reloadAllowingPendingChanges } from './browser-navigation.mjs'
 import assert from 'node:assert/strict'
 import puppeteer from 'puppeteer-core'
 
@@ -103,7 +104,7 @@ async function runChaosSuite() {
         const { getFirebaseAuth } = await import('/src/lib/firebase.ts')
         const { signInOwner: signInAnonymously } = await import('/tests/regression-fixture.ts')
         const { workspaceApi } = await import('/src/features/workspace/workspace-api.ts')
-          const auth = getFirebaseAuth()
+        const auth = getFirebaseAuth()
         if (auth && (!auth.currentUser || auth.currentUser.isAnonymous)) await signInAnonymously(auth)
         const project = await workspaceApi.createProject(`Chaos ${id}`)
         await workspaceApi.saveBoard({
@@ -181,7 +182,7 @@ async function runChaosSuite() {
 
     // A repeatedly reloading peer must not erase a live room or lose its scene.
     for (let attempt = 0; attempt < 3; attempt++) {
-      await guest.reload({ waitUntil: 'domcontentloaded' })
+      await reloadAllowingPendingChanges(guest, { waitUntil: 'domcontentloaded' })
       await guest.waitForFunction(() => Boolean(window.__excalidrawAPI), { timeout: 15_000 })
       await eventually(
         () => scene(guest),

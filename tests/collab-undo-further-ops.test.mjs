@@ -1,3 +1,4 @@
+import { reloadAllowingPendingChanges } from './browser-navigation.mjs'
 import puppeteer from 'puppeteer-core'
 import assert from 'node:assert'
 
@@ -96,7 +97,7 @@ async function run() {
     }, boardId)
 
     // API fixture publication precedes the editor's shared-board bootstrap.
-    await page1.reload({ waitUntil: 'domcontentloaded' })
+    await reloadAllowingPendingChanges(page1, { waitUntil: 'domcontentloaded' })
     await page1.waitForFunction(() => Boolean(window.__excalidrawAPI))
 
     // Open Page 2 in incognito context

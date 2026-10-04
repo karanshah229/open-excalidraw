@@ -1,0 +1,996 @@
+{
+  "command": "npm test",
+  "exitCode": 0,
+  "recordedAtUtc": "2026-10-04T12:11:34.661245+00:00",
+  "baselineCommit": "fdc41d5788dea91c23135948d70e40bb526ad1f8",
+  "testedSource": "Working tree changes subsequently committed with this report",
+  "sourceSha256": {
+    "apps/whiteboard/src/app.tsx": "e2c800d00b4dce5ccdbccd169242070204243a8d3d3cd2fb64cf27f4e6c7875f",
+    "apps/whiteboard/src/components/sign-in-screen.tsx": "0e2e90aeeba00896b51b6a0168bf77d2531d2d80babba828c064e56e1f2cc044",
+    "apps/whiteboard/src/features/workspace/workspace-home.tsx": "0cc3b3ad570b8759943c057fb6fbcc0d9214a6a9d5204ccd2a528e7fe75f59de",
+    "apps/whiteboard/src/routes/board-editor.tsx": "a1cbb638875866a14f4abbae79df1db2c5ec06d4b17e111eacc7c96c084ef945",
+    "apps/whiteboard/src/features/sharing/shared-scene-drafts.ts": "c733fb92b4466abb00102460a0c957c1a96d0527318f0b741d3766d50515ea28",
+    "tests/board-behavior-contract.test.mjs": "6216f7a32fb3a5010e88edf9faf909feeee230501ea4214d16fd544a6dc05338",
+    "tests/e2e-collab-suite.mjs": "09910d8ddf7958687e1c21649a12c8169fe2a4dde1fdc2333bb02f13b695b9e2",
+    "tests/browser-navigation.mjs": "bc69d1496cb46b2d26549764cec5c601b172f57d955b6a047df9d77fff31a138",
+    "tests/run-regression-tests.mjs": "fcd2779b8867ff814e050f1893bc879e03b26a17ce0e75796f0e0061e035993c",
+    "tests/run-all-tests.mjs": "703f3cfc75ab4707d47b6daf93b0bf2364162e2021c47e4ece43829d55d46107"
+  },
+  "aggregate": {
+    "startedBy": "npm test",
+    "results": [
+      {
+        "name": "build",
+        "exitCode": 0,
+        "durationMs": 4960,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/build.log"
+      },
+      {
+        "name": "typecheck",
+        "exitCode": 0,
+        "durationMs": 3832,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/typecheck.log"
+      },
+      {
+        "name": "lint",
+        "exitCode": 0,
+        "durationMs": 1539,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/lint.log"
+      },
+      {
+        "name": "collaboration-unit",
+        "exitCode": 0,
+        "durationMs": 177,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/collaboration-unit.log"
+      },
+      {
+        "name": "collaboration-load",
+        "exitCode": 0,
+        "durationMs": 2152,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/collaboration-load.log"
+      },
+      {
+        "name": "mcp-tools",
+        "exitCode": 0,
+        "durationMs": 93,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/mcp-tools.log"
+      },
+      {
+        "name": "image-access-policy",
+        "exitCode": 0,
+        "durationMs": 20,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/image-access-policy.log"
+      },
+      {
+        "name": "projects-e2e",
+        "exitCode": 0,
+        "durationMs": 61418,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/projects-e2e.log"
+      },
+      {
+        "name": "images-local-persistence",
+        "exitCode": 0,
+        "durationMs": 3728,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/images-local-persistence.log"
+      },
+      {
+        "name": "images-local-formats",
+        "exitCode": 0,
+        "durationMs": 27920,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/images-local-formats.log"
+      },
+      {
+        "name": "images-production-bundle-formats",
+        "exitCode": 0,
+        "durationMs": 27327,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/images-production-bundle-formats.log"
+      },
+      {
+        "name": "images-cloud",
+        "exitCode": 0,
+        "durationMs": 82502,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/images-cloud.log"
+      },
+      {
+        "name": "older-browser-regression",
+        "exitCode": 0,
+        "durationMs": 369389,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/older-browser-regression.log"
+      }
+    ]
+  },
+  "cloud": {
+    "startedBy": "npm test",
+    "results": [
+      {
+        "name": "images-cloud-persistence",
+        "exitCode": 0,
+        "durationMs": 11708,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/images-cloud-persistence.log"
+      },
+      {
+        "name": "images-cloud-formats",
+        "exitCode": 0,
+        "durationMs": 51369,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/images-cloud-formats.log"
+      },
+      {
+        "name": "deleted-project-sync",
+        "exitCode": 0,
+        "durationMs": 5971,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/deleted-project-sync.log"
+      }
+    ]
+  },
+  "browser": {
+    "project": "demo-regression",
+    "results": [
+      {
+        "name": "board-behavior-contract.test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 46291
+      },
+      {
+        "name": "e2e-collab-suite.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 45866
+      },
+      {
+        "name": "collab-chaos-live.test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 4458
+      },
+      {
+        "name": "network-lifecycle.test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 6312
+      },
+      {
+        "name": "repro-user-str.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 8066
+      },
+      {
+        "name": "inactive-tab-presence-cursor.test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 45339
+      },
+      {
+        "name": "board-auto-zoom-center.test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 4202
+      },
+      {
+        "name": "solo-no-collab-banner.test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 11416
+      },
+      {
+        "name": "incognito-undo-beforeunload.test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 15921
+      },
+      {
+        "name": "collab-undo-resurrect.test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 13295
+      },
+      {
+        "name": "delete-all-reload-flash.test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 2994
+      },
+      {
+        "name": "unauthenticated-owner-hidden.test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 7372
+      },
+      {
+        "name": "solo-delete-collab-undo.test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 11614
+      },
+      {
+        "name": "collab-undo-further-ops.test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 45631
+      },
+      {
+        "name": "mcp-live-e2e.test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 4236
+      },
+      {
+        "name": "create-board-modal-dropdown-scroll.test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 2978
+      },
+      {
+        "name": "e2e-smoke-test-and-screenshots.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 6056
+      },
+      {
+        "name": "e2e-non-anonymous-test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 5746
+      },
+      {
+        "name": "browser-collab-verify.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 3589
+      },
+      {
+        "name": "e2e-visual-screenshots.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 45802
+      }
+    ]
+  },
+  "behaviorContract": [
+    {
+      "name": "anonymous-local",
+      "status": "passed"
+    },
+    {
+      "name": "permissions-without-refresh",
+      "status": "passed"
+    },
+    {
+      "name": "anonymous-editor-pending-close",
+      "status": "passed"
+    },
+    {
+      "name": "pending-close-reopen",
+      "status": "passed"
+    }
+  ],
+  "anonymousEditorBeforeFix": [
+    {
+      "name": "anonymous-editor-pending-close",
+      "status": "failed",
+      "error": "TimeoutError: Waiting failed: 15000ms exceeded\n    at new WaitTask (file:///Users/karan/projects/Personal_projects/agentic-whiteboard/node_modules/.pnpm/puppeteer-core@25.12.0/node_modules/puppeteer-core/lib/puppeteer/common/WaitTask.js:46:34)\n    at IsolatedWorld.waitForFunction (file:///Users/karan/projects/Personal_projects/agentic-whiteboard/node_modules/.pnpm/puppeteer-core@25.12.0/node_modules/puppeteer-core/lib/puppeteer/api/Realm.js:49:26)\n    at CdpFrame.waitForFunction (file:///Users/karan/projects/Personal_projects/agentic-whiteboard/node_modules/.pnpm/puppeteer-core@25.12.0/node_modules/puppeteer-core/lib/puppeteer/api/Frame.js:585:43)\n    at CdpFrame.<anonymous> (file:///Users/karan/projects/Personal_projects/agentic-whiteboard/node_modules/.pnpm/puppeteer-core@25.12.0/node_modules/puppeteer-core/lib/puppeteer/util/decorators.js:101:27)\n    at CdpPage.waitForFunction (file:///Users/karan/projects/Personal_projects/agentic-whiteboard/node_modules/.pnpm/puppeteer-core@25.12.0/node_modules/puppeteer-core/lib/puppeteer/api/Page.js:1537:37)\n    at file:///Users/karan/projects/Personal_projects/agentic-whiteboard/tests/board-behavior-contract.test.mjs:318:20\n    at async run (file:///Users/karan/projects/Personal_projects/agentic-whiteboard/tests/board-behavior-contract.test.mjs:117:5)\n    at async file:///Users/karan/projects/Personal_projects/agentic-whiteboard/tests/board-behavior-contract.test.mjs:289:3"
+    }
+  ],
+  "integratedDiagnosticRuns": [
+    {
+      "directory": ".system_generated/behavior-contract-first-full-run",
+      "aggregate": {
+        "startedBy": "npm test",
+        "results": [
+          {
+            "name": "build",
+            "exitCode": 0,
+            "durationMs": 3286,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/build.log"
+          },
+          {
+            "name": "typecheck",
+            "exitCode": 0,
+            "durationMs": 2489,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/typecheck.log"
+          },
+          {
+            "name": "lint",
+            "exitCode": 0,
+            "durationMs": 1407,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/lint.log"
+          },
+          {
+            "name": "collaboration-unit",
+            "exitCode": 0,
+            "durationMs": 151,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/collaboration-unit.log"
+          },
+          {
+            "name": "collaboration-load",
+            "exitCode": 0,
+            "durationMs": 2109,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/collaboration-load.log"
+          },
+          {
+            "name": "mcp-tools",
+            "exitCode": 0,
+            "durationMs": 99,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/mcp-tools.log"
+          },
+          {
+            "name": "image-access-policy",
+            "exitCode": 0,
+            "durationMs": 26,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/image-access-policy.log"
+          },
+          {
+            "name": "projects-e2e",
+            "exitCode": 0,
+            "durationMs": 60430,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/projects-e2e.log"
+          },
+          {
+            "name": "images-local-persistence",
+            "exitCode": 0,
+            "durationMs": 3822,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/images-local-persistence.log"
+          },
+          {
+            "name": "images-local-formats",
+            "exitCode": 0,
+            "durationMs": 29707,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/images-local-formats.log"
+          },
+          {
+            "name": "images-production-bundle-formats",
+            "exitCode": 0,
+            "durationMs": 49019,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/images-production-bundle-formats.log"
+          },
+          {
+            "name": "images-cloud",
+            "exitCode": 0,
+            "durationMs": 142058,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/images-cloud.log"
+          },
+          {
+            "name": "older-browser-regression",
+            "exitCode": 1,
+            "durationMs": 441989,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/older-browser-regression.log"
+          }
+        ]
+      },
+      "browser": {
+        "project": "demo-regression",
+        "results": [
+          {
+            "name": "board-behavior-contract.test.mjs",
+            "exitCode": 1,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 65325
+          },
+          {
+            "name": "e2e-collab-suite.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 46615
+          },
+          {
+            "name": "collab-chaos-live.test.mjs",
+            "exitCode": 1,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 45397
+          },
+          {
+            "name": "network-lifecycle.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 11563
+          },
+          {
+            "name": "repro-user-str.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 14186
+          },
+          {
+            "name": "inactive-tab-presence-cursor.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 48030
+          },
+          {
+            "name": "board-auto-zoom-center.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 4465
+          },
+          {
+            "name": "solo-no-collab-banner.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 13672
+          },
+          {
+            "name": "incognito-undo-beforeunload.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 16196
+          },
+          {
+            "name": "collab-undo-resurrect.test.mjs",
+            "exitCode": 1,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 21402
+          },
+          {
+            "name": "delete-all-reload-flash.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 3074
+          },
+          {
+            "name": "unauthenticated-owner-hidden.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 7854
+          },
+          {
+            "name": "solo-delete-collab-undo.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 11838
+          },
+          {
+            "name": "collab-undo-further-ops.test.mjs",
+            "exitCode": 1,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 21314
+          },
+          {
+            "name": "mcp-live-e2e.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 3971
+          },
+          {
+            "name": "create-board-modal-dropdown-scroll.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 3052
+          },
+          {
+            "name": "e2e-smoke-test-and-screenshots.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 5970
+          },
+          {
+            "name": "e2e-non-anonymous-test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 6061
+          },
+          {
+            "name": "browser-collab-verify.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 3684
+          },
+          {
+            "name": "e2e-visual-screenshots.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 46628
+          }
+        ]
+      }
+    },
+    {
+      "directory": ".system_generated/behavior-contract-second-full-run",
+      "aggregate": {
+        "startedBy": "npm test",
+        "results": [
+          {
+            "name": "build",
+            "exitCode": 0,
+            "durationMs": 3134,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/build.log"
+          },
+          {
+            "name": "typecheck",
+            "exitCode": 0,
+            "durationMs": 2265,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/typecheck.log"
+          },
+          {
+            "name": "lint",
+            "exitCode": 0,
+            "durationMs": 1329,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/lint.log"
+          },
+          {
+            "name": "collaboration-unit",
+            "exitCode": 0,
+            "durationMs": 146,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/collaboration-unit.log"
+          },
+          {
+            "name": "collaboration-load",
+            "exitCode": 0,
+            "durationMs": 2115,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/collaboration-load.log"
+          },
+          {
+            "name": "mcp-tools",
+            "exitCode": 0,
+            "durationMs": 83,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/mcp-tools.log"
+          },
+          {
+            "name": "image-access-policy",
+            "exitCode": 0,
+            "durationMs": 21,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/image-access-policy.log"
+          },
+          {
+            "name": "projects-e2e",
+            "exitCode": 0,
+            "durationMs": 58731,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/projects-e2e.log"
+          },
+          {
+            "name": "images-local-persistence",
+            "exitCode": 0,
+            "durationMs": 3433,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/images-local-persistence.log"
+          },
+          {
+            "name": "images-local-formats",
+            "exitCode": 0,
+            "durationMs": 28949,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/images-local-formats.log"
+          },
+          {
+            "name": "images-production-bundle-formats",
+            "exitCode": 0,
+            "durationMs": 27659,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/images-production-bundle-formats.log"
+          },
+          {
+            "name": "images-cloud",
+            "exitCode": 0,
+            "durationMs": 75411,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/images-cloud.log"
+          },
+          {
+            "name": "older-browser-regression",
+            "exitCode": 1,
+            "durationMs": 378933,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/older-browser-regression.log"
+          }
+        ]
+      },
+      "browser": {
+        "project": "demo-regression",
+        "results": [
+          {
+            "name": "board-behavior-contract.test.mjs",
+            "exitCode": 1,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 43493
+          },
+          {
+            "name": "e2e-collab-suite.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 46694
+          },
+          {
+            "name": "collab-chaos-live.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 6085
+          },
+          {
+            "name": "network-lifecycle.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 6758
+          },
+          {
+            "name": "repro-user-str.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 9156
+          },
+          {
+            "name": "inactive-tab-presence-cursor.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 45798
+          },
+          {
+            "name": "board-auto-zoom-center.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 4837
+          },
+          {
+            "name": "solo-no-collab-banner.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 11789
+          },
+          {
+            "name": "incognito-undo-beforeunload.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 16025
+          },
+          {
+            "name": "collab-undo-resurrect.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 14623
+          },
+          {
+            "name": "delete-all-reload-flash.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 5032
+          },
+          {
+            "name": "unauthenticated-owner-hidden.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 7885
+          },
+          {
+            "name": "solo-delete-collab-undo.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 11672
+          },
+          {
+            "name": "collab-undo-further-ops.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 45451
+          },
+          {
+            "name": "mcp-live-e2e.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 4386
+          },
+          {
+            "name": "create-board-modal-dropdown-scroll.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 3030
+          },
+          {
+            "name": "e2e-smoke-test-and-screenshots.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 6048
+          },
+          {
+            "name": "e2e-non-anonymous-test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 5890
+          },
+          {
+            "name": "browser-collab-verify.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 3656
+          },
+          {
+            "name": "e2e-visual-screenshots.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 46312
+          }
+        ]
+      }
+    },
+    {
+      "directory": ".system_generated/behavior-contract-third-full-run",
+      "aggregate": {
+        "startedBy": "npm test",
+        "results": [
+          {
+            "name": "build",
+            "exitCode": 0,
+            "durationMs": 3070,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/build.log"
+          },
+          {
+            "name": "typecheck",
+            "exitCode": 0,
+            "durationMs": 2250,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/typecheck.log"
+          },
+          {
+            "name": "lint",
+            "exitCode": 0,
+            "durationMs": 1275,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/lint.log"
+          },
+          {
+            "name": "collaboration-unit",
+            "exitCode": 0,
+            "durationMs": 146,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/collaboration-unit.log"
+          },
+          {
+            "name": "collaboration-load",
+            "exitCode": 0,
+            "durationMs": 2108,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/collaboration-load.log"
+          },
+          {
+            "name": "mcp-tools",
+            "exitCode": 0,
+            "durationMs": 94,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/mcp-tools.log"
+          },
+          {
+            "name": "image-access-policy",
+            "exitCode": 0,
+            "durationMs": 21,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/image-access-policy.log"
+          },
+          {
+            "name": "projects-e2e",
+            "exitCode": 0,
+            "durationMs": 60371,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/projects-e2e.log"
+          },
+          {
+            "name": "images-local-persistence",
+            "exitCode": 0,
+            "durationMs": 3238,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/images-local-persistence.log"
+          },
+          {
+            "name": "images-local-formats",
+            "exitCode": 0,
+            "durationMs": 27250,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/images-local-formats.log"
+          },
+          {
+            "name": "images-production-bundle-formats",
+            "exitCode": 0,
+            "durationMs": 27530,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/images-production-bundle-formats.log"
+          },
+          {
+            "name": "images-cloud",
+            "exitCode": 0,
+            "durationMs": 88731,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/images-cloud.log"
+          },
+          {
+            "name": "older-browser-regression",
+            "exitCode": 1,
+            "durationMs": 365222,
+            "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/older-browser-regression.log"
+          }
+        ]
+      },
+      "browser": {
+        "project": "demo-regression",
+        "results": [
+          {
+            "name": "board-behavior-contract.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 48089
+          },
+          {
+            "name": "e2e-collab-suite.mjs",
+            "exitCode": 1,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 23400
+          },
+          {
+            "name": "collab-chaos-live.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 4246
+          },
+          {
+            "name": "network-lifecycle.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 8631
+          },
+          {
+            "name": "repro-user-str.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 10134
+          },
+          {
+            "name": "inactive-tab-presence-cursor.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 46091
+          },
+          {
+            "name": "board-auto-zoom-center.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 4949
+          },
+          {
+            "name": "solo-no-collab-banner.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 12445
+          },
+          {
+            "name": "incognito-undo-beforeunload.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 16045
+          },
+          {
+            "name": "collab-undo-resurrect.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 15019
+          },
+          {
+            "name": "delete-all-reload-flash.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 3292
+          },
+          {
+            "name": "unauthenticated-owner-hidden.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 7886
+          },
+          {
+            "name": "solo-delete-collab-undo.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 11603
+          },
+          {
+            "name": "collab-undo-further-ops.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 47114
+          },
+          {
+            "name": "mcp-live-e2e.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 4427
+          },
+          {
+            "name": "create-board-modal-dropdown-scroll.test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 3206
+          },
+          {
+            "name": "e2e-smoke-test-and-screenshots.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 6727
+          },
+          {
+            "name": "e2e-non-anonymous-test.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 5876
+          },
+          {
+            "name": "browser-collab-verify.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 3720
+          },
+          {
+            "name": "e2e-visual-screenshots.mjs",
+            "exitCode": 0,
+            "signal": null,
+            "timedOut": false,
+            "durationMs": 46644
+          }
+        ]
+      }
+    }
+  ],
+  "limitations": [
+    "Local/emulator functional validation; no live production or development deployment",
+    "Previously denied listener reauthorization backs off to a maximum five-second retry interval",
+    "Recovery needs the same browser profile and Firebase identity; storage deletion/private-context closure removes local drafts",
+    "Historical presence, snapshot/database and MCP security findings remain separate and unresolved; live format runner still needs registered-owner provisioning"
+  ]
+}

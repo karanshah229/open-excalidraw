@@ -1,5 +1,5 @@
 import { createRequire } from 'node:module'
-import { readFile, writeFile, mkdir, unlink } from 'node:fs/promises'
+import { cp, readFile, writeFile, mkdir, mkdtemp, rm, symlink } from 'node:fs/promises'
 import { createWriteStream } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -7,6 +7,7 @@ import { resolve } from 'node:path'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const all = [
+  'board-behavior-contract.test.mjs',
   'e2e-collab-suite.mjs',
   'collab-chaos-live.test.mjs',
   'network-lifecycle.test.mjs',
@@ -37,20 +38,26 @@ const run = (command, args, env = process.env) =>
     child.on('exit', (code) => (code === 0 ? resolveRun() : reject(new Error(`${command} exited ${code}`))))
   })
 if (!process.argv.includes('--inside-emulators')) {
-  const parameters = resolve(root, 'functions/.env.demo-regression')
-  let previous
+  await mkdir(resolve(root, '.system_generated'), { recursive: true })
+  const runtime = await mkdtemp(resolve(root, '.system_generated/regression-runtime-'))
   try {
-    previous = await readFile(parameters)
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error
-  }
-  try {
-    await writeFile(
-      parameters,
-      'RTDB_FUNCTION_REGION=us-central1\nFIRESTORE_FUNCTION_REGION=us-central1\nSYNC_ACCESS_FUNCTION_REGION=us-central1\nASSET_ENFORCE_APP_CHECK=false\n',
-    )
     await run('pnpm', ['--filter', '@agentic-whiteboard/functions', 'build'])
     await run('pnpm', ['--filter', '@agentic-whiteboard/mcp', 'build'])
+    const functions = resolve(runtime, 'functions')
+    await mkdir(functions)
+    await cp(resolve(root, 'functions/lib'), resolve(functions, 'lib'), { recursive: true })
+    await cp(resolve(root, 'functions/package.json'), resolve(functions, 'package.json'))
+    await symlink(resolve(root, 'functions/node_modules'), resolve(functions, 'node_modules'), 'dir')
+    await writeFile(
+      resolve(functions, '.env.demo-regression'),
+      'RTDB_FUNCTION_REGION=us-central1\nFIRESTORE_FUNCTION_REGION=us-central1\nSYNC_ACCESS_FUNCTION_REGION=us-central1\nASSET_ENFORCE_APP_CHECK=false\n',
+    )
+    const config = JSON.parse(await readFile(resolve(root, 'regression.firebase.json'), 'utf8'))
+    config.functions.source = 'functions'
+    for (const service of ['firestore', 'database', 'storage'])
+      config[service].rules = resolve(root, config[service].rules)
+    const configPath = resolve(runtime, 'firebase.json')
+    await writeFile(configPath, JSON.stringify(config))
     await run(
       'firebase',
       [
@@ -60,17 +67,13 @@ if (!process.argv.includes('--inside-emulators')) {
         '--project',
         'demo-regression',
         '--config',
-        'regression.firebase.json',
+        configPath,
         'node tests/run-regression-tests.mjs --inside-emulators',
       ],
       { ...process.env, E2E_REGRESSION_FILES: JSON.stringify(files) },
     )
   } finally {
-    if (previous !== undefined) await writeFile(parameters, previous)
-    else
-      await unlink(parameters).catch((error) => {
-        if (error.code !== 'ENOENT') throw error
-      })
+    await rm(runtime, { recursive: true, force: true })
   }
 } else {
   if (process.env.GCLOUD_PROJECT !== 'demo-regression' || !process.env.FIRESTORE_EMULATOR_HOST)

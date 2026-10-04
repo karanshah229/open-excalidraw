@@ -72,6 +72,7 @@ if (imageCloud) {
     async function config(source, destination) {
       const value = JSON.parse(await readFile(resolve(root, source), 'utf8'))
       value.functions.source = 'functions'
+      value.emulators.firestore.websocketPort = source.startsWith('projects') ? 29500 : 19500
       for (const service of ['firestore', 'database', 'storage'])
         value[service].rules = resolve(root, value[service].rules)
       const path = resolve(runtime, destination)

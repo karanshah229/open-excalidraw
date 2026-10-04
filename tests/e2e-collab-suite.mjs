@@ -416,8 +416,7 @@ async function runLiveE2ECollaborationSuite() {
     const page3 = await browser.newPage()
     await page3.setViewport({ width: 1280, height: 800, deviceScaleFactor: 2 })
 
-    await page3.goto(BASE_URL, { waitUntil: 'domcontentloaded' })
-    await page3.evaluate((cfg) => {
+    await page3.evaluateOnNewDocument((cfg) => {
       localStorage.setItem('agentic-whiteboard:library:v1', '[]')
       localStorage.setItem(`agentic-whiteboard:share:${cfg.boardId}`, JSON.stringify(cfg))
     }, shareConfig)
