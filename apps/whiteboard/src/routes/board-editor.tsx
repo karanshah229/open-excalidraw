@@ -5,7 +5,7 @@ import { createPortal } from 'react-dom'
 import { Link, useNavigate, useParams, useBlocker } from '@tanstack/react-router'
 import { useQueryClient } from '@tanstack/react-query'
 import { Check, Copy, Eye, Loader2, Pencil, Share2 } from 'lucide-react'
-import { convertToExcalidrawElements, Excalidraw, MainMenu, exportToSvg } from '@excalidraw/excalidraw'
+import { convertToExcalidrawElements, restoreElements, Excalidraw, MainMenu, exportToSvg } from '@excalidraw/excalidraw'
 import type { BinaryFiles, ExcalidrawImperativeAPI } from '@excalidraw/excalidraw/types'
 import type { BoardDocument, BoardScene, BoardSyncStatus } from '@agentic-whiteboard/storage'
 import { workspaceApi } from '../features/workspace/workspace-api'
@@ -153,10 +153,9 @@ function getSceneSignature(
 }
 
 function prepareInitialElements(elements: readonly any[] = []): any[] {
-  if (!elements || elements.length === 0) return []
-  const converted = convertToExcalidrawElements(elements as any, { regenerateIds: false })
-  const deletedIds = new Set(elements.filter((e) => e?.isDeleted).map((e) => e.id))
-  return converted.map((el) => (deletedIds.has(el.id) ? { ...el, isDeleted: true } : el))
+  // Persisted scenes contain native elements, not generation skeletons.
+  // Restore preserves frameId membership, bindings, versions and tombstones.
+  return restoreElements(elements as any, null)
 }
 
 function createConnectionSessionId(): string {
@@ -676,7 +675,10 @@ export function BoardEditor() {
         // Case 3: Board not found in Firebase and not in local IndexedDB
         setBoardNotFound(true)
       })
-      .catch(() => active && setState('Local save failed'))
+      .catch((error) => {
+        console.error('Failed to load board:', error)
+        if (active) setState('Local save failed')
+      })
     return () => {
       active = false
       if (saveTimer.current) window.clearTimeout(saveTimer.current)
