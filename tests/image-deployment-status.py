@@ -50,7 +50,10 @@ for alias, project in [('development', 'open-excalidraw-dev-2'), ('production', 
                 continue
             bundle = urllib.request.urlopen(base + path, timeout=30).read().decode()
             project_config = re.search(r'VITE_FIREBASE_PROJECT_ID:\s*["`]([^"`]+)["`]', bundle)
-            frontend.append({'bundle': path, 'image_transport_present': 'Firebase image functions are not configured.' in bundle and 'boardAsset' in bundle,
+            # The shared callable module removed the old image-specific error
+            # literal. This is a static reference check; live behavior needs a
+            # signed-in upload/reload smoke test.
+            frontend.append({'bundle': path, 'image_transport_present': 'boardAsset' in bundle,
                              'firebase_project_matches': bool(project_config and project_config.group(1) == project)})
     except urllib.error.HTTPError as error:
         frontend = [{'http_status': error.code}]
