@@ -1,7 +1,7 @@
 import puppeteer from 'puppeteer-core'
 import assert from 'node:assert/strict'
 
-const BASE_URL = 'http://localhost:5173'
+const BASE_URL = process.env.E2E_BASE_URL || 'http://localhost:5173'
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -24,20 +24,15 @@ async function runCreateBoardModalDropdownScrollTest() {
     await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' })
 
     await page.evaluate(async () => {
-      localStorage.setItem(
-        'agentic-whiteboard:e2e-user',
-        JSON.stringify({
-          uid: 'e2e-tester-uid',
-          email: 'tester@example.com',
-          displayName: 'E2E Tester',
-          isAnonymous: false,
-        }),
-      )
+      const { getFirebaseAuth } = await import('/src/lib/firebase.ts')
+      const { signInOwner } = await import('/tests/regression-fixture.ts')
+      await signInOwner(getFirebaseAuth())
 
       const { workspaceApi } = await import('/src/features/workspace/workspace-api.ts')
       for (let i = 1; i <= 20; i++) {
         await workspaceApi.createProject(`E2E Project ${i.toString().padStart(2, '0')}`)
       }
+      await workspaceApi.flushCloud()
     })
 
     console.log('▶ Step 2: Reloading page to enter workspace view...')
@@ -80,8 +75,13 @@ async function runCreateBoardModalDropdownScrollTest() {
       }
     }, listElement)
 
-    console.log(`   Initial dimensions: clientHeight=${clientHeight}px, scrollHeight=${scrollHeight}px, scrollTop=${initialScrollTop}px`)
-    assert.ok(scrollHeight > clientHeight, `Expected scrollHeight (${scrollHeight}) to be greater than clientHeight (${clientHeight}) to require scrolling`)
+    console.log(
+      `   Initial dimensions: clientHeight=${clientHeight}px, scrollHeight=${scrollHeight}px, scrollTop=${initialScrollTop}px`,
+    )
+    assert.ok(
+      scrollHeight > clientHeight,
+      `Expected scrollHeight (${scrollHeight}) to be greater than clientHeight (${clientHeight}) to require scrolling`,
+    )
     assert.equal(initialScrollTop, 0, 'Initial scrollTop should be 0')
 
     console.log('▶ Step 7: Performing mouse wheel scroll over the dropdown list...')
@@ -117,7 +117,10 @@ async function runCreateBoardModalDropdownScrollTest() {
 
     const labelText = await page.evaluate(() => document.querySelector('.project-dropdown-trigger-label')?.textContent)
     console.log(`   Selected project trigger label: "${labelText}"`)
-    assert.ok(labelText?.includes('E2E Project 10'), `Expected trigger label to show selected project, got "${labelText}"`)
+    assert.ok(
+      labelText?.includes('E2E Project 10'),
+      `Expected trigger label to show selected project, got "${labelText}"`,
+    )
 
     console.log('\n========================================================================')
     console.log('🎉 ALL TESTS PASSED: Project dropdown is fully scrollable and functional!')

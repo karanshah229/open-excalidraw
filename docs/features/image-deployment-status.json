@@ -1,0 +1,230 @@
+{
+  "checked_at_utc": "2026-10-02T21:01:23.580175+00:00",
+  "projects": [
+    {
+      "alias": "development",
+      "project": "open-excalidraw-dev-2",
+      "configured_bucket": "open-excalidraw-dev-2.firebasestorage.app",
+      "image_gateway": {
+        "state": "ACTIVE",
+        "region": "us-central1",
+        "app_check_enforced": false,
+        "max_instances": 10,
+        "concurrency": 4
+      },
+      "image_tokens": {
+        "checked_at_utc": "2026-10-02T21:01:13.863362+00:00",
+        "project": "open-excalidraw-dev-2",
+        "apply": false,
+        "image_objects": 32,
+        "token_objects_before": 0,
+        "revoked_objects": 0,
+        "remaining_token_objects": 0,
+        "signed_out_revoked_token_status": null
+      },
+      "configured_bucket_exists": true,
+      "buckets": [
+        {
+          "cors_config": [
+            {
+              "method": [
+                "GET"
+              ],
+              "origin": [
+                "https://*.cloud.google.com",
+                "https://*.corp.google.com",
+                "https://*.corp.google.com:*",
+                "https://*.cloud.google",
+                "https://*.byoid.goog"
+              ]
+            }
+          ],
+          "location": "US-CENTRAL1",
+          "name": "gcf-v2-sources-915263627491-us-central1"
+        },
+        {
+          "cors_config": [
+            {
+              "method": [
+                "PUT"
+              ],
+              "origin": [
+                "https://*.cloud.google.com",
+                "https://*.corp.google.com",
+                "https://*.corp.google.com:*",
+                "https://*.cloud.google",
+                "https://*.byoid.goog"
+              ],
+              "responseHeader": [
+                "content-type"
+              ]
+            }
+          ],
+          "location": "US-CENTRAL1",
+          "name": "gcf-v2-uploads-915263627491.us-central1.cloudfunctions.appspot.com"
+        },
+        {
+          "cors_config": [
+            {
+              "maxAgeSeconds": 3600,
+              "method": [
+                "GET"
+              ],
+              "origin": [
+                "https://open-excalidraw-dev-2.web.app",
+                "https://open-excalidraw-dev-2.firebaseapp.com",
+                "http://localhost:5173",
+                "http://127.0.0.1:5173",
+                "http://127.0.0.1:15179"
+              ]
+            }
+          ],
+          "location": "ASIA-SOUTH1",
+          "name": "open-excalidraw-dev-2.firebasestorage.app"
+        }
+      ],
+      "billing_enabled": true,
+      "database_rules_match_local": true,
+      "rules": [
+        {
+          "release": "firebase.storage/open-excalidraw-dev-2.firebasestorage.app",
+          "updated_at": "2026-10-02T20:35:11.883372Z",
+          "matches_local": true
+        },
+        {
+          "release": "cloud.firestore",
+          "updated_at": "2026-10-01T04:56:06.399733Z",
+          "matches_local": true
+        }
+      ],
+      "rules_api_error": null,
+      "frontend": [
+        {
+          "bundle": "/assets/index-BOtUFNEX.js",
+          "image_transport_present": true,
+          "firebase_project_matches": true
+        }
+      ]
+    },
+    {
+      "alias": "production",
+      "project": "open-excalidraw-b2ab4",
+      "configured_bucket": "open-excalidraw-b2ab4.firebasestorage.app",
+      "image_gateway": {
+        "state": "ACTIVE",
+        "region": "asia-southeast1",
+        "app_check_enforced": true,
+        "max_instances": 10,
+        "concurrency": 4
+      },
+      "image_tokens": {
+        "checked_at_utc": "2026-10-02T21:01:23.561790+00:00",
+        "project": "open-excalidraw-b2ab4",
+        "apply": false,
+        "image_objects": 6,
+        "token_objects_before": 0,
+        "revoked_objects": 0,
+        "remaining_token_objects": 0,
+        "signed_out_revoked_token_status": null
+      },
+      "configured_bucket_exists": true,
+      "buckets": [
+        {
+          "cors_config": [
+            {
+              "method": [
+                "GET"
+              ],
+              "origin": [
+                "https://*.cloud.google.com",
+                "https://*.corp.google.com",
+                "https://*.corp.google.com:*",
+                "https://*.cloud.google",
+                "https://*.byoid.goog"
+              ]
+            }
+          ],
+          "location": "ASIA-SOUTH1",
+          "name": "gcf-v2-sources-719257286661-asia-south1"
+        },
+        {
+          "cors_config": [
+            {
+              "method": [
+                "GET"
+              ],
+              "origin": [
+                "https://*.cloud.google.com",
+                "https://*.corp.google.com",
+                "https://*.corp.google.com:*",
+                "https://*.cloud.google",
+                "https://*.byoid.goog"
+              ]
+            }
+          ],
+          "location": "ASIA-SOUTHEAST1",
+          "name": "gcf-v2-sources-719257286661-asia-southeast1"
+        },
+        {
+          "cors_config": [
+            {
+              "method": [
+                "PUT"
+              ],
+              "origin": [
+                "https://*.cloud.google.com",
+                "https://*.corp.google.com",
+                "https://*.corp.google.com:*",
+                "https://*.cloud.google",
+                "https://*.byoid.goog"
+              ],
+              "responseHeader": [
+                "content-type"
+              ]
+            }
+          ],
+          "location": "ASIA-SOUTHEAST1",
+          "name": "gcf-v2-uploads-719257286661.asia-southeast1.cloudfunctions.appspot.com"
+        },
+        {
+          "cors_config": [
+            {
+              "maxAgeSeconds": 3600,
+              "method": [
+                "GET"
+              ],
+              "origin": [
+                "https://open-excalidraw-b2ab4.web.app",
+                "https://open-excalidraw-b2ab4.firebaseapp.com"
+              ]
+            }
+          ],
+          "location": "ASIA-SOUTH1",
+          "name": "open-excalidraw-b2ab4.firebasestorage.app"
+        }
+      ],
+      "billing_enabled": true,
+      "database_rules_match_local": true,
+      "rules": [
+        {
+          "release": "firebase.storage/open-excalidraw-b2ab4.firebasestorage.app",
+          "updated_at": "2026-10-02T20:44:34.320168Z",
+          "matches_local": true
+        },
+        {
+          "release": "cloud.firestore",
+          "updated_at": "2026-10-02T18:21:47.528449Z",
+          "matches_local": true
+        }
+      ],
+      "rules_api_error": null,
+      "frontend": [
+        {
+          "bundle": "/assets/index-lGuKqfkC.js",
+          "image_transport_present": true,
+          "firebase_project_matches": true
+        }
+      ]
+    }
+  ]
+}

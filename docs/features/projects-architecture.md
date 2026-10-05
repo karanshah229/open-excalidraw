@@ -22,7 +22,8 @@ flowchart TB
     Preferences[("Firestore personal preferences<br/>users/uid/projectPreferences/project")]
     Mirror["Revisioned policy mirroring<br/>Callables + repair triggers"]
     RTDB[("Realtime Database<br/>projectAccess + boardAccess<br/>Live elements and presence")]
-    Assets[("Firebase Storage<br/>Image assets")]
+    AssetGateway["boardAsset callable<br/>Current board/project access"]
+    Assets[("Firebase Storage<br/>Immutable image assets")]
     Rules["Security rules<br/>Firestore + Storage: current policies<br/>RTDB: mirrored policies"]
   end
 
@@ -42,7 +43,9 @@ flowchart TB
   Private -->|publish new boards in shared projects| Policies
   Editor <-->|authorized snapshots| Policies
   Editor <-->|live collaboration| RTDB
-  Editor <-->|authorized image reads and uploads| Assets
+  Editor <-->|authorized image reads and uploads| AssetGateway
+  AssetGateway -->|current direct/inherited grants and parent lifecycle| Policies
+  AssetGateway <-->|Admin image bytes / no permanent URL| Assets
   Rules -.-> Private
   Rules -.-> Policies
   Rules -.-> RTDB
@@ -53,7 +56,7 @@ flowchart TB
   Private --> Export
   Policies --> Export
   RTDB -->|live deltas| Export
-  Assets -->|image bytes| Export
+  AssetGateway -->|authorized image bytes| Export
   Export --> ZIP["ZIP download<br/>Excalidraw + SVG + PNG<br/>Manifest, failures and retry"]
 ```
 

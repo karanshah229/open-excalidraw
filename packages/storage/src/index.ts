@@ -5,7 +5,7 @@ import { RxDBMigrationSchemaPlugin } from 'rxdb/plugins/migration-schema'
 import type { RxDatabase, RxJsonSchema } from 'rxdb'
 
 export type ProjectRole = 'owner' | 'editor' | 'viewer'
-export type BoardSyncStatus = 'local-only' | 'synced' | 'sync-failed' | 'conflict'
+export type BoardSyncStatus = 'local-only' | 'synced' | 'sync-failed' | 'sync-blocked' | 'conflict'
 export type ProjectMember = { principalId: string; role: ProjectRole }
 
 export type Project = {
@@ -55,7 +55,7 @@ export type WorkspaceBootstrap = { project: Project | null; board: BoardDocument
 /** Product-level boundary for local, desktop, and cloud persistence adapters. */
 export interface WorkspaceStore {
   bootstrap(): Promise<WorkspaceBootstrap>
-  listProjects(): Promise<Project[]>
+  listProjects(includeDeleted?: boolean): Promise<Project[]>
   claimLocalProjects(ownerId: string): Promise<string[]>
   createProject(name: string, ownerId: string): Promise<Project>
   listBoards(projectId: string): Promise<Board[]>
@@ -67,9 +67,11 @@ export interface WorkspaceStore {
   updateBoardSyncStatus(boardId: string, syncStatus: BoardSyncStatus): Promise<void>
   markBoardSynced(boardId: string, revision: number): Promise<void>
   markBoardSyncFailed(boardId: string, error: string, nextSyncAt: string): Promise<void>
+  markBoardSyncBlocked(boardId: string, error: string): Promise<void>
+  resumeBoardSync(boardId: string): Promise<void>
   markBoardConflict(boardId: string, error: string): Promise<void>
   requeueConflictedBoard(boardId: string, remoteRevision: number): Promise<void>
-  listBoardsForSync(): Promise<Board[]>
+  listBoardsForSync(includeDeletedProjects?: boolean): Promise<Board[]>
   deleteBoard(boardId: string): Promise<void>
 }
 
@@ -262,12 +264,12 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
     return { project: null, board: null }
   }
 
-  async listProjects(): Promise<Project[]> {
+  async listProjects(includeDeleted?: boolean): Promise<Project[]> {
     const db = await database()
     const documents = await (db.projects as any).find().exec()
     return documents
       .map(plain<Project>)
-      .filter((project: Project) => project.ownerId === workspaceIdentity && !project.deletedAt)
+      .filter((project: Project) => project.ownerId === workspaceIdentity && (includeDeleted || !project.deletedAt))
       .toSorted((left: Project, right: Project) => right.updatedAt.localeCompare(left.updatedAt))
   }
 
@@ -348,12 +350,12 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
     const document = await (db.boards as any).findOne(boardId).exec()
     if (!document) return null
     const board = plain<BoardDocument>(document)
-    const parent = (await this.listProjects()).find((project) => project.id === board.projectId)
+    const parent = (await this.listProjects(true)).find((project) => project.id === board.projectId)
     return parent ? board : null
   }
 
   async saveBoard(document: BoardDocument): Promise<BoardDocument> {
-    if (!(await this.listProjects()).some((project) => project.id === document.projectId))
+    if (!(await this.listProjects(true)).some((project) => project.id === document.projectId))
       throw new Error('Project is unavailable.')
     const db = await database()
     const existingDocument = await (db.boards as any).findOne(document.id).exec()
@@ -393,10 +395,10 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
     else await (db.boards as any).insert(normalized)
   }
 
-  async listBoardsForSync(): Promise<Board[]> {
+  async listBoardsForSync(includeDeletedProjects?: boolean): Promise<Board[]> {
     const db = await database()
     const documents = await (db.boards as any).find().exec()
-    const projects = new Set((await this.listProjects()).map((project) => project.id))
+    const projects = new Set((await this.listProjects(includeDeletedProjects)).map((project) => project.id))
     return documents
       .map((document: any) => toBoard(plain<BoardDocument>(document)))
       .filter((board: Board) => projects.has(board.projectId))
@@ -429,6 +431,11 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
     const document = await (db.boards as any).findOne(boardId).exec()
     if (document) {
       const current = plain<BoardDocument>(document)
+      // A project tombstone can arrive while an earlier write is being acknowledged.
+      if (current.syncStatus === 'sync-blocked') {
+        await document.incrementalPatch({ baseRevision: Math.max(current.baseRevision, revision) })
+        return
+      }
       // Sync runs asynchronously. A newer local edit may have been saved while
       // the cloud acknowledgement for `revision` was in flight. In that case
       // acknowledge the committed base without replacing the newer local
@@ -464,6 +471,25 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
         lastSyncError: error,
       })
     }
+  }
+
+  async markBoardSyncBlocked(boardId: string, error: string): Promise<void> {
+    const db = await database()
+    const document = await (db.boards as any).findOne(boardId).exec()
+    if (document)
+      await document.incrementalPatch({ syncStatus: 'sync-blocked', lastSyncError: error, nextSyncAt: null })
+  }
+
+  async resumeBoardSync(boardId: string): Promise<void> {
+    const db = await database()
+    const document = await (db.boards as any).findOne(boardId).exec()
+    if (document)
+      await document.incrementalPatch({
+        syncStatus: 'local-only',
+        syncAttempts: 0,
+        nextSyncAt: null,
+        lastSyncError: null,
+      })
   }
 
   async markBoardConflict(boardId: string, error: string): Promise<void> {

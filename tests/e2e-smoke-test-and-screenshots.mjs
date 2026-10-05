@@ -1,6 +1,7 @@
+const BASE_URL = process.env.E2E_BASE_URL || 'http://localhost:5173'
 import puppeteer from 'puppeteer-core'
 
-const ARTIFACT_DIR = '/Users/karan/.gemini/antigravity/brain/a6b56a5d-05f3-42f2-b79b-7ceed663f504'
+const ARTIFACT_DIR = process.env.E2E_ARTIFACT_DIR || '.system_generated/regression-screenshots'
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 
 async function runE2ESmokeTest() {
@@ -16,7 +17,7 @@ async function runE2ESmokeTest() {
 
   try {
     const boardId = `smoke-board-${Date.now().toString(36)}`
-    const boardUrl = `http://localhost:5173/boards/${boardId}`
+    const boardUrl = `${BASE_URL}/boards/${boardId}`
     console.log(`Target board URL: ${boardUrl}`)
 
     const shareConfig = {
@@ -85,14 +86,15 @@ async function runE2ESmokeTest() {
       }
     })
 
-    await page1.goto('http://localhost:5173', { waitUntil: 'domcontentloaded' })
+    await page1.goto(process.env.E2E_BASE_URL || 'http://localhost:5173', { waitUntil: 'domcontentloaded' })
     await page1.evaluate(async (cfg) => {
       const { getFirebaseAuth } = await import('/src/lib/firebase.ts')
-      const { signInAnonymously } = await import('/src/features/collaboration/anonymous-user.ts')
-      const { sharingService } = await import('/src/features/sharing/sharing-service.ts')
+      const { signInOwner: signInAnonymously } = await import('/tests/regression-fixture.ts')
       const auth = getFirebaseAuth()
-      if (auth && !auth.currentUser) await signInAnonymously(auth)
-      await sharingService.saveShareConfig({
+      if (auth && (!auth.currentUser || auth.currentUser.isAnonymous)) await signInAnonymously(auth)
+      await (
+        await import('/tests/regression-fixture.ts')
+      ).seedSharedBoard({
         ...cfg,
         ownerId: auth?.currentUser?.uid ?? cfg.ownerId,
       })
@@ -106,7 +108,8 @@ async function runE2ESmokeTest() {
     // TAB 2: ANONYMOUS GUEST (Collaborator / Anonymous Mumbai)
     // ------------------------------------------------------------------
     console.log('\n2. Launching Tab 2 (Guest / Collaborator)...')
-    const page2 = await browser.newPage()
+    const guestContext = await browser.createBrowserContext()
+    const page2 = await guestContext.newPage()
     await page2.setViewport({ width: 1280, height: 800, deviceScaleFactor: 2 })
 
     page2.on('console', (msg) => {

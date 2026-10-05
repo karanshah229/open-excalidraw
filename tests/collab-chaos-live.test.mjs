@@ -1,7 +1,8 @@
+import { reloadAllowingPendingChanges } from './browser-navigation.mjs'
 import assert from 'node:assert/strict'
 import puppeteer from 'puppeteer-core'
 
-const BASE_URL = 'http://localhost:5173'
+const BASE_URL = process.env.E2E_BASE_URL || 'http://localhost:5173'
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -101,11 +102,10 @@ async function runChaosSuite() {
     await host.evaluate(
       async ({ id, initial }) => {
         const { getFirebaseAuth } = await import('/src/lib/firebase.ts')
-        const { signInAnonymously } = await import('/src/features/collaboration/anonymous-user.ts')
+        const { signInOwner: signInAnonymously } = await import('/tests/regression-fixture.ts')
         const { workspaceApi } = await import('/src/features/workspace/workspace-api.ts')
-        const { sharingService } = await import('/src/features/sharing/sharing-service.ts')
         const auth = getFirebaseAuth()
-        if (auth && !auth.currentUser) await signInAnonymously(auth)
+        if (auth && (!auth.currentUser || auth.currentUser.isAnonymous)) await signInAnonymously(auth)
         const project = await workspaceApi.createProject(`Chaos ${id}`)
         await workspaceApi.saveBoard({
           id,
@@ -117,7 +117,9 @@ async function runChaosSuite() {
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         })
-        await sharingService.saveShareConfig({
+        await (
+          await import('/tests/regression-fixture.ts')
+        ).seedSharedBoard({
           boardId: id,
           boardName: 'Chaos Board',
           ownerId: auth?.currentUser?.uid ?? 'owner',
@@ -180,7 +182,7 @@ async function runChaosSuite() {
 
     // A repeatedly reloading peer must not erase a live room or lose its scene.
     for (let attempt = 0; attempt < 3; attempt++) {
-      await guest.reload({ waitUntil: 'domcontentloaded' })
+      await reloadAllowingPendingChanges(guest, { waitUntil: 'domcontentloaded' })
       await guest.waitForFunction(() => Boolean(window.__excalidrawAPI), { timeout: 15_000 })
       await eventually(
         () => scene(guest),

@@ -1,5 +1,5 @@
 import { Link, Outlet, useLocation } from '@tanstack/react-router'
-import { useLayoutEffect } from 'react'
+import { useLayoutEffect, useState } from 'react'
 import { PanelsTopLeft } from 'lucide-react'
 import { ThemeProvider } from './lib/theme-context'
 import { UserProvider } from './lib/user-context'
@@ -21,6 +21,13 @@ export function AppShell() {
 
 function AuthenticatedApp() {
   const { user, isLoading, signInWithGoogle } = useAuth()
+  const [localWorkspace, setLocalWorkspace] = useState(() => {
+    try {
+      return localStorage.getItem('agentic-whiteboard:local-workspace') === 'true'
+    } catch {
+      return false
+    }
+  })
   const location = useLocation()
   const isProject = location.pathname.startsWith('/projects')
   const isBoard = location.pathname.startsWith('/boards')
@@ -39,10 +46,18 @@ function AuthenticatedApp() {
   if (isLoading) return <WorkspaceLoading />
   if (
     (!user || user.isAnonymous) &&
+    !localWorkspace &&
     !isBoard &&
     !(location.pathname === '/' && new URLSearchParams(location.searchStr).has('projectId'))
   )
-    return <SignInScreen />
+    return (
+      <SignInScreen
+        onContinueLocal={() => {
+          localStorage.setItem('agentic-whiteboard:local-workspace', 'true')
+          setLocalWorkspace(true)
+        }}
+      />
+    )
 
   return (
     <UserProvider>

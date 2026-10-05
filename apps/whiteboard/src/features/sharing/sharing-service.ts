@@ -59,6 +59,17 @@ const policyUser = () => getFirebaseAuth()?.currentUser?.uid ?? 'local-user'
 const policyKey = (id: string, uid = policyUser()) => `${uid}:${id}`
 const activeSessionRefCount = new Map<string, number>()
 
+// Owner and shared saves can run concurrently. Give new owner files the same
+// destination as private workspace sync so only one immutable upload is needed.
+async function storeSharedAssets(boardId: string, scene: BoardScene) {
+  const uid = getFirebaseAuth()?.currentUser?.uid
+  const local = uid ? await workspaceStore.loadBoard(boardId) : null
+  const owner = local && (await workspaceStore.listProjects(true)).find((project) => project.id === local.projectId)
+  return local && uid && owner?.ownerId === uid
+    ? storeSceneAssets(scene, `users/${uid}/boards/${boardId}/assets`, local.projectId)
+    : storeSceneAssets(scene, `boards/${boardId}/assets`)
+}
+
 export const sharingService = {
   cachedShareConfig(boardId: string) {
     return policyCache.get(policyKey(boardId))
@@ -169,7 +180,7 @@ export const sharingService = {
         const ref = doc(db, 'boardShares', boardId)
         if (!(await getDoc(ref)).exists()) return
         const updatePayload: Record<string, unknown> = {
-          scene: firestoreValue(await storeSceneAssets(scene, `boards/${boardId}/assets`)),
+          scene: firestoreValue(await storeSharedAssets(boardId, scene)),
           updatedAt: new Date().toISOString(),
         }
         if (boardName) updatePayload.boardName = boardName
@@ -188,7 +199,7 @@ export const sharingService = {
       const ref = doc(db, 'boardShares', boardId)
       await withFirestoreWriteTimeout(
         updateDoc(ref, {
-          scene: firestoreValue(await storeSceneAssets(scene, `boards/${boardId}/assets`)),
+          scene: firestoreValue(await storeSharedAssets(boardId, scene)),
           updatedAt: new Date().toISOString(),
         }),
       )
@@ -200,11 +211,14 @@ export const sharingService = {
     boardId: string,
     onUpdate: (config: BoardShareConfig) => void,
     onError?: (error: any) => void,
+    getKnownFiles?: () => BoardScene['files'],
   ): () => void {
     const db = getFirestoreDb()
     if (!db) return () => {}
     const boardRef = doc(db, 'boardShares', boardId)
     let generation = 0
+    let knownFiles: BoardScene['files'] = getKnownFiles?.() ?? {}
+    let hydration = Promise.resolve()
     let disposed = false
     let boardUnsubscribe: (() => void) | undefined
     let parentUnsubscribe: (() => void) | undefined
@@ -238,9 +252,17 @@ export const sharingService = {
       if (disposed) return
       const current = ++generation
       const user = getFirebaseAuth()?.currentUser
-      void sharingService
-        .getSharedBoard(boardId, user?.email, user?.uid)
-        .then((result) => {
+      hydration = hydration
+        .catch(() => {})
+        .then(async () => {
+          if (disposed || current !== generation) return
+          const result = await sharingService.getSharedBoard(boardId, user?.email, user?.uid, {
+            ...knownFiles,
+            ...getKnownFiles?.(),
+          })
+          // Retain the first transfer for queued snapshots of immutable image bytes.
+          knownFiles = { ...knownFiles, ...result.config?.scene?.files }
+
           if (disposed || current !== generation) return
           if (result.status !== 'allowed' || !result.config) {
             onError?.({ code: 'permission-denied' })
@@ -287,6 +309,7 @@ export const sharingService = {
     boardId: string,
     currentUserEmail?: string | null,
     currentUserId?: string | null,
+    knownFiles: BoardScene['files'] = {},
   ): Promise<{
     status: 'allowed' | 'restricted' | 'not-found'
     config?: BoardShareConfig
@@ -315,7 +338,12 @@ export const sharingService = {
 
     const allowed = async () => {
       sharingService.rememberShareConfig(remoteData!, requestUser)
-      if (remoteData!.scene) remoteData!.scene = await restoreSceneAssets(remoteData!.scene)
+      try {
+        if (remoteData!.scene) remoteData!.scene = await restoreSceneAssets(remoteData!.scene, knownFiles)
+      } catch (error: any) {
+        if (error?.code === 'functions/permission-denied') return { status: 'restricted' as const }
+        throw error
+      }
       return { status: 'allowed' as const, config: remoteData! }
     }
 

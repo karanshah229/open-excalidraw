@@ -1,0 +1,632 @@
+{
+  "date": "2026-10-04",
+  "testedCommit": "e92aa68cf809bd4dbeb33fdcd9143d1f7a3bf113",
+  "baselineCommit": "faea109",
+  "overallGreen": false,
+  "legacyBrowserSuites": {
+    "passed": 19,
+    "failed": 0,
+    "command": "pnpm test:e2e:regression",
+    "environment": "isolated demo-regression Firebase emulators; Chrome headless; frontend port 15190",
+    "sourceBaseCommit": "cf1185b",
+    "sourceState": "Committed fixture repairs; application runtime unchanged.",
+    "results": [
+      {
+        "name": "e2e-collab-suite.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 46613
+      },
+      {
+        "name": "collab-chaos-live.test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 7059
+      },
+      {
+        "name": "network-lifecycle.test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 9140
+      },
+      {
+        "name": "repro-user-str.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 10844
+      },
+      {
+        "name": "inactive-tab-presence-cursor.test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 47329
+      },
+      {
+        "name": "board-auto-zoom-center.test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 4942
+      },
+      {
+        "name": "solo-no-collab-banner.test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 12004
+      },
+      {
+        "name": "incognito-undo-beforeunload.test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 16239
+      },
+      {
+        "name": "collab-undo-resurrect.test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 13844
+      },
+      {
+        "name": "delete-all-reload-flash.test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 3426
+      },
+      {
+        "name": "unauthenticated-owner-hidden.test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 8735
+      },
+      {
+        "name": "solo-delete-collab-undo.test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 15326
+      },
+      {
+        "name": "collab-undo-further-ops.test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 45268
+      },
+      {
+        "name": "mcp-live-e2e.test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 6011
+      },
+      {
+        "name": "create-board-modal-dropdown-scroll.test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 5656
+      },
+      {
+        "name": "e2e-smoke-test-and-screenshots.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 10795
+      },
+      {
+        "name": "e2e-non-anonymous-test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 8460
+      },
+      {
+        "name": "browser-collab-verify.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 6319
+      },
+      {
+        "name": "e2e-visual-screenshots.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 46049
+      }
+    ],
+    "testedCommit": "c0bb1a61080b0b9aa010845e49c0af4f41a049e3"
+  },
+  "passingCoverage": {
+    "collaborationEdgeCases": 17,
+    "collaborationLoadClients": 10,
+    "mcpTools": "all 4 test groups",
+    "imageAccessPolicy": "passed",
+    "projectScenarios": 35,
+    "imagePersistenceLocal": "passed",
+    "imagePersistenceCloud": "passed",
+    "deletedProjectSync": "passed",
+    "formatMatrices": {
+      "local": {
+        "passed": 9,
+        "failed": 0,
+        "finishedAt": "2026-10-04T02:50:53.469Z"
+      },
+      "emulators": {
+        "passed": 9,
+        "failed": 0,
+        "finishedAt": "2026-10-04T02:53:48.621Z"
+      },
+      "local-production-bundle": {
+        "passed": 9,
+        "failed": 0,
+        "finishedAt": "2026-10-04T02:54:12.024Z"
+      }
+    },
+    "formatChecks": 180,
+    "typecheck": "passed",
+    "productionBuild": "passed",
+    "lint": {
+      "errors": 0,
+      "existingWarnings": 4
+    }
+  },
+  "liveDevelopmentFormats": {
+    "passed": 0,
+    "failed": 9,
+    "reason": "Anonymous test owner cannot call project management: Sign in to manage your workspace [401]. No format import assertion was reached."
+  },
+  "securityDiagnostics": {
+    "purpose": "These historical scripts assert exploitable behavior; exit 0 or REPRODUCED is not a security pass.",
+    "reproduced": [
+      {
+        "id": 9,
+        "name": "One viewer forces owner into spectator mode and crashes presence UI",
+        "evidence": {
+          "viewerSessionWrites": 11,
+          "ownerSpectatorBanner": true,
+          "ownerCanvasViewMode": true,
+          "rendererErrors": ["displayName.startsWith is not a function", "displayName.startsWith is not a function"]
+        }
+      },
+      {
+        "id": 10,
+        "name": "Direct anonymous upload and malformed database payload bypass limits",
+        "evidence": {
+          "unauthenticatedSnapshotBytes": 11534336,
+          "invalidVersionAccepted": true,
+          "mismatchedInnerIdAccepted": true,
+          "extraFieldBytes": 300000,
+          "assetsSizeAndDataLengthControls": "denied",
+          "limitation": "Bounded samples; no flood, quota exhaustion, or billing incident simulated"
+        }
+      },
+      {
+        "id": 12,
+        "name": "Unpaired MCP adapter poisons canvas and forges command acknowledgement",
+        "evidence": {
+          "protocolOutput": [
+            "CONFIRMED: unrelated Origin connects without pairing and replaces agent-visible scene",
+            "CONFIRMED: command broadcasts to both adapters; unrelated adapter can forge success ACK",
+            "CONFIRMED: canvas remains readable through MCP after all adapters disconnect"
+          ],
+          "limitation": "Real MCP server with synthetic adapters; remote reachability and hostile webpage local-network policy not asserted"
+        }
+      }
+    ],
+    "inconclusive": [
+      {
+        "id": 1,
+        "name": "Link board enumeration and anonymous editing",
+        "error": "FirebaseError: \nfalse for 'list' @ L54"
+      },
+      {
+        "id": 2,
+        "name": "Actual share UI removal retains editor access",
+        "error": "Error: Timed out: UI removal committed\n    at until (file:///Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/full-regression/security/security-e2e.mjs:61:9)\n    at async file:///Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/full-regression/security/security-e2e.mjs:151:5\n    at async run (file:///Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/full-regression/security/security-e2e.mjs:115:26)\n    at async file:///Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/full-regression/security/security-e2e.mjs:131:3"
+      },
+      {
+        "id": 3,
+        "name": "Real callable mirror failure preserves public RTDB permissions",
+        "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n+ actual - expected\n\n+ 'anyone_with_link'\n- 'restricted'\n\n    at file:///Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/full-regression/security/security-e2e.mjs:167:12\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async run (file:///Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/full-regression/security/security-e2e.mjs:115:26)\n    at async file:///Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/full-regression/security/security-e2e.mjs:159:3"
+      },
+      {
+        "id": 4,
+        "name": "Delayed historical event restores revoked ACL, including after deletion",
+        "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\nfalse !== true\n\n    at file:///Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/full-regression/security/security-e2e.mjs:182:12\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async run (file:///Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/full-regression/security/security-e2e.mjs:115:26)\n    at async file:///Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/full-regression/security/security-e2e.mjs:176:3"
+      },
+      {
+        "id": 5,
+        "name": "Real logout/account switch exposes cached private scene and uploads pending board to B",
+        "error": "TypeError: (intermediate value).exists is not a function\n    at file:///Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/full-regression/security/security-e2e.mjs:195:61\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async until (file:///Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/full-regression/security/security-e2e.mjs:60:39)\n    at async file:///Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/full-regression/security/security-e2e.mjs:195:5\n    at async run (file:///Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/full-regression/security/security-e2e.mjs:115:26)\n    at async file:///Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/full-regression/security/security-e2e.mjs:192:3"
+      },
+      {
+        "id": 6,
+        "name": "Known-ID share hijack leaks owner private scene after real canvas edit",
+        "error": "TypeError: (intermediate value).exists is not a function\n    at file:///Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/full-regression/security/security-e2e.mjs:220:124\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async until (file:///Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/full-regression/security/security-e2e.mjs:60:39)\n    at async file:///Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/full-regression/security/security-e2e.mjs:220:5\n    at async run (file:///Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/full-regression/security/security-e2e.mjs:115:26)\n    at async file:///Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/full-regression/security/security-e2e.mjs:218:3"
+      },
+      {
+        "id": 7,
+        "name": "Workspace deletion leaves shared scene readable in fresh browser",
+        "error": "TimeoutError: Waiting failed: 30000ms exceeded\n    at new WaitTask (file:///Users/karan/projects/Personal_projects/agentic-whiteboard/node_modules/.pnpm/puppeteer-core@25.12.0/node_modules/puppeteer-core/lib/puppeteer/common/WaitTask.js:46:34)\n    at IsolatedWorld.waitForFunction (file:///Users/karan/projects/Personal_projects/agentic-whiteboard/node_modules/.pnpm/puppeteer-core@25.12.0/node_modules/puppeteer-core/lib/puppeteer/api/Realm.js:49:26)\n    at CdpFrame.waitForFunction (file:///Users/karan/projects/Personal_projects/agentic-whiteboard/node_modules/.pnpm/puppeteer-core@25.12.0/node_modules/puppeteer-core/lib/puppeteer/api/Frame.js:585:43)\n    at CdpFrame.<anonymous> (file:///Users/karan/projects/Personal_projects/agentic-whiteboard/node_modules/.pnpm/puppeteer-core@25.12.0/node_modules/puppeteer-core/lib/puppeteer/util/decorators.js:101:27)\n    at CdpPage.waitForFunction (file:///Users/karan/projects/Personal_projects/agentic-whiteboard/node_modules/.pnpm/puppeteer-core@25.12.0/node_modules/puppeteer-core/lib/puppeteer/api/Page.js:1537:37)\n    at openBoard (file:///Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/full-regression/security/security-e2e.mjs:100:11)\n    at async file:///Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/full-regression/security/security-e2e.mjs:240:33\n    at async run (file:///Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/full-regression/security/security-e2e.mjs:115:26)\n    at async file:///Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/full-regression/security/security-e2e.mjs:234:3"
+      },
+      {
+        "id": 8,
+        "name": "Unverified invited email obtains restricted read/write permissions",
+        "error": "FirebaseError: \nevaluation error at L53:21 for 'get' @ L53, false for 'get' @ L53"
+      },
+      {
+        "id": 11,
+        "name": "Retained object download token bypasses later board revocation",
+        "error": "FirebaseError: Firebase Storage: User does not have permission to access 'boards/validation-1791082713630-11/assets/fixture.txt'. (storage/unauthorized)"
+      }
+    ],
+    "standaloneRuns": [
+      {
+        "name": "security-e2e.mjs",
+        "exitCode": 1,
+        "signal": null,
+        "timedOut": false
+      },
+      {
+        "name": "security-audit-repro.mjs",
+        "exitCode": 1,
+        "signal": null,
+        "timedOut": false
+      },
+      {
+        "name": "security-local-repro.mjs",
+        "exitCode": 1,
+        "signal": null,
+        "timedOut": false
+      },
+      {
+        "name": "security-mcp-repro.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false
+      }
+    ]
+  },
+  "deploymentAudit": "read-only command completed; does not validate merged branch deployment",
+  "limitations": [
+    "All 19 repaired browser regression suites pass locally; the live development format runner still needs registered-owner authentication.",
+    "Main comparison used archived main frontend/storage code and existing unchanged project-policy backend in demo emulators.",
+    "No live production E2E run; no deployment or production test-board writes.",
+    "Raw logs, temporary harnesses and screenshots remain under .system_generated/full-regression."
+  ],
+  "initialLegacyBrowserSuites": {
+    "passed": 2,
+    "failed": 17,
+    "mainComparison": "Identical outcomes for all 19 suites; MCP baseline was rerun after compiling its unchanged server.",
+    "results": [
+      {
+        "name": "e2e-collab-suite.mjs",
+        "exitCode": 1,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 2789,
+        "reason": "Sharing fixture lacks an owned project/board",
+        "mainExitCode": 1,
+        "sameOutcomeOnMain": true
+      },
+      {
+        "name": "collab-chaos-live.test.mjs",
+        "exitCode": 1,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 1595,
+        "reason": "Anonymous owner rejected by project-management callable",
+        "mainExitCode": 1,
+        "sameOutcomeOnMain": true
+      },
+      {
+        "name": "network-lifecycle.test.mjs",
+        "exitCode": 1,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 838,
+        "reason": "Anonymous owner rejected by project-management callable",
+        "mainExitCode": 1,
+        "sameOutcomeOnMain": true
+      },
+      {
+        "name": "repro-user-str.mjs",
+        "exitCode": 1,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 1394,
+        "reason": "Anonymous owner rejected by project-management callable",
+        "mainExitCode": 1,
+        "sameOutcomeOnMain": true
+      },
+      {
+        "name": "inactive-tab-presence-cursor.test.mjs",
+        "exitCode": 1,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 857,
+        "reason": "Anonymous owner rejected by project-management callable",
+        "mainExitCode": 1,
+        "sameOutcomeOnMain": true
+      },
+      {
+        "name": "board-auto-zoom-center.test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 3917,
+        "reason": "passed",
+        "mainExitCode": 0,
+        "sameOutcomeOnMain": true
+      },
+      {
+        "name": "solo-no-collab-banner.test.mjs",
+        "exitCode": 1,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 747,
+        "reason": "Anonymous owner rejected by project-management callable",
+        "mainExitCode": 1,
+        "sameOutcomeOnMain": true
+      },
+      {
+        "name": "incognito-undo-beforeunload.test.mjs",
+        "exitCode": 1,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 1157,
+        "reason": "Anonymous owner rejected by project-management callable",
+        "mainExitCode": 1,
+        "sameOutcomeOnMain": true
+      },
+      {
+        "name": "collab-undo-resurrect.test.mjs",
+        "exitCode": 1,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 1564,
+        "reason": "Anonymous owner rejected by project-management callable",
+        "mainExitCode": 1,
+        "sameOutcomeOnMain": true
+      },
+      {
+        "name": "delete-all-reload-flash.test.mjs",
+        "exitCode": 0,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 3064,
+        "reason": "passed",
+        "mainExitCode": 0,
+        "sameOutcomeOnMain": true
+      },
+      {
+        "name": "unauthenticated-owner-hidden.test.mjs",
+        "exitCode": 1,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 783,
+        "reason": "Anonymous owner rejected by project-management callable",
+        "mainExitCode": 1,
+        "sameOutcomeOnMain": true
+      },
+      {
+        "name": "solo-delete-collab-undo.test.mjs",
+        "exitCode": 1,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 761,
+        "reason": "Anonymous owner rejected by project-management callable",
+        "mainExitCode": 1,
+        "sameOutcomeOnMain": true
+      },
+      {
+        "name": "collab-undo-further-ops.test.mjs",
+        "exitCode": 1,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 1151,
+        "reason": "Anonymous owner rejected by project-management callable",
+        "mainExitCode": 1,
+        "sameOutcomeOnMain": true
+      },
+      {
+        "name": "mcp-live-e2e.test.mjs",
+        "exitCode": 1,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 18000,
+        "reason": "Synthetic board never reaches editor; outdated share setup",
+        "mainExitCode": 1,
+        "sameOutcomeOnMain": true
+      },
+      {
+        "name": "create-board-modal-dropdown-scroll.test.mjs",
+        "exitCode": 1,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 1799,
+        "reason": "Outdated workspace setup/UI selector",
+        "mainExitCode": 1,
+        "sameOutcomeOnMain": true
+      },
+      {
+        "name": "e2e-smoke-test-and-screenshots.mjs",
+        "exitCode": 1,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 741,
+        "reason": "Sharing fixture lacks an owned project/board",
+        "mainExitCode": 1,
+        "sameOutcomeOnMain": true
+      },
+      {
+        "name": "e2e-non-anonymous-test.mjs",
+        "exitCode": 1,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 15928,
+        "reason": "Synthetic board never reaches editor; outdated share setup",
+        "mainExitCode": 1,
+        "sameOutcomeOnMain": true
+      },
+      {
+        "name": "browser-collab-verify.mjs",
+        "exitCode": 1,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 16450,
+        "reason": "Synthetic board never reaches editor; outdated share setup",
+        "mainExitCode": 1,
+        "sameOutcomeOnMain": true
+      },
+      {
+        "name": "e2e-visual-screenshots.mjs",
+        "exitCode": 1,
+        "signal": null,
+        "timedOut": false,
+        "durationMs": 16274,
+        "reason": "Synthetic board never reaches editor; outdated share setup",
+        "mainExitCode": 1,
+        "sameOutcomeOnMain": true
+      }
+    ]
+  },
+  "fixtureRepairChecks": {
+    "collaborationUnitCases": 17,
+    "mcpToolGroups": 4,
+    "assetPolicy": "passed",
+    "typescript": "passed",
+    "productionBuild": "passed",
+    "lintErrors": 0,
+    "lintExistingWarnings": 4
+  },
+  "initialTestedCommit": "4008c5f",
+  "automatedFunctionalGreen": true,
+  "unifiedTestRun": {
+    "command": "npm test",
+    "exitCode": 0,
+    "testedCommit": "c0bb1a61080b0b9aa010845e49c0af4f41a049e3",
+    "passedStages": 13,
+    "failedStages": 0,
+    "browserSuitesPassed": 19,
+    "projectScenariosPassed": 35,
+    "imageFormatChecksPassed": 180,
+    "results": [
+      {
+        "name": "build",
+        "exitCode": 0,
+        "durationMs": 3748,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/build.log"
+      },
+      {
+        "name": "typecheck",
+        "exitCode": 0,
+        "durationMs": 3893,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/typecheck.log"
+      },
+      {
+        "name": "lint",
+        "exitCode": 0,
+        "durationMs": 2823,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/lint.log"
+      },
+      {
+        "name": "collaboration-unit",
+        "exitCode": 0,
+        "durationMs": 182,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/collaboration-unit.log"
+      },
+      {
+        "name": "collaboration-load",
+        "exitCode": 0,
+        "durationMs": 2131,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/collaboration-load.log"
+      },
+      {
+        "name": "mcp-tools",
+        "exitCode": 0,
+        "durationMs": 113,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/mcp-tools.log"
+      },
+      {
+        "name": "image-access-policy",
+        "exitCode": 0,
+        "durationMs": 37,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/image-access-policy.log"
+      },
+      {
+        "name": "projects-e2e",
+        "exitCode": 0,
+        "durationMs": 60817,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/projects-e2e.log"
+      },
+      {
+        "name": "images-local-persistence",
+        "exitCode": 0,
+        "durationMs": 3888,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/images-local-persistence.log"
+      },
+      {
+        "name": "images-local-formats",
+        "exitCode": 0,
+        "durationMs": 29181,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/images-local-formats.log"
+      },
+      {
+        "name": "images-production-bundle-formats",
+        "exitCode": 0,
+        "durationMs": 28901,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/images-production-bundle-formats.log"
+      },
+      {
+        "name": "images-cloud",
+        "exitCode": 0,
+        "durationMs": 86501,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/images-cloud.log"
+      },
+      {
+        "name": "older-browser-regression",
+        "exitCode": 0,
+        "durationMs": 362191,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/older-browser-regression.log"
+      }
+    ],
+    "cloudResults": [
+      {
+        "name": "images-cloud-persistence",
+        "exitCode": 0,
+        "durationMs": 14951,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/images-cloud-persistence.log"
+      },
+      {
+        "name": "images-cloud-formats",
+        "exitCode": 0,
+        "durationMs": 48539,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/images-cloud-formats.log"
+      },
+      {
+        "name": "deleted-project-sync",
+        "exitCode": 0,
+        "durationMs": 7053,
+        "logPath": "/Users/karan/projects/Personal_projects/agentic-whiteboard/.system_generated/all-tests/deleted-project-sync.log"
+      }
+    ],
+    "excludes": ["live-account validation", "deployment/migration utilities", "historical security exploit probes"],
+    "initialRun": {
+      "passedStages": 12,
+      "failedStages": 1,
+      "failure": "Network lifecycle setup-tab teardown raced browser startup; fixed by preserving its setup tab, with all six network assertions retained."
+    }
+  }
+}

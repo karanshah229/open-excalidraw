@@ -15,17 +15,12 @@ service firebase.storage {
       && (readPolicy(data) || (parentExists(data) && data.get('inheritProjectAccess', true) && readPolicy(project(data)))); }
     function editBoard(data) { return live(data) && (!parentExists(data) || live(project(data)))
       && (editPolicy(data) || (parentExists(data) && data.get('inheritProjectAccess', true) && editPolicy(project(data)))); }
+    // Image bytes and metadata are served only by the authorized Admin gateway.
     match /users/{userId}/boards/{boardId}/assets/{fileId} {
-      allow read: if (request.auth != null && request.auth.uid == userId
-          && (!firestore.exists(/databases/(default)/documents/boardShares/$(boardId)) || readBoard(board(boardId))))
-        || (firestore.exists(/databases/(default)/documents/boardShares/$(boardId)) && board(boardId).ownerId == userId && readBoard(board(boardId)));
-      allow write: if request.auth != null && request.auth.uid == userId
-        && (!firestore.exists(/databases/(default)/documents/boardShares/$(boardId)) || editBoard(board(boardId)))
-        && request.resource.size < 10 * 1024 * 1024 && request.resource.contentType.matches('image/.*');
+      allow read, write: if false;
     }
     match /boards/{boardId}/assets/{fileId} {
-      allow read: if readBoard(board(boardId));
-      allow write: if editBoard(board(boardId)) && request.resource.size < 10 * 1024 * 1024 && request.resource.contentType.matches('image/.*');
+      allow read, write: if false;
     }
     match /boards/{boardId}/snapshots/{snapshotId} {
       allow read: if readBoard(board(boardId));

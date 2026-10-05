@@ -1,7 +1,8 @@
+import { reloadAllowingPendingChanges } from './browser-navigation.mjs'
 import puppeteer from 'puppeteer-core'
 import assert from 'node:assert'
 
-const BASE_URL = 'http://localhost:5173'
+const BASE_URL = process.env.E2E_BASE_URL || 'http://localhost:5173'
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const within = (promise, label, timeoutMs = 15_000) =>
@@ -39,11 +40,11 @@ async function runTest() {
     await page1.evaluate(async (id) => {
       const { workspaceApi } = await import('/src/features/workspace/workspace-api.ts')
       const { getFirebaseAuth } = await import('/src/lib/firebase.ts')
-      const { signInAnonymously, updateProfile } = await import('/src/features/collaboration/anonymous-user.ts')
+      const { signInOwner: signInAnonymously, updateProfile } = await import('/tests/regression-fixture.ts')
 
       const auth = getFirebaseAuth()
       let u = auth?.currentUser
-      if (!u && auth) {
+      if ((!u || u.isAnonymous) && auth) {
         const cred = await signInAnonymously(auth)
         u = cred.user
       }
@@ -76,7 +77,9 @@ async function runTest() {
       page1.evaluate(async (id) => {
         const { sharingService } = await import('/src/features/sharing/sharing-service.ts')
         const config = await sharingService.getShareConfig(id)
-        await sharingService.saveShareConfig({
+        await (
+          await import('/tests/regression-fixture.ts')
+        ).seedSharedBoard({
           ...config,
           generalAccess: 'anyone_with_link',
           generalRole: 'editor',
@@ -85,6 +88,10 @@ async function runTest() {
       'Share configuration write',
     )
     console.log('   ✓ Board shared as anyone_with_link + editor')
+
+    // API fixture publication precedes the editor's shared-board bootstrap.
+    await reloadAllowingPendingChanges(page1, { waitUntil: 'domcontentloaded' })
+    await page1.waitForFunction(() => Boolean(window.__excalidrawAPI))
 
     // -------------------------------------------------------------
     // Step 2: Open same board in Incognito context (Window 2)
@@ -163,7 +170,13 @@ async function runTest() {
     // Step 5: Close Incognito Tab with beforeunload enabled
     // -------------------------------------------------------------
     console.log('\n▶ Step 5: Closing Incognito tab (verifying NO beforeunload dialog)...')
+    const actuallyClosed = within(
+      new Promise((resolve) => page2.once('close', resolve)),
+      'Closing incognito after completed undo',
+      5000,
+    )
     await page2.close({ runBeforeUnload: true })
+    await actuallyClosed
     console.log('   ✓ Tab closed successfully')
 
     assert.equal(dialogAppeared, false, 'No confirmation dialog should appear before leaving site!')

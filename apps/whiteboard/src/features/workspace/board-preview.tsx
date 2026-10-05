@@ -13,6 +13,7 @@ const statusCopy = {
   synced: 'Synced',
   'local-only': 'Synced locally',
   'sync-failed': 'Sync failed',
+  'sync-blocked': 'Project deleted',
   conflict: 'Conflict',
 } as const
 

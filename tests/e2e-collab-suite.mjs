@@ -1,9 +1,9 @@
 import puppeteer from 'puppeteer-core'
 import assert from 'node:assert/strict'
 
-const ARTIFACT_DIR = '/Users/karan/.gemini/antigravity/brain/a6b56a5d-05f3-42f2-b79b-7ceed663f504'
+const ARTIFACT_DIR = process.env.E2E_ARTIFACT_DIR || '.system_generated/regression-screenshots'
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
-const BASE_URL = 'http://localhost:5173'
+const BASE_URL = process.env.E2E_BASE_URL || 'http://localhost:5173'
 
 async function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -78,11 +78,10 @@ async function runLiveE2ECollaborationSuite() {
     // Authenticate as Karan Shah with profile picture and save shareConfig to Firestore
     const hostSetup = await page1.evaluate(async (cfg) => {
       const { getFirebaseAuth } = await import('/src/lib/firebase.ts')
-      const { signInAnonymously, updateProfile } = await import('/src/features/collaboration/anonymous-user.ts')
-      const { sharingService } = await import('/src/features/sharing/sharing-service.ts')
+      const { signInOwner: signInAnonymously, updateProfile } = await import('/tests/regression-fixture.ts')
       const auth = getFirebaseAuth()
       let u = auth?.currentUser
-      if (!u && auth) {
+      if ((!u || u.isAnonymous) && auth) {
         try {
           const cred = await signInAnonymously(auth)
           u = cred.user
@@ -99,7 +98,7 @@ async function runLiveE2ECollaborationSuite() {
       }
       const actualConfig = { ...cfg, ownerId: u ? u.uid : cfg.ownerId }
       try {
-        await sharingService.saveShareConfig(actualConfig)
+        await (await import('/tests/regression-fixture.ts')).seedSharedBoard(actualConfig)
         return { uid: u ? u.uid : cfg.ownerId, shareSyncError: null }
       } catch (e) {
         return { uid: u ? u.uid : cfg.ownerId, shareSyncError: e instanceof Error ? e.message : String(e) }
@@ -138,7 +137,8 @@ async function runLiveE2ECollaborationSuite() {
     page2.on('pageerror', (error) => console.log(`   [Tab 2 Page Error] ${error.message}`))
 
     await page2.goto(BASE_URL, { waitUntil: 'domcontentloaded' })
-    await page2.evaluate((cfg) => {
+    await page2.evaluate(async (cfg) => {
+      await (await import('/tests/regression-fixture.ts')).signInGuest()
       localStorage.setItem('agentic-whiteboard:library:v1', '[]')
       localStorage.setItem(`agentic-whiteboard:share:${cfg.boardId}`, JSON.stringify(cfg))
     }, shareConfig)
@@ -416,8 +416,7 @@ async function runLiveE2ECollaborationSuite() {
     const page3 = await browser.newPage()
     await page3.setViewport({ width: 1280, height: 800, deviceScaleFactor: 2 })
 
-    await page3.goto(BASE_URL, { waitUntil: 'domcontentloaded' })
-    await page3.evaluate((cfg) => {
+    await page3.evaluateOnNewDocument((cfg) => {
       localStorage.setItem('agentic-whiteboard:library:v1', '[]')
       localStorage.setItem(`agentic-whiteboard:share:${cfg.boardId}`, JSON.stringify(cfg))
     }, shareConfig)

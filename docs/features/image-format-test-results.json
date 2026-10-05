@@ -1,0 +1,1386 @@
+{
+  "date": "2026-10-04",
+  "browser": "Chrome/154.0.8037.95",
+  "local": {
+    "formats": ["png", "jpg", "svg", "gif", "webp", "bmp", "ico", "avif", "jfif"],
+    "excalidrawBundle": "development",
+    "startedAt": "2026-10-04T02:42:31.159Z",
+    "finishedAt": "2026-10-04T02:43:01.084Z",
+    "mode": "local",
+    "browserVersion": "Chrome/154.0.8037.95",
+    "project": null,
+    "passed": 9,
+    "failed": 0,
+    "results": [
+      {
+        "format": "png",
+        "status": "passed",
+        "checks": [
+          "move cursor while placing image",
+          "placement completes and wait cursor clears",
+          "real image-picker upload",
+          "image visibly renders",
+          "local reload retains exact stored bytes",
+          "real mouse movement persists position with zero image byte transfers"
+        ],
+        "network": {
+          "uploads": 0,
+          "reads": 0,
+          "movementTransfers": 0
+        },
+        "errors": [],
+        "selectedFile": {
+          "name": "pattern.png",
+          "type": "image/png",
+          "size": 175
+        },
+        "boardId": "f051eeb4-981a-49bf-965d-f2109d03dbea",
+        "fileId": "c7a30d1e99b5b79659ee8b87fcb3b5538cd87cc4",
+        "storedMimeType": "image/png",
+        "durationMs": 4045
+      },
+      {
+        "format": "jpg",
+        "status": "passed",
+        "checks": [
+          "move cursor while placing image",
+          "placement completes and wait cursor clears",
+          "real image-picker upload",
+          "image visibly renders",
+          "local reload retains exact stored bytes",
+          "real mouse movement persists position with zero image byte transfers"
+        ],
+        "network": {
+          "uploads": 0,
+          "reads": 0,
+          "movementTransfers": 0
+        },
+        "errors": [],
+        "selectedFile": {
+          "name": "pattern.jpg",
+          "type": "image/jpeg",
+          "size": 703
+        },
+        "boardId": "4867f3b3-9cd5-4dcc-a551-f4e709ec0fa0",
+        "fileId": "5f5c6e611f11289caae4d67f8bd501eecb3a044b",
+        "storedMimeType": "image/jpeg",
+        "durationMs": 3139
+      },
+      {
+        "format": "svg",
+        "status": "passed",
+        "checks": [
+          "move cursor while placing image",
+          "placement completes and wait cursor clears",
+          "real image-picker upload",
+          "image visibly renders",
+          "local reload retains exact stored bytes",
+          "real mouse movement persists position with zero image byte transfers"
+        ],
+        "network": {
+          "uploads": 0,
+          "reads": 0,
+          "movementTransfers": 0
+        },
+        "errors": [],
+        "selectedFile": {
+          "name": "pattern.svg",
+          "type": "image/svg+xml",
+          "size": 170
+        },
+        "boardId": "718972b4-87ee-465a-8508-193b719ad93b",
+        "fileId": "b76ea8df9a81891e417ca38d7acef010e53838e1",
+        "storedMimeType": "image/svg+xml",
+        "durationMs": 2914
+      },
+      {
+        "format": "gif",
+        "status": "passed",
+        "checks": [
+          "move cursor while placing image",
+          "placement completes and wait cursor clears",
+          "real image-picker upload",
+          "image visibly renders",
+          "local reload retains exact stored bytes",
+          "real mouse movement persists position with zero image byte transfers"
+        ],
+        "network": {
+          "uploads": 0,
+          "reads": 0,
+          "movementTransfers": 0
+        },
+        "errors": [],
+        "selectedFile": {
+          "name": "pattern.gif",
+          "type": "image/gif",
+          "size": 163
+        },
+        "boardId": "72112f9c-7cd0-42b2-bdab-4a421ed9f937",
+        "fileId": "63aa575642cfaa45774936bcd3a5157c87c7480a",
+        "storedMimeType": "image/gif",
+        "durationMs": 3062
+      },
+      {
+        "format": "webp",
+        "status": "passed",
+        "checks": [
+          "move cursor while placing image",
+          "placement completes and wait cursor clears",
+          "real image-picker upload",
+          "image visibly renders",
+          "local reload retains exact stored bytes",
+          "real mouse movement persists position with zero image byte transfers"
+        ],
+        "network": {
+          "uploads": 0,
+          "reads": 0,
+          "movementTransfers": 0
+        },
+        "errors": [],
+        "selectedFile": {
+          "name": "pattern.webp",
+          "type": "image/webp",
+          "size": 122
+        },
+        "boardId": "9e31bd92-9f9a-4b72-88cf-07d09a964bda",
+        "fileId": "79ede5dc4fa2d9633f4b7c5cfaa79304338c761f",
+        "storedMimeType": "image/webp",
+        "durationMs": 3071
+      },
+      {
+        "format": "bmp",
+        "status": "passed",
+        "checks": [
+          "move cursor while placing image",
+          "placement completes and wait cursor clears",
+          "real image-picker upload",
+          "image visibly renders",
+          "local reload retains exact stored bytes",
+          "real mouse movement persists position with zero image byte transfers"
+        ],
+        "network": {
+          "uploads": 0,
+          "reads": 0,
+          "movementTransfers": 0
+        },
+        "errors": [],
+        "selectedFile": {
+          "name": "pattern.bmp",
+          "type": "image/bmp",
+          "size": 9270
+        },
+        "boardId": "987f86c5-9e66-47c3-908c-12b8520af0e8",
+        "fileId": "2e4f1fa6e5ad2d645e04d5a6bcd3be7329fe8a17",
+        "storedMimeType": "image/bmp",
+        "durationMs": 2975
+      },
+      {
+        "format": "ico",
+        "status": "passed",
+        "checks": [
+          "move cursor while placing image",
+          "placement completes and wait cursor clears",
+          "real image-picker upload",
+          "image visibly renders",
+          "local reload retains exact stored bytes",
+          "real mouse movement persists position with zero image byte transfers"
+        ],
+        "network": {
+          "uploads": 0,
+          "reads": 0,
+          "movementTransfers": 0
+        },
+        "errors": [],
+        "selectedFile": {
+          "name": "pattern.ico",
+          "type": "image/vnd.microsoft.icon",
+          "size": 399
+        },
+        "boardId": "c095365e-b49c-4c98-92e0-73e4cf8d837f",
+        "fileId": "79ffa35ef3fd23801748e23fbe127a57bf54d20c",
+        "storedMimeType": "image/vnd.microsoft.icon",
+        "durationMs": 3035
+      },
+      {
+        "format": "avif",
+        "status": "passed",
+        "checks": [
+          "move cursor while placing image",
+          "placement completes and wait cursor clears",
+          "real image-picker upload",
+          "image visibly renders",
+          "local reload retains exact stored bytes",
+          "real mouse movement persists position with zero image byte transfers"
+        ],
+        "network": {
+          "uploads": 0,
+          "reads": 0,
+          "movementTransfers": 0
+        },
+        "errors": [],
+        "selectedFile": {
+          "name": "pattern.avif",
+          "type": "image/avif",
+          "size": 326
+        },
+        "boardId": "cfe41791-2e11-461f-b8d7-301b050fef8a",
+        "fileId": "4e312a9b5e37e31d017ccd1771966b41551a35ce",
+        "storedMimeType": "image/avif",
+        "durationMs": 2911
+      },
+      {
+        "format": "jfif",
+        "status": "passed",
+        "checks": [
+          "move cursor while placing image",
+          "placement completes and wait cursor clears",
+          "real image-picker upload",
+          "image visibly renders",
+          "local reload retains exact stored bytes",
+          "real mouse movement persists position with zero image byte transfers"
+        ],
+        "network": {
+          "uploads": 0,
+          "reads": 0,
+          "movementTransfers": 0
+        },
+        "errors": [],
+        "selectedFile": {
+          "name": "pattern.jfif",
+          "type": "image/jpeg",
+          "size": 703
+        },
+        "boardId": "f0553bb8-06fc-440c-9901-1f96733d558d",
+        "fileId": "5f5c6e611f11289caae4d67f8bd501eecb3a044b",
+        "storedMimeType": "image/jpeg",
+        "durationMs": 3077
+      }
+    ]
+  },
+  "firebaseEmulators": {
+    "formats": ["png", "jpg", "svg", "gif", "webp", "bmp", "ico", "avif", "jfif"],
+    "excalidrawBundle": "development",
+    "startedAt": "2026-10-03T12:51:34.645Z",
+    "finishedAt": "2026-10-03T12:52:42.856Z",
+    "mode": "emulators",
+    "browserVersion": "Chrome/154.0.8037.95",
+    "project": "demo-image-persistence",
+    "passed": 9,
+    "failed": 0,
+    "results": [
+      {
+        "format": "png",
+        "status": "passed",
+        "checks": [
+          "move cursor while placing image",
+          "placement completes and wait cursor clears",
+          "real image-picker upload",
+          "image visibly renders",
+          "private cloud reload with cached bytes removed",
+          "Share dialog persists image without inline Firestore bytes",
+          "shared cloud reload with cached bytes removed",
+          "real mouse movement persists position with zero image byte transfers"
+        ],
+        "network": {
+          "uploads": 1,
+          "reads": 7,
+          "movementTransfers": 0
+        },
+        "errors": [],
+        "selectedFile": {
+          "name": "pattern.png",
+          "type": "image/png",
+          "size": 175
+        },
+        "boardId": "e54de56c-a11a-4c44-a111-2d9ebad3e2f9",
+        "fileId": "c7a30d1e99b5b79659ee8b87fcb3b5538cd87cc4",
+        "storedMimeType": "image/png",
+        "durationMs": 8438
+      },
+      {
+        "format": "jpg",
+        "status": "passed",
+        "checks": [
+          "move cursor while placing image",
+          "placement completes and wait cursor clears",
+          "real image-picker upload",
+          "image visibly renders",
+          "private cloud reload with cached bytes removed",
+          "Share dialog persists image without inline Firestore bytes",
+          "shared cloud reload with cached bytes removed",
+          "real mouse movement persists position with zero image byte transfers"
+        ],
+        "network": {
+          "uploads": 1,
+          "reads": 7,
+          "movementTransfers": 0
+        },
+        "errors": [],
+        "selectedFile": {
+          "name": "pattern.jpg",
+          "type": "image/jpeg",
+          "size": 703
+        },
+        "boardId": "9102374f-e0e2-4570-b141-8f196f0eb5dc",
+        "fileId": "5f5c6e611f11289caae4d67f8bd501eecb3a044b",
+        "storedMimeType": "image/jpeg",
+        "durationMs": 22243
+      },
+      {
+        "format": "svg",
+        "status": "passed",
+        "checks": [
+          "move cursor while placing image",
+          "placement completes and wait cursor clears",
+          "real image-picker upload",
+          "image visibly renders",
+          "private cloud reload with cached bytes removed",
+          "Share dialog persists image without inline Firestore bytes",
+          "shared cloud reload with cached bytes removed",
+          "real mouse movement persists position with zero image byte transfers"
+        ],
+        "network": {
+          "uploads": 1,
+          "reads": 6,
+          "movementTransfers": 0
+        },
+        "errors": [],
+        "selectedFile": {
+          "name": "pattern.svg",
+          "type": "image/svg+xml",
+          "size": 170
+        },
+        "boardId": "6cb144b1-e921-46ab-9920-52cec1cd5313",
+        "fileId": "b76ea8df9a81891e417ca38d7acef010e53838e1",
+        "storedMimeType": "image/svg+xml",
+        "durationMs": 5488
+      },
+      {
+        "format": "gif",
+        "status": "passed",
+        "checks": [
+          "move cursor while placing image",
+          "placement completes and wait cursor clears",
+          "real image-picker upload",
+          "image visibly renders",
+          "private cloud reload with cached bytes removed",
+          "Share dialog persists image without inline Firestore bytes",
+          "shared cloud reload with cached bytes removed",
+          "real mouse movement persists position with zero image byte transfers"
+        ],
+        "network": {
+          "uploads": 1,
+          "reads": 6,
+          "movementTransfers": 0
+        },
+        "errors": [],
+        "selectedFile": {
+          "name": "pattern.gif",
+          "type": "image/gif",
+          "size": 163
+        },
+        "boardId": "5f111302-0d2b-4caf-837e-339d86b20997",
+        "fileId": "63aa575642cfaa45774936bcd3a5157c87c7480a",
+        "storedMimeType": "image/gif",
+        "durationMs": 5551
+      },
+      {
+        "format": "webp",
+        "status": "passed",
+        "checks": [
+          "move cursor while placing image",
+          "placement completes and wait cursor clears",
+          "real image-picker upload",
+          "image visibly renders",
+          "private cloud reload with cached bytes removed",
+          "Share dialog persists image without inline Firestore bytes",
+          "shared cloud reload with cached bytes removed",
+          "real mouse movement persists position with zero image byte transfers"
+        ],
+        "network": {
+          "uploads": 1,
+          "reads": 6,
+          "movementTransfers": 0
+        },
+        "errors": [],
+        "selectedFile": {
+          "name": "pattern.webp",
+          "type": "image/webp",
+          "size": 122
+        },
+        "boardId": "4c5e3ce3-9003-436f-8b06-9a029a51dc89",
+        "fileId": "79ede5dc4fa2d9633f4b7c5cfaa79304338c761f",
+        "storedMimeType": "image/webp",
+        "durationMs": 5477
+      },
+      {
+        "format": "bmp",
+        "status": "passed",
+        "checks": [
+          "move cursor while placing image",
+          "placement completes and wait cursor clears",
+          "real image-picker upload",
+          "image visibly renders",
+          "private cloud reload with cached bytes removed",
+          "Share dialog persists image without inline Firestore bytes",
+          "shared cloud reload with cached bytes removed",
+          "real mouse movement persists position with zero image byte transfers"
+        ],
+        "network": {
+          "uploads": 1,
+          "reads": 6,
+          "movementTransfers": 0
+        },
+        "errors": [],
+        "selectedFile": {
+          "name": "pattern.bmp",
+          "type": "image/bmp",
+          "size": 9270
+        },
+        "boardId": "636b0b77-e35a-4b9c-a5dc-65a0694a97cc",
+        "fileId": "2e4f1fa6e5ad2d645e04d5a6bcd3be7329fe8a17",
+        "storedMimeType": "image/bmp",
+        "durationMs": 4527
+      },
+      {
+        "format": "ico",
+        "status": "passed",
+        "checks": [
+          "move cursor while placing image",
+          "placement completes and wait cursor clears",
+          "real image-picker upload",
+          "image visibly renders",
+          "private cloud reload with cached bytes removed",
+          "Share dialog persists image without inline Firestore bytes",
+          "shared cloud reload with cached bytes removed",
+          "real mouse movement persists position with zero image byte transfers"
+        ],
+        "network": {
+          "uploads": 1,
+          "reads": 6,
+          "movementTransfers": 0
+        },
+        "errors": [],
+        "selectedFile": {
+          "name": "pattern.ico",
+          "type": "image/vnd.microsoft.icon",
+          "size": 399
+        },
+        "boardId": "d1130613-ceaf-4809-9864-afd6a7d9e323",
+        "fileId": "79ffa35ef3fd23801748e23fbe127a57bf54d20c",
+        "storedMimeType": "image/vnd.microsoft.icon",
+        "durationMs": 4458
+      },
+      {
+        "format": "avif",
+        "status": "passed",
+        "checks": [
+          "move cursor while placing image",
+          "placement completes and wait cursor clears",
+          "real image-picker upload",
+          "image visibly renders",
+          "private cloud reload with cached bytes removed",
+          "Share dialog persists image without inline Firestore bytes",
+          "shared cloud reload with cached bytes removed",
+          "real mouse movement persists position with zero image byte transfers"
+        ],
+        "network": {
+          "uploads": 1,
+          "reads": 6,
+          "movementTransfers": 0
+        },
+        "errors": [],
+        "selectedFile": {
+          "name": "pattern.avif",
+          "type": "image/avif",
+          "size": 326
+        },
+        "boardId": "ca80de55-121d-4e84-a276-37f178f62869",
+        "fileId": "4e312a9b5e37e31d017ccd1771966b41551a35ce",
+        "storedMimeType": "image/avif",
+        "durationMs": 5531
+      },
+      {
+        "format": "jfif",
+        "status": "passed",
+        "checks": [
+          "move cursor while placing image",
+          "placement completes and wait cursor clears",
+          "real image-picker upload",
+          "image visibly renders",
+          "private cloud reload with cached bytes removed",
+          "Share dialog persists image without inline Firestore bytes",
+          "shared cloud reload with cached bytes removed",
+          "real mouse movement persists position with zero image byte transfers"
+        ],
+        "network": {
+          "uploads": 1,
+          "reads": 6,
+          "movementTransfers": 0
+        },
+        "errors": [],
+        "selectedFile": {
+          "name": "pattern.jfif",
+          "type": "image/jpeg",
+          "size": 703
+        },
+        "boardId": "40c0c859-9b39-4ef8-8a30-74816c56e059",
+        "fileId": "5f5c6e611f11289caae4d67f8bd501eecb3a044b",
+        "storedMimeType": "image/jpeg",
+        "durationMs": 5457
+      }
+    ]
+  },
+  "deployedRuleAudit": {
+    "open-excalidraw-dev-2": {
+      "rules": [
+        {
+          "release": "firebase.storage/open-excalidraw-dev-2.firebasestorage.app",
+          "updated_at": "2026-10-02T22:07:00.537042Z",
+          "matches_local": false
+        },
+        {
+          "release": "cloud.firestore",
+          "updated_at": "2026-10-02T22:07:02.091554Z",
+          "matches_local": false
+        }
+      ]
+    },
+    "open-excalidraw-b2ab4": {
+      "rules": [
+        {
+          "release": "firebase.storage/open-excalidraw-b2ab4.firebasestorage.app",
+          "updated_at": "2026-10-02T20:44:34.320168Z",
+          "matches_local": true
+        },
+        {
+          "release": "cloud.firestore",
+          "updated_at": "2026-10-02T18:21:47.528449Z",
+          "matches_local": true
+        }
+      ]
+    }
+  },
+  "liveDevelopment": {
+    "status": "blocked",
+    "reason": "Private PNG cloud upload/reload passed on retry, but the Share dialog was permission-denied. Deployed project-sharing rules forbid direct client creation of boardShares, which this checkout performs. Complete live shared-format coverage remains unverified.",
+    "diagnosticPngRetry": {
+      "startedAt": "2026-10-03T10:06:46.975Z",
+      "finishedAt": "2026-10-03T10:08:48.558Z",
+      "mode": "development",
+      "browserVersion": "Chrome/154.0.8037.95",
+      "project": "open-excalidraw-dev-2",
+      "passed": 0,
+      "failed": 1,
+      "results": [
+        {
+          "format": "png",
+          "status": "failed",
+          "checks": [
+            "real image-picker upload",
+            "image visibly renders",
+            "private cloud reload with cached bytes removed"
+          ],
+          "network": {
+            "calls": ["stat", "upload", "read", "read", "read", "read"]
+          },
+          "errors": [],
+          "selectedFile": {
+            "name": "pattern.png",
+            "type": "image/png",
+            "size": 175
+          },
+          "boardId": "7c2689cc-c085-4c63-99f3-5f1a4a5285c3",
+          "fileId": "c7a30d1e99b5b79659ee8b87fcb3b5538cd87cc4",
+          "storedMimeType": "image/png",
+          "failure": "Waiting failed: 90000ms exceeded",
+          "failureStack": "TimeoutError: Waiting failed: 90000ms exceeded\n    at new WaitTask (file:///Users/karan/projects/Personal_projects/agentic-whiteboard/node_modules/.pnpm/puppeteer-core@25.12.0/node_modules/puppeteer-core/lib/puppeteer/common/WaitTask.js:46:34)\n    at IsolatedWorld.waitForFunction (file:///Users/karan/projects/Personal_projects/agentic-whiteboard/node_modules/.pnpm/puppeteer-core@25.12.0/node_modules/puppeteer-core/lib/puppeteer/api/Realm.js:49:26)\n    at CdpFrame.waitForFunction (file:///Users/karan/projects/Personal_projects/agentic-whiteboard/node_modules/.pnpm/puppeteer-core@25.12.0/node_modules/puppeteer-core/lib/puppeteer/api/Frame.js:585:43)\n    at CdpFrame.<anonymous> (file:///Users/karan/projects/Personal_projects/agentic-whiteboard/node_modules/.pnpm/puppeteer-core@25.12.0/node_modules/puppeteer-core/lib/puppeteer/util/decorators.js:101:27)\n    at CdpPage.waitForFunction (file:///Users/karan/projects/Personal_projects/agentic-whiteboard/node_modules/.pnpm/puppeteer-core@25.12.0/node_modules/puppeteer-core/lib/puppeteer/api/Page.js:1537:37)\n    at cloudSaved (file:///Users/karan/projects/Personal_projects/agentic-whiteboard/tests/image-formats.test.mjs:67:14)\n    at file:///Users/karan/projects/Personal_projects/agentic-whiteboard/tests/image-formats.test.mjs:201:15",
+          "diagnostic": {
+            "elements": [
+              {
+                "fileId": "c7a30d1e99b5b79659ee8b87fcb3b5538cd87cc4",
+                "type": "image"
+              }
+            ],
+            "files": {
+              "c7a30d1e99b5b79659ee8b87fcb3b5538cd87cc4": {
+                "mimeType": "image/png",
+                "storagePath": "users/uFLyLQisWRWTL1z2anN2sZrLicW2/boards/7c2689cc-c085-4c63-99f3-5f1a4a5285c3/assets/c7a30d1e99b5b79659ee8b87fcb3b5538cd87cc4",
+                "hasBytes": false,
+                "dataURLEmpty": true
+              }
+            }
+          },
+          "durationMs": 117980
+        }
+      ]
+    },
+    "fullRetry": "Stopped after reproducing the same environment compatibility failure; no rules were deployed."
+  },
+  "coverage": {
+    "formats": 9,
+    "localPassed": 9,
+    "emulatorPassed": 9,
+    "productionBundleLocalPassed": 9,
+    "successfulChecks": 180,
+    "liveProduction": "not run"
+  },
+  "beforeIcoFix": {
+    "local": {
+      "formats": ["png", "jpg", "svg", "gif", "webp", "bmp", "ico", "avif", "jfif"],
+      "startedAt": "2026-10-03T10:13:19.432Z",
+      "finishedAt": "2026-10-03T10:13:46.102Z",
+      "mode": "local",
+      "browserVersion": "Chrome/154.0.8037.95",
+      "project": null,
+      "passed": 8,
+      "failed": 1,
+      "results": [
+        {
+          "format": "png",
+          "status": "passed",
+          "checks": [
+            "real image-picker upload",
+            "image visibly renders",
+            "local reload retains exact stored bytes",
+            "real mouse movement persists position with zero image byte transfers"
+          ],
+          "network": {
+            "uploads": 0,
+            "reads": 0,
+            "movementTransfers": 0
+          },
+          "errors": [],
+          "selectedFile": {
+            "name": "pattern.png",
+            "type": "image/png",
+            "size": 175
+          },
+          "boardId": "0f28f3b5-f932-4adb-9dd7-3b44d13c336f",
+          "fileId": "c7a30d1e99b5b79659ee8b87fcb3b5538cd87cc4",
+          "storedMimeType": "image/png",
+          "durationMs": 3631
+        },
+        {
+          "format": "jpg",
+          "status": "passed",
+          "checks": [
+            "real image-picker upload",
+            "image visibly renders",
+            "local reload retains exact stored bytes",
+            "real mouse movement persists position with zero image byte transfers"
+          ],
+          "network": {
+            "uploads": 0,
+            "reads": 0,
+            "movementTransfers": 0
+          },
+          "errors": [],
+          "selectedFile": {
+            "name": "pattern.jpg",
+            "type": "image/jpeg",
+            "size": 703
+          },
+          "boardId": "e2277ec1-7b7e-4a69-b5a2-137c0652188a",
+          "fileId": "5f5c6e611f11289caae4d67f8bd501eecb3a044b",
+          "storedMimeType": "image/jpeg",
+          "durationMs": 3122
+        },
+        {
+          "format": "svg",
+          "status": "passed",
+          "checks": [
+            "real image-picker upload",
+            "image visibly renders",
+            "local reload retains exact stored bytes",
+            "real mouse movement persists position with zero image byte transfers"
+          ],
+          "network": {
+            "uploads": 0,
+            "reads": 0,
+            "movementTransfers": 0
+          },
+          "errors": [],
+          "selectedFile": {
+            "name": "pattern.svg",
+            "type": "image/svg+xml",
+            "size": 170
+          },
+          "boardId": "583e46d6-88ca-41e4-83b2-257eb7eda982",
+          "fileId": "b76ea8df9a81891e417ca38d7acef010e53838e1",
+          "storedMimeType": "image/svg+xml",
+          "durationMs": 2925
+        },
+        {
+          "format": "gif",
+          "status": "passed",
+          "checks": [
+            "real image-picker upload",
+            "image visibly renders",
+            "local reload retains exact stored bytes",
+            "real mouse movement persists position with zero image byte transfers"
+          ],
+          "network": {
+            "uploads": 0,
+            "reads": 0,
+            "movementTransfers": 0
+          },
+          "errors": [],
+          "selectedFile": {
+            "name": "pattern.gif",
+            "type": "image/gif",
+            "size": 163
+          },
+          "boardId": "7c3044f1-f7a9-4347-acb7-c0e572d0a87d",
+          "fileId": "63aa575642cfaa45774936bcd3a5157c87c7480a",
+          "storedMimeType": "image/gif",
+          "durationMs": 2977
+        },
+        {
+          "format": "webp",
+          "status": "passed",
+          "checks": [
+            "real image-picker upload",
+            "image visibly renders",
+            "local reload retains exact stored bytes",
+            "real mouse movement persists position with zero image byte transfers"
+          ],
+          "network": {
+            "uploads": 0,
+            "reads": 0,
+            "movementTransfers": 0
+          },
+          "errors": [],
+          "selectedFile": {
+            "name": "pattern.webp",
+            "type": "image/webp",
+            "size": 122
+          },
+          "boardId": "9fc5181e-11c3-4f66-b051-4c9687940881",
+          "fileId": "79ede5dc4fa2d9633f4b7c5cfaa79304338c761f",
+          "storedMimeType": "image/webp",
+          "durationMs": 2997
+        },
+        {
+          "format": "bmp",
+          "status": "passed",
+          "checks": [
+            "real image-picker upload",
+            "image visibly renders",
+            "local reload retains exact stored bytes",
+            "real mouse movement persists position with zero image byte transfers"
+          ],
+          "network": {
+            "uploads": 0,
+            "reads": 0,
+            "movementTransfers": 0
+          },
+          "errors": [],
+          "selectedFile": {
+            "name": "pattern.bmp",
+            "type": "image/bmp",
+            "size": 9270
+          },
+          "boardId": "7ee047db-00d3-45d6-b7e0-652b9ba7bbcd",
+          "fileId": "2e4f1fa6e5ad2d645e04d5a6bcd3be7329fe8a17",
+          "storedMimeType": "image/bmp",
+          "durationMs": 3090
+        },
+        {
+          "format": "ico",
+          "status": "failed",
+          "checks": [],
+          "network": {
+            "calls": []
+          },
+          "errors": [],
+          "selectedFile": {
+            "name": "pattern.ico",
+            "type": "image/vnd.microsoft.icon",
+            "size": 399
+          },
+          "boardId": "fc751a34-bc69-4c5f-ad1f-475b260b7540",
+          "failure": "Image picker rejected ico (image/vnd.microsoft.icon) as Unsupported file type\n\ntrue !== false\n",
+          "failureStack": "AssertionError [ERR_ASSERTION]: Image picker rejected ico (image/vnd.microsoft.icon) as Unsupported file type\n\ntrue !== false\n\n    at file:///Users/karan/projects/Personal_projects/agentic-whiteboard/tests/image-formats.test.mjs:153:14",
+          "durationMs": 720
+        },
+        {
+          "format": "avif",
+          "status": "passed",
+          "checks": [
+            "real image-picker upload",
+            "image visibly renders",
+            "local reload retains exact stored bytes",
+            "real mouse movement persists position with zero image byte transfers"
+          ],
+          "network": {
+            "uploads": 0,
+            "reads": 0,
+            "movementTransfers": 0
+          },
+          "errors": [],
+          "selectedFile": {
+            "name": "pattern.avif",
+            "type": "image/avif",
+            "size": 326
+          },
+          "boardId": "37bfd945-541d-4b71-89fe-8f57cf087b46",
+          "fileId": "4e312a9b5e37e31d017ccd1771966b41551a35ce",
+          "storedMimeType": "image/avif",
+          "durationMs": 3130
+        },
+        {
+          "format": "jfif",
+          "status": "passed",
+          "checks": [
+            "real image-picker upload",
+            "image visibly renders",
+            "local reload retains exact stored bytes",
+            "real mouse movement persists position with zero image byte transfers"
+          ],
+          "network": {
+            "uploads": 0,
+            "reads": 0,
+            "movementTransfers": 0
+          },
+          "errors": [],
+          "selectedFile": {
+            "name": "pattern.jfif",
+            "type": "image/jpeg",
+            "size": 703
+          },
+          "boardId": "3673eb51-2eec-468a-b691-f868e566d48c",
+          "fileId": "5f5c6e611f11289caae4d67f8bd501eecb3a044b",
+          "storedMimeType": "image/jpeg",
+          "durationMs": 2983
+        }
+      ]
+    },
+    "firebaseEmulators": {
+      "formats": ["png", "jpg", "svg", "gif", "webp", "bmp", "ico", "avif", "jfif"],
+      "startedAt": "2026-10-03T10:13:34.016Z",
+      "finishedAt": "2026-10-03T10:14:29.336Z",
+      "mode": "emulators",
+      "browserVersion": "Chrome/154.0.8037.95",
+      "project": "demo-image-persistence",
+      "passed": 8,
+      "failed": 1,
+      "results": [
+        {
+          "format": "png",
+          "status": "passed",
+          "checks": [
+            "real image-picker upload",
+            "image visibly renders",
+            "private cloud reload with cached bytes removed",
+            "Share dialog persists image without inline Firestore bytes",
+            "shared cloud reload with cached bytes removed",
+            "real mouse movement persists position with zero image byte transfers"
+          ],
+          "network": {
+            "uploads": 2,
+            "reads": 7,
+            "movementTransfers": 0
+          },
+          "errors": [],
+          "selectedFile": {
+            "name": "pattern.png",
+            "type": "image/png",
+            "size": 175
+          },
+          "boardId": "88e67819-f3b9-4207-b2e3-945952c3b14a",
+          "fileId": "c7a30d1e99b5b79659ee8b87fcb3b5538cd87cc4",
+          "storedMimeType": "image/png",
+          "durationMs": 7930
+        },
+        {
+          "format": "jpg",
+          "status": "passed",
+          "checks": [
+            "real image-picker upload",
+            "image visibly renders",
+            "private cloud reload with cached bytes removed",
+            "Share dialog persists image without inline Firestore bytes",
+            "shared cloud reload with cached bytes removed",
+            "real mouse movement persists position with zero image byte transfers"
+          ],
+          "network": {
+            "uploads": 2,
+            "reads": 7,
+            "movementTransfers": 0
+          },
+          "errors": [],
+          "selectedFile": {
+            "name": "pattern.jpg",
+            "type": "image/jpeg",
+            "size": 703
+          },
+          "boardId": "e7333c5a-7dfe-452c-9ae6-f116004b68e2",
+          "fileId": "5f5c6e611f11289caae4d67f8bd501eecb3a044b",
+          "storedMimeType": "image/jpeg",
+          "durationMs": 4509
+        },
+        {
+          "format": "svg",
+          "status": "passed",
+          "checks": [
+            "real image-picker upload",
+            "image visibly renders",
+            "private cloud reload with cached bytes removed",
+            "Share dialog persists image without inline Firestore bytes",
+            "shared cloud reload with cached bytes removed",
+            "real mouse movement persists position with zero image byte transfers"
+          ],
+          "network": {
+            "uploads": 2,
+            "reads": 7,
+            "movementTransfers": 0
+          },
+          "errors": [],
+          "selectedFile": {
+            "name": "pattern.svg",
+            "type": "image/svg+xml",
+            "size": 170
+          },
+          "boardId": "09e60991-87ea-4175-b0f6-c3da9c947a30",
+          "fileId": "b76ea8df9a81891e417ca38d7acef010e53838e1",
+          "storedMimeType": "image/svg+xml",
+          "durationMs": 5695
+        },
+        {
+          "format": "gif",
+          "status": "passed",
+          "checks": [
+            "real image-picker upload",
+            "image visibly renders",
+            "private cloud reload with cached bytes removed",
+            "Share dialog persists image without inline Firestore bytes",
+            "shared cloud reload with cached bytes removed",
+            "real mouse movement persists position with zero image byte transfers"
+          ],
+          "network": {
+            "uploads": 2,
+            "reads": 6,
+            "movementTransfers": 0
+          },
+          "errors": [],
+          "selectedFile": {
+            "name": "pattern.gif",
+            "type": "image/gif",
+            "size": 163
+          },
+          "boardId": "b9d6d2d3-ada8-4fa9-b830-057bd401b7a0",
+          "fileId": "63aa575642cfaa45774936bcd3a5157c87c7480a",
+          "storedMimeType": "image/gif",
+          "durationMs": 4443
+        },
+        {
+          "format": "webp",
+          "status": "passed",
+          "checks": [
+            "real image-picker upload",
+            "image visibly renders",
+            "private cloud reload with cached bytes removed",
+            "Share dialog persists image without inline Firestore bytes",
+            "shared cloud reload with cached bytes removed",
+            "real mouse movement persists position with zero image byte transfers"
+          ],
+          "network": {
+            "uploads": 2,
+            "reads": 6,
+            "movementTransfers": 0
+          },
+          "errors": [],
+          "selectedFile": {
+            "name": "pattern.webp",
+            "type": "image/webp",
+            "size": 122
+          },
+          "boardId": "a49501cc-b019-4363-86f1-a7b7185bcf36",
+          "fileId": "79ede5dc4fa2d9633f4b7c5cfaa79304338c761f",
+          "storedMimeType": "image/webp",
+          "durationMs": 6194
+        },
+        {
+          "format": "bmp",
+          "status": "passed",
+          "checks": [
+            "real image-picker upload",
+            "image visibly renders",
+            "private cloud reload with cached bytes removed",
+            "Share dialog persists image without inline Firestore bytes",
+            "shared cloud reload with cached bytes removed",
+            "real mouse movement persists position with zero image byte transfers"
+          ],
+          "network": {
+            "uploads": 2,
+            "reads": 7,
+            "movementTransfers": 0
+          },
+          "errors": [],
+          "selectedFile": {
+            "name": "pattern.bmp",
+            "type": "image/bmp",
+            "size": 9270
+          },
+          "boardId": "c98c7cd9-c898-4fa0-a293-d047aa78f577",
+          "fileId": "2e4f1fa6e5ad2d645e04d5a6bcd3be7329fe8a17",
+          "storedMimeType": "image/bmp",
+          "durationMs": 6178
+        },
+        {
+          "format": "ico",
+          "status": "failed",
+          "checks": [],
+          "network": {
+            "calls": []
+          },
+          "errors": [],
+          "selectedFile": {
+            "name": "pattern.ico",
+            "type": "image/vnd.microsoft.icon",
+            "size": 399
+          },
+          "boardId": "0262e0a3-b8e1-4693-953f-525028286814",
+          "failure": "Image picker rejected ico (image/vnd.microsoft.icon) as Unsupported file type\n\ntrue !== false\n",
+          "failureStack": "AssertionError [ERR_ASSERTION]: Image picker rejected ico (image/vnd.microsoft.icon) as Unsupported file type\n\ntrue !== false\n\n    at file:///Users/karan/projects/Personal_projects/agentic-whiteboard/tests/image-formats.test.mjs:153:14",
+          "diagnostic": {
+            "files": {}
+          },
+          "durationMs": 1279
+        },
+        {
+          "format": "avif",
+          "status": "passed",
+          "checks": [
+            "real image-picker upload",
+            "image visibly renders",
+            "private cloud reload with cached bytes removed",
+            "Share dialog persists image without inline Firestore bytes",
+            "shared cloud reload with cached bytes removed",
+            "real mouse movement persists position with zero image byte transfers"
+          ],
+          "network": {
+            "uploads": 2,
+            "reads": 6,
+            "movementTransfers": 0
+          },
+          "errors": [],
+          "selectedFile": {
+            "name": "pattern.avif",
+            "type": "image/avif",
+            "size": 326
+          },
+          "boardId": "c93c6be3-2f01-4635-9b8d-c49c15ace77f",
+          "fileId": "4e312a9b5e37e31d017ccd1771966b41551a35ce",
+          "storedMimeType": "image/avif",
+          "durationMs": 8470
+        },
+        {
+          "format": "jfif",
+          "status": "passed",
+          "checks": [
+            "real image-picker upload",
+            "image visibly renders",
+            "private cloud reload with cached bytes removed",
+            "Share dialog persists image without inline Firestore bytes",
+            "shared cloud reload with cached bytes removed",
+            "real mouse movement persists position with zero image byte transfers"
+          ],
+          "network": {
+            "uploads": 2,
+            "reads": 6,
+            "movementTransfers": 0
+          },
+          "errors": [],
+          "selectedFile": {
+            "name": "pattern.jfif",
+            "type": "image/jpeg",
+            "size": 703
+          },
+          "boardId": "2f777d37-4469-4ea8-8236-fe4e799a0ba9",
+          "fileId": "5f5c6e611f11289caae4d67f8bd501eecb3a044b",
+          "storedMimeType": "image/jpeg",
+          "durationMs": 9779
+        }
+      ]
+    }
+  },
+  "productionExcalidrawBundleLocal": {
+    "formats": ["png", "jpg", "svg", "gif", "webp", "bmp", "ico", "avif", "jfif"],
+    "excalidrawBundle": "production",
+    "startedAt": "2026-10-04T02:43:01.495Z",
+    "finishedAt": "2026-10-04T02:43:31.633Z",
+    "mode": "local-production-bundle",
+    "browserVersion": "Chrome/154.0.8037.95",
+    "project": null,
+    "passed": 9,
+    "failed": 0,
+    "results": [
+      {
+        "format": "png",
+        "status": "passed",
+        "checks": [
+          "move cursor while placing image",
+          "placement completes and wait cursor clears",
+          "real image-picker upload",
+          "image visibly renders",
+          "local reload retains exact stored bytes",
+          "real mouse movement persists position with zero image byte transfers"
+        ],
+        "network": {
+          "uploads": 0,
+          "reads": 0,
+          "movementTransfers": 0
+        },
+        "errors": [],
+        "selectedFile": {
+          "name": "pattern.png",
+          "type": "image/png",
+          "size": 175
+        },
+        "boardId": "14ad2a87-eaaa-41a6-97cf-e5a7e7a92cc6",
+        "fileId": "c7a30d1e99b5b79659ee8b87fcb3b5538cd87cc4",
+        "storedMimeType": "image/png",
+        "durationMs": 3624
+      },
+      {
+        "format": "jpg",
+        "status": "passed",
+        "checks": [
+          "move cursor while placing image",
+          "placement completes and wait cursor clears",
+          "real image-picker upload",
+          "image visibly renders",
+          "local reload retains exact stored bytes",
+          "real mouse movement persists position with zero image byte transfers"
+        ],
+        "network": {
+          "uploads": 0,
+          "reads": 0,
+          "movementTransfers": 0
+        },
+        "errors": [],
+        "selectedFile": {
+          "name": "pattern.jpg",
+          "type": "image/jpeg",
+          "size": 703
+        },
+        "boardId": "7728cc90-abc8-4d85-90e4-656087a8c268",
+        "fileId": "5f5c6e611f11289caae4d67f8bd501eecb3a044b",
+        "storedMimeType": "image/jpeg",
+        "durationMs": 2941
+      },
+      {
+        "format": "svg",
+        "status": "passed",
+        "checks": [
+          "move cursor while placing image",
+          "placement completes and wait cursor clears",
+          "real image-picker upload",
+          "image visibly renders",
+          "local reload retains exact stored bytes",
+          "real mouse movement persists position with zero image byte transfers"
+        ],
+        "network": {
+          "uploads": 0,
+          "reads": 0,
+          "movementTransfers": 0
+        },
+        "errors": [],
+        "selectedFile": {
+          "name": "pattern.svg",
+          "type": "image/svg+xml",
+          "size": 170
+        },
+        "boardId": "a40b1507-d460-4864-87f0-0ef44d7f4ef9",
+        "fileId": "b76ea8df9a81891e417ca38d7acef010e53838e1",
+        "storedMimeType": "image/svg+xml",
+        "durationMs": 3388
+      },
+      {
+        "format": "gif",
+        "status": "passed",
+        "checks": [
+          "move cursor while placing image",
+          "placement completes and wait cursor clears",
+          "real image-picker upload",
+          "image visibly renders",
+          "local reload retains exact stored bytes",
+          "real mouse movement persists position with zero image byte transfers"
+        ],
+        "network": {
+          "uploads": 0,
+          "reads": 0,
+          "movementTransfers": 0
+        },
+        "errors": [],
+        "selectedFile": {
+          "name": "pattern.gif",
+          "type": "image/gif",
+          "size": 163
+        },
+        "boardId": "b16ff19f-e01d-4908-92df-a09f98c4451d",
+        "fileId": "63aa575642cfaa45774936bcd3a5157c87c7480a",
+        "storedMimeType": "image/gif",
+        "durationMs": 2964
+      },
+      {
+        "format": "webp",
+        "status": "passed",
+        "checks": [
+          "move cursor while placing image",
+          "placement completes and wait cursor clears",
+          "real image-picker upload",
+          "image visibly renders",
+          "local reload retains exact stored bytes",
+          "real mouse movement persists position with zero image byte transfers"
+        ],
+        "network": {
+          "uploads": 0,
+          "reads": 0,
+          "movementTransfers": 0
+        },
+        "errors": [],
+        "selectedFile": {
+          "name": "pattern.webp",
+          "type": "image/webp",
+          "size": 122
+        },
+        "boardId": "92f2a321-fca3-43f4-a02f-20d9d187568a",
+        "fileId": "79ede5dc4fa2d9633f4b7c5cfaa79304338c761f",
+        "storedMimeType": "image/webp",
+        "durationMs": 3338
+      },
+      {
+        "format": "bmp",
+        "status": "passed",
+        "checks": [
+          "move cursor while placing image",
+          "placement completes and wait cursor clears",
+          "real image-picker upload",
+          "image visibly renders",
+          "local reload retains exact stored bytes",
+          "real mouse movement persists position with zero image byte transfers"
+        ],
+        "network": {
+          "uploads": 0,
+          "reads": 0,
+          "movementTransfers": 0
+        },
+        "errors": [],
+        "selectedFile": {
+          "name": "pattern.bmp",
+          "type": "image/bmp",
+          "size": 9270
+        },
+        "boardId": "4970e838-8f0b-4c58-aa6e-90df600406cd",
+        "fileId": "2e4f1fa6e5ad2d645e04d5a6bcd3be7329fe8a17",
+        "storedMimeType": "image/bmp",
+        "durationMs": 3757
+      },
+      {
+        "format": "ico",
+        "status": "passed",
+        "checks": [
+          "move cursor while placing image",
+          "placement completes and wait cursor clears",
+          "real image-picker upload",
+          "image visibly renders",
+          "local reload retains exact stored bytes",
+          "real mouse movement persists position with zero image byte transfers"
+        ],
+        "network": {
+          "uploads": 0,
+          "reads": 0,
+          "movementTransfers": 0
+        },
+        "errors": [],
+        "selectedFile": {
+          "name": "pattern.ico",
+          "type": "image/vnd.microsoft.icon",
+          "size": 399
+        },
+        "boardId": "fd375e2e-44ed-40bd-8b71-3185d5300150",
+        "fileId": "79ffa35ef3fd23801748e23fbe127a57bf54d20c",
+        "storedMimeType": "image/vnd.microsoft.icon",
+        "durationMs": 3197
+      },
+      {
+        "format": "avif",
+        "status": "passed",
+        "checks": [
+          "move cursor while placing image",
+          "placement completes and wait cursor clears",
+          "real image-picker upload",
+          "image visibly renders",
+          "local reload retains exact stored bytes",
+          "real mouse movement persists position with zero image byte transfers"
+        ],
+        "network": {
+          "uploads": 0,
+          "reads": 0,
+          "movementTransfers": 0
+        },
+        "errors": [],
+        "selectedFile": {
+          "name": "pattern.avif",
+          "type": "image/avif",
+          "size": 326
+        },
+        "boardId": "187def9b-1c87-4b91-b35b-b7147077d759",
+        "fileId": "4e312a9b5e37e31d017ccd1771966b41551a35ce",
+        "storedMimeType": "image/avif",
+        "durationMs": 3160
+      },
+      {
+        "format": "jfif",
+        "status": "passed",
+        "checks": [
+          "move cursor while placing image",
+          "placement completes and wait cursor clears",
+          "real image-picker upload",
+          "image visibly renders",
+          "local reload retains exact stored bytes",
+          "real mouse movement persists position with zero image byte transfers"
+        ],
+        "network": {
+          "uploads": 0,
+          "reads": 0,
+          "movementTransfers": 0
+        },
+        "errors": [],
+        "selectedFile": {
+          "name": "pattern.jfif",
+          "type": "image/jpeg",
+          "size": 703
+        },
+        "boardId": "6ed90ee2-2c3e-4668-a429-dc1e89bfa0e0",
+        "fileId": "5f5c6e611f11289caae4d67f8bd501eecb3a044b",
+        "storedMimeType": "image/jpeg",
+        "durationMs": 3149
+      }
+    ]
+  },
+  "icoFix": {
+    "implementation": "pnpm patch accepts image/vnd.microsoft.icon in addition to existing MIME whitelist; development and production bundles patched",
+    "dependencyVersion": "0.18.1",
+    "deployed": false,
+    "productionBuild": "passed"
+  },
+  "placementCursorFix": {
+    "implementation": "Excalidraw dependency patch sets move when image decoding completes and pending placement remains active; removes thumbnail cursor encoding",
+    "deployed": false,
+    "productionBuild": "passed",
+    "regression": "All nine formats assert move before placement and pending image cleared/no wait cursor after placement",
+    "redRepro": "node tests/image-formats.test.mjs --format=png failed waiting for move before patch"
+  },
+  "integration": {
+    "mainCommit": "faea109",
+    "projectSharingScenariosPassed": 35,
+    "uploadsPerFormat": 1,
+    "movementImageTransfers": 0,
+    "deletedProjectRestore": "passed",
+    "mergedBranchDeployed": false
+  }
+}

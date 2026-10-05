@@ -21,6 +21,18 @@ Open `http://127.0.0.1:5173/`. The canvas retries its local bridge connection ev
 
 The whiteboard and MCP process are separate by design: the web app keeps the editable scene open; your agent client owns the stdio MCP process. A single `pnpm dev:all` command is available for raw-protocol development, but it is not the normal way to attach Pi or another MCP client.
 
+## Tests
+
+```bash
+npm test
+# Equivalent for this pnpm workspace:
+pnpm test
+```
+
+This runs build/typecheck/lint, unit and policy tests, project E2E, image persistence/format tests, deleted-project sync, all 19 older browser regression suites, and the confirmed board behavior contract against local demo Firebase emulators. It requires pnpm, Firebase CLI, Java and Google Chrome; the older browser scripts currently expect Chrome's macOS installation path. Logs and results are saved in `.system_generated/all-tests/`.
+
+Live-account validation and historical security exploit probes are separate checks. See the [regression report](docs/features/full-regression-report-2026-10-04.md) for coverage and unresolved findings. Use `pnpm test:e2e:regression` to run just the 19 older browser suites.
+
 ## Configure an agent
 
 After `pnpm build`, point the agent's MCP configuration at this executable:

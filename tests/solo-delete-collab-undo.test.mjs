@@ -2,7 +2,7 @@ import puppeteer from 'puppeteer-core'
 import assert from 'node:assert/strict'
 
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
-const BASE_URL = 'http://localhost:5173'
+const BASE_URL = process.env.E2E_BASE_URL || 'http://localhost:5173'
 
 async function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -28,12 +28,11 @@ async function runTest() {
     await seedPage.goto(BASE_URL, { waitUntil: 'domcontentloaded' })
     await seedPage.evaluate(async (id) => {
       const { getFirebaseAuth } = await import('/src/lib/firebase.ts')
-      const { signInAnonymously } = await import('/src/features/collaboration/anonymous-user.ts')
+      const { signInOwner: signInAnonymously } = await import('/tests/regression-fixture.ts')
       const auth = getFirebaseAuth()
-      if (auth && !auth.currentUser) await signInAnonymously(auth)
+      if (auth && (!auth.currentUser || auth.currentUser.isAnonymous)) await signInAnonymously(auth)
 
       const { workspaceApi } = await import('/src/features/workspace/workspace-api.ts')
-      const { sharingService } = await import('/src/features/sharing/sharing-service.ts')
 
       const proj = await workspaceApi.createProject('Solo Undo WS')
       await workspaceApi.saveBoard({
@@ -70,7 +69,9 @@ async function runTest() {
         updatedAt: new Date().toISOString(),
       })
 
-      await sharingService.saveShareConfig({
+      await (
+        await import('/tests/regression-fixture.ts')
+      ).seedSharedBoard({
         boardId: id,
         boardName: 'Solo Undo Board',
         ownerId: auth.currentUser.uid,
@@ -107,11 +108,10 @@ async function runTest() {
         updatedAt: new Date().toISOString(),
       })
     }, boardId)
-    await seedPage.close()
 
     // Step 1: Open drawing in normal tab
     console.log('\n▶ Step 1: Open drawing in normal tab (Solo mode)...')
-    const page1 = await browser.newPage()
+    const page1 = seedPage
     await page1.setViewport({ width: 1440, height: 900 })
 
     await page1.goto(boardUrl, { waitUntil: 'domcontentloaded' })

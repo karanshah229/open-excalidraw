@@ -229,7 +229,7 @@ export function WorkspaceHome() {
           </div>
           <Button
             onClick={() => openCreateModal()}
-            disabled={!user || (isProjectPage && (!currentProject || currentProject.role === 'viewer'))}
+            disabled={isProjectPage && (!user || !currentProject || currentProject.role === 'viewer')}
           >
             <Plus size={16} />
             New board

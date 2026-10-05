@@ -1,0 +1,76 @@
+{
+  "local_e2e": "passed",
+  "emulator_e2e": "passed",
+  "development_live_e2e": "passed",
+  "typescript": "passed",
+  "targeted_lint": "passed",
+  "production_signed_in_chrome": {
+    "upload": "passed",
+    "private_reload": "passed",
+    "shared_reload": "passed",
+    "movement_firestore_verified": true,
+    "storage_object_unchanged": true,
+    "test_board_access": "restricted"
+  },
+  "production_automated_localhost_e2e": "blocked_by_App_Check; protections preserved",
+  "production_movement_before": {
+    "x": 760.0000610351562,
+    "y": 359.0104446411133,
+    "fileId": "9d183f3a90ae32e35dce2f8b3e80385836cfc651",
+    "storagePath": "boards/f49cfb43-1dd4-48ed-a796-2fa721309f3d/assets/9d183f3a90ae32e35dce2f8b3e80385836cfc651",
+    "inline_bytes_empty": true,
+    "access": "restricted"
+  },
+  "production_movement_after": {
+    "x": 900.0000610351562,
+    "y": 449.0104446411133,
+    "fileId": "9d183f3a90ae32e35dce2f8b3e80385836cfc651",
+    "storagePath": "boards/f49cfb43-1dd4-48ed-a796-2fa721309f3d/assets/9d183f3a90ae32e35dce2f8b3e80385836cfc651",
+    "inline_bytes_empty": true,
+    "access": "restricted"
+  },
+  "image_hardening": {
+    "local_e2e": "passed",
+    "policy_matrix": "passed",
+    "emulator_e2e": "passed",
+    "development_live_e2e": "passed",
+    "movement_network_transfers": 0,
+    "board_and_project_delete_restore": "passed_in_emulator_and_real_development",
+    "direct_storage_and_token_creation": "denied_in_emulator_and_real_development",
+    "development_tokens_revoked": 26,
+    "production": {
+      "signed_in_chrome": "passed",
+      "board_id": "a7ff253d-a695-4cc8-960d-a3c573a90dd2",
+      "access": "restricted",
+      "upload": "passed",
+      "private_reload": "passed",
+      "shared_reload": "passed",
+      "movement_storage_objects_unchanged": true,
+      "persisted_image_tombstone": "passed",
+      "undo_and_restored_reload": "passed",
+      "tokens_revoked": 4,
+      "remaining_image_tokens": 0,
+      "revoked_url_http_status": 401,
+      "app_check_missing_http_status": 401,
+      "valid_auth_and_app_check_in_server_logs": true
+    },
+    "production_new_images_token_free": true,
+    "targeted_lint": "passed; two pre-existing unused-variable warnings in workspace/collaboration files"
+  },
+  "first_class_project_integration": {
+    "date": "2026-10-04",
+    "main_commit": "faea109",
+    "image_persistence_e2e": "passed",
+    "deleted_project_sync_e2e": "passed",
+    "project_sharing_scenarios": 35,
+    "formats_passed": {
+      "local": 9,
+      "firebase_emulators": 9,
+      "production_bundle_local": 9
+    },
+    "uploads_per_format": 1,
+    "movement_image_transfers": 0,
+    "merged_branch_live_tests": "not run",
+    "merged_branch_deployed": false
+  }
+}

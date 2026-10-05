@@ -1,6 +1,7 @@
+const BASE_URL = process.env.E2E_BASE_URL || 'http://localhost:5173'
 import puppeteer from 'puppeteer-core'
 
-const ARTIFACT_DIR = '/Users/karan/.gemini/antigravity/brain/a6b56a5d-05f3-42f2-b79b-7ceed663f504'
+const ARTIFACT_DIR = process.env.E2E_ARTIFACT_DIR || '.system_generated/regression-screenshots'
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 
 async function runE2ENonAnonymousTest() {
@@ -16,7 +17,7 @@ async function runE2ENonAnonymousTest() {
 
   try {
     const boardId = `smoke-board-${Date.now().toString(36)}`
-    const boardUrl = `http://localhost:5173/boards/${boardId}`
+    const boardUrl = `${BASE_URL}/boards/${boardId}`
     console.log(`Target board URL: ${boardUrl}`)
 
     const shareConfig = {
@@ -85,7 +86,7 @@ async function runE2ENonAnonymousTest() {
       }
     })
 
-    await page1.goto('http://localhost:5173', { waitUntil: 'domcontentloaded' })
+    await page1.goto(process.env.E2E_BASE_URL || 'http://localhost:5173', { waitUntil: 'domcontentloaded' })
     await page1.evaluate((cfg) => {
       localStorage.setItem('agentic-whiteboard:library:v1', '[]')
       localStorage.setItem(`agentic-whiteboard:share:${cfg.boardId}`, JSON.stringify(cfg))
@@ -94,11 +95,11 @@ async function runE2ENonAnonymousTest() {
     // Authenticate and set real display profile in Firebase Auth
     await page1.evaluate(async () => {
       const { getFirebaseAuth } = await import('/src/lib/firebase.ts')
-      const { signInAnonymously, updateProfile } = await import('/src/features/collaboration/anonymous-user.ts')
+      const { signInOwner: signInAnonymously, updateProfile } = await import('/tests/regression-fixture.ts')
       const auth = getFirebaseAuth()
       if (auth) {
         let u = auth.currentUser
-        if (!u) {
+        if (!u || u.isAnonymous) {
           const cred = await signInAnonymously(auth)
           u = cred.user
         }
@@ -108,6 +109,11 @@ async function runE2ENonAnonymousTest() {
         })
       }
     })
+
+    await page1.evaluate(async (cfg) => {
+      const { seedSharedBoard } = await import('/tests/regression-fixture.ts')
+      await seedSharedBoard(cfg)
+    }, shareConfig)
 
     await page1.goto(boardUrl, { waitUntil: 'domcontentloaded' })
     await page1.waitForSelector('.excalidraw', { timeout: 15000 })
@@ -130,8 +136,9 @@ async function runE2ENonAnonymousTest() {
       }
     })
 
-    await page2.goto('http://localhost:5173', { waitUntil: 'domcontentloaded' })
-    await page2.evaluate((cfg) => {
+    await page2.goto(process.env.E2E_BASE_URL || 'http://localhost:5173', { waitUntil: 'domcontentloaded' })
+    await page2.evaluate(async (cfg) => {
+      await (await import('/tests/regression-fixture.ts')).signInGuest()
       localStorage.setItem('agentic-whiteboard:library:v1', '[]')
       localStorage.setItem(`agentic-whiteboard:share:${cfg.boardId}`, JSON.stringify(cfg))
     }, shareConfig)

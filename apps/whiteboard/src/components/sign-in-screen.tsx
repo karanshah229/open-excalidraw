@@ -1,7 +1,7 @@
 import { PanelsTopLeft } from 'lucide-react'
 import { useAuth } from '../lib/auth-context'
 
-export function SignInScreen() {
+export function SignInScreen({ onContinueLocal }: { onContinueLocal: () => void }) {
   const { error, isConfigured, signInWithGoogle } = useAuth()
   return (
     <main className="sign-in-shell">
@@ -11,7 +11,7 @@ export function SignInScreen() {
         </div>
         <p className="sign-in-eyebrow">OPENEXCALIDRAW</p>
         <h1>Welcome back</h1>
-        <p className="sign-in-description">Sign in to create, organize, and sync your boards.</p>
+        <p className="sign-in-description">Sign in to sync and share your boards, or work locally in this browser.</p>
         <button
           type="button"
           className="sign-in-button"
@@ -23,6 +23,10 @@ export function SignInScreen() {
           </span>
           Continue with Google
         </button>
+        <button type="button" className="sign-in-button" onClick={onContinueLocal}>
+          Continue without signing in
+        </button>
+        <p className="sign-in-note">Local boards are saved only in this browser.</p>
         <p className="sign-in-note">Your boards stay private to you.</p>
         {!isConfigured && (
           <p className="sign-in-hint">Firebase configuration is required before sign-in is available.</p>

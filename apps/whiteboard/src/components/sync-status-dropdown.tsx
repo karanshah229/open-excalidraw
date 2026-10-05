@@ -21,7 +21,14 @@ import { useUser } from '../lib/user-context'
 import { useAuth } from '../lib/auth-context'
 
 export type EditorStatus =
-  'Loading board' | 'Saving' | 'Synced locally' | 'Synced' | 'Sync failed' | 'Conflict' | 'Local save failed'
+  | 'Loading board'
+  | 'Saving'
+  | 'Synced locally'
+  | 'Synced'
+  | 'Sync failed'
+  | 'Conflict'
+  | 'Local save failed'
+  | 'Project deleted'
 
 export interface SyncStatusDropdownProps {
   state: EditorStatus
@@ -73,6 +80,13 @@ function getStatusConfig(state: EditorStatus): StatusConfig {
         description: 'Remote changes conflict with local edits.',
         icon: AlertTriangle,
         colorTheme: 'conflict',
+      }
+    case 'Project deleted':
+      return {
+        title: 'Project deleted',
+        description: 'Local changes are retained. Restore the project to resume editing and cloud sync.',
+        icon: AlertCircle,
+        colorTheme: 'error',
       }
     case 'Sync failed':
       return {
@@ -201,7 +215,10 @@ export function SyncStatusDropdown({
       ? 'saved'
       : state === 'Synced locally'
         ? 'local'
-        : state === 'Sync failed' || state === 'Local save failed' || state === 'Conflict'
+        : state === 'Sync failed' ||
+            state === 'Local save failed' ||
+            state === 'Conflict' ||
+            state === 'Project deleted'
           ? 'error'
           : 'saving'
 
@@ -218,7 +235,10 @@ export function SyncStatusDropdown({
             <Check size={13} className="sync-status-icon sync-status-icon--saved" />
           ) : state === 'Synced locally' ? (
             <HardDrive size={13} className="sync-status-icon sync-status-icon--local" />
-          ) : state === 'Sync failed' || state === 'Local save failed' || state === 'Conflict' ? (
+          ) : state === 'Sync failed' ||
+            state === 'Local save failed' ||
+            state === 'Conflict' ||
+            state === 'Project deleted' ? (
             <AlertCircle size={13} className="sync-status-icon sync-status-icon--error" />
           ) : (
             <Loader2 size={13} className="sync-status-icon sync-status-icon--saving animate-spin" />

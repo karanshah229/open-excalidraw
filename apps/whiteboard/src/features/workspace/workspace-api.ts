@@ -34,6 +34,42 @@ let nextWriteAt = 0
 const dirtyProjectIds = new Set<string>()
 const projectListeners = new Map<string, () => void>()
 let projectsListener: (() => void) | undefined
+const deletedProjectIds = new Set<string>()
+let projectUpdates = Promise.resolve()
+const PROJECT_DELETED_MESSAGE =
+  'This project was deleted. Local changes are retained. Restore the project to resume cloud sync.'
+class DeletedProjectError extends Error {}
+const isProjectDeleted = (data: Record<string, unknown> | undefined) =>
+  Boolean(data && (data.active === false || data.deletedAt))
+
+async function blockProjectSync(projectId: string) {
+  deletedProjectIds.add(projectId)
+  dirtyProjectIds.delete(projectId)
+  projectListeners.get(projectId)?.()
+  projectListeners.delete(projectId)
+  const boards = (await workspaceStore.listBoardsForSync(true)).filter((board) => board.projectId === projectId)
+  await Promise.all(
+    boards.map(async (board) => {
+      if (board.syncStatus === 'sync-blocked') return
+      await workspaceStore.markBoardSyncBlocked(board.id, PROJECT_DELETED_MESSAGE)
+      window.dispatchEvent(new CustomEvent(`board-sync:${board.id}`, { detail: 'sync-blocked' }))
+    }),
+  )
+}
+
+async function resumeProjectSync(projectId: string) {
+  if (!deletedProjectIds.delete(projectId)) return
+  const boards = (await workspaceStore.listBoardsForSync(true)).filter(
+    (board) => board.projectId === projectId && board.syncStatus === 'sync-blocked',
+  )
+  await Promise.all(
+    boards.map(async (board) => {
+      await workspaceStore.resumeBoardSync(board.id)
+      window.dispatchEvent(new CustomEvent(`board-sync:${board.id}`, { detail: 'local-only' }))
+    }),
+  )
+  if (boards.length) queueSync()
+}
 const SYNC_DEBOUNCE_MS = 150
 const MIN_WRITE_INTERVAL_MS = 1_000
 const MAX_RETRY_DELAY_MS = 60_000
@@ -138,15 +174,20 @@ async function performWorkspaceSync(userId: string) {
       await runTransaction(db, async (transaction) => {
         const existing = await transaction.get(projectRef)
         if (!existing.exists()) transaction.set(projectRef, firestoreValue(project))
-        else if (existing.data().deletedAt) throw new Error('Project was deleted.')
+        else if (isProjectDeleted(existing.data())) throw new DeletedProjectError(PROJECT_DELETED_MESSAGE)
       })
       dirtyProjectIds.delete(project.id)
-    } catch {
-      dirtyProjectIds.add(project.id)
+    } catch (error) {
+      if (error instanceof DeletedProjectError) await blockProjectSync(project.id)
+      else dirtyProjectIds.add(project.id)
     }
   }
 
   for (const board of unsyncedBoards) {
+    if (deletedProjectIds.has(board.projectId)) {
+      await blockProjectSync(board.projectId)
+      continue
+    }
     if (generation !== activation || activeUserId !== userId) return
     const wait = Math.max(0, nextWriteAt - Date.now())
     if (wait) await new Promise<void>((resolve) => window.setTimeout(resolve, wait))
@@ -157,9 +198,11 @@ async function performWorkspaceSync(userId: string) {
         if (!current || (current.syncStatus !== 'local-only' && current.syncStatus !== 'sync-failed')) return
         const ref = doc(db, 'users', userId, 'projects', current.projectId, 'boards', current.id)
         const assetRoot = `users/${userId}/boards/${current.id}/assets`
-        const cloudScene = await storeSceneAssets(current.scene, assetRoot)
+        const cloudScene = await storeSceneAssets(current.scene, assetRoot, current.projectId)
         let resolvedBoard = current
         await runTransaction(db, async (transaction) => {
+          const parent = await transaction.get(doc(db, 'users', userId, 'projects', current.projectId))
+          if (isProjectDeleted(parent.data())) throw new DeletedProjectError(PROJECT_DELETED_MESSAGE)
           const remoteSnapshot = await transaction.get(ref)
           if (remoteSnapshot.exists() && remoteSnapshot.data().active === false && current.active)
             throw new Error('Board was deleted.')
@@ -185,7 +228,7 @@ async function performWorkspaceSync(userId: string) {
                 },
                 updatedAt: new Date().toISOString(),
               }
-              const mergedScene = await storeSceneAssets(resolvedBoard.scene, assetRoot)
+              const mergedScene = await storeSceneAssets(resolvedBoard.scene, assetRoot, current.projectId)
               transaction.set(ref, firestoreValue(cloudBoard({ ...resolvedBoard, scene: mergedScene })))
               return
             }
@@ -199,6 +242,20 @@ async function performWorkspaceSync(userId: string) {
         window.dispatchEvent(new CustomEvent(`board-sync:${resolvedBoard.id}`, { detail: 'synced' }))
       })
     } catch (error) {
+      // The project can be deleted between the metadata write and image upload.
+      const permissionDenied = (error as { code?: string })?.code === 'functions/permission-denied'
+      let deleted = error instanceof DeletedProjectError || deletedProjectIds.has(board.projectId)
+      if (!deleted && permissionDenied) {
+        try {
+          deleted = isProjectDeleted((await getDoc(doc(db, 'users', userId, 'projects', board.projectId))).data())
+        } catch {
+          /* Keep transient/auth failures on the normal retry path. */
+        }
+      }
+      if (deleted) {
+        await blockProjectSync(board.projectId)
+        continue
+      }
       const current = await workspaceStore.loadBoard(board.id)
       const nextAttempt = (current?.syncAttempts ?? 0) + 1
       await workspaceStore.markBoardSyncFailed(board.id, errorMessage(error), retryAt(nextAttempt))
@@ -206,7 +263,12 @@ async function performWorkspaceSync(userId: string) {
     }
   }
 
-  const pending = (await workspaceStore.listBoardsForSync())
+  const remaining = await workspaceStore.listBoardsForSync()
+  // A save can arrive after this run captured its board list or while its
+  // acknowledgement was in flight. A timer consumed by that run must not
+  // strand the newer revision in IndexedDB.
+  if (remaining.some((board) => board.syncStatus === 'local-only' && !board.nextSyncAt)) queueSync()
+  const pending = remaining
     .filter((board) => (board.syncStatus === 'local-only' || board.syncStatus === 'sync-failed') && board.nextSyncAt)
     .map((board) => new Date(board.nextSyncAt!).getTime())
   if (pending.length) {
@@ -231,85 +293,93 @@ function subscribeToRemoteWorkspace(userId: string) {
   const db = getFirestoreDb()
   if (!db || projectsListener) return
   projectsListener = onSnapshot(collection(db, 'users', userId, 'projects'), (snapshot) => {
-    if (generation !== activation || activeUserId !== userId) return
-    for (const projectSnapshot of snapshot.docs) {
-      const stored = projectSnapshot.data() as Project
-      const project: Project = { ...stored, id: projectSnapshot.id, ownerId: userId }
-      if (!project.deletedAt && (stored.ownerId !== userId || stored.id !== project.id))
-        void projectService
-          .manage(project.id, 'repair')
-          .catch((error) => console.error('Legacy project repair failed:', error))
-      void workspaceStore
-        .upsertProject(project)
-        .then(emitWorkspaceChange)
-        .catch((error) => console.error('Cloud project restore failed:', error))
-      if (project.deletedAt) {
-        projectListeners.get(project.id)?.()
-        projectListeners.delete(project.id)
-        continue
-      }
-      if (projectListeners.has(project.id)) continue
-      projectListeners.set(
-        project.id,
-        onSnapshot(
-          query(collection(db, 'users', userId, 'projects', project.id, 'boards'), where('active', '==', true)),
-          (boardSnapshot) => {
-            if (generation !== activation || activeUserId !== userId) return
-            for (const change of boardSnapshot.docChanges()) {
-              const boardDocument = change.doc
-              const remote = {
-                ...(workspaceValue(boardDocument.data()) as BoardDocument),
-                id: boardDocument.id,
-                projectId: project.id,
-                active: change.type === 'removed' ? false : true,
-              }
-              void (async () => {
-                if (generation !== activation || activeUserId !== userId) return
-                const normalized = cloudBoard(remote)
-                if (!normalized.active) {
-                  await workspaceStore.upsertBoard(normalized)
-                  emitWorkspaceChange()
-                  return
-                }
-                const known = await workspaceStore.loadBoard(remote.id)
-                normalized.scene = await restoreSceneAssets(normalized.scene, known?.scene.files)
-                const local = await workspaceStore.loadBoard(remote.id)
-                if (local?.syncStatus === 'local-only' || local?.syncStatus === 'sync-failed') {
-                  if (matchesCommittedVersion(local, normalized)) {
-                    await workspaceStore.markBoardSynced(local.id, local.revision)
-                    emitWorkspaceChange()
-                  } else if (normalized.revision !== local.baseRevision && normalized.revision !== local.revision) {
-                    // Element-level LWW reconciliation
-                    const mergedElements = reconcileElementsLWW(
-                      local.scene?.elements ?? [],
-                      normalized.scene?.elements ?? [],
-                    )
-                    const mergedBoard: BoardDocument = {
-                      ...local,
-                      revision: Math.max(local.revision, normalized.revision) + 1,
-                      scene: {
-                        ...local.scene,
-                        elements: mergedElements,
-                        files: { ...normalized.scene.files, ...local.scene.files },
-                      },
-                    }
-                    await workspaceStore.upsertBoard(mergedBoard)
-                    queueSync()
+    projectUpdates = projectUpdates
+      .catch(console.error)
+      .then(async () => {
+        if (generation !== activation || activeUserId !== userId) return
+        for (const projectSnapshot of snapshot.docs) {
+          if (generation !== activation || activeUserId !== userId) return
+          const stored = projectSnapshot.data() as Project
+          const project: Project = { ...stored, id: projectSnapshot.id, ownerId: userId }
+          if (!project.deletedAt && (stored.ownerId !== userId || stored.id !== project.id))
+            void projectService
+              .manage(project.id, 'repair')
+              .catch((error) => console.error('Legacy project repair failed:', error))
+          await workspaceStore.upsertProject(project)
+          if (generation !== activation || activeUserId !== userId) return
+          emitWorkspaceChange()
+          if (isProjectDeleted(project)) {
+            if (!deletedProjectIds.has(project.id)) await blockProjectSync(project.id)
+            continue
+          }
+          await resumeProjectSync(project.id)
+          if (projectListeners.has(project.id)) continue
+          projectListeners.set(
+            project.id,
+            onSnapshot(
+              query(collection(db, 'users', userId, 'projects', project.id, 'boards'), where('active', '==', true)),
+              (boardSnapshot) => {
+                if (generation !== activation || activeUserId !== userId || deletedProjectIds.has(project.id)) return
+                for (const change of boardSnapshot.docChanges()) {
+                  const boardDocument = change.doc
+                  const remote = {
+                    ...(workspaceValue(boardDocument.data()) as BoardDocument),
+                    id: boardDocument.id,
+                    projectId: project.id,
+                    active: change.type === 'removed' ? false : true,
                   }
-                } else if (!local || normalized.revision >= local.revision) {
-                  await workspaceStore.upsertBoard(normalized)
-                  await updateSyncStatus(remote.id, 'synced')
-                  emitWorkspaceChange()
+                  void (async () => {
+                    if (generation !== activation || activeUserId !== userId || deletedProjectIds.has(project.id))
+                      return
+                    const normalized = cloudBoard(remote)
+                    if (!normalized.active) {
+                      await workspaceStore.upsertBoard(normalized)
+                      emitWorkspaceChange()
+                      return
+                    }
+                    const known = await workspaceStore.loadBoard(remote.id)
+                    normalized.scene = await restoreSceneAssets(normalized.scene, known?.scene.files)
+                    if (generation !== activation || activeUserId !== userId || deletedProjectIds.has(project.id))
+                      return
+                    const local = await workspaceStore.loadBoard(remote.id)
+                    if (local?.syncStatus === 'local-only' || local?.syncStatus === 'sync-failed') {
+                      if (matchesCommittedVersion(local, normalized)) {
+                        await workspaceStore.markBoardSynced(local.id, local.revision)
+                        emitWorkspaceChange()
+                      } else if (normalized.revision !== local.baseRevision && normalized.revision !== local.revision) {
+                        // Element-level LWW reconciliation
+                        const mergedElements = reconcileElementsLWW(
+                          local.scene?.elements ?? [],
+                          normalized.scene?.elements ?? [],
+                        )
+                        const mergedBoard: BoardDocument = {
+                          ...local,
+                          revision: Math.max(local.revision, normalized.revision) + 1,
+                          scene: {
+                            ...local.scene,
+                            elements: mergedElements,
+                            files: { ...normalized.scene.files, ...local.scene.files },
+                          },
+                        }
+                        await workspaceStore.upsertBoard(mergedBoard)
+                        queueSync()
+                      }
+                    } else if (!local || normalized.revision >= local.revision) {
+                      await workspaceStore.upsertBoard(normalized)
+                      await updateSyncStatus(remote.id, 'synced')
+                      emitWorkspaceChange()
+                    }
+                  })().catch((error) => {
+                    console.error(`Failed to restore cloud board ${remote.id}:`, error)
+                    window.dispatchEvent(new CustomEvent(`board-sync:${remote.id}`, { detail: 'sync-failed' }))
+                  })
                 }
-              })().catch((error) => {
-                console.error(`Failed to restore cloud board ${remote.id}:`, error)
-                window.dispatchEvent(new CustomEvent(`board-sync:${remote.id}`, { detail: 'sync-failed' }))
-              })
-            }
-          },
-        ),
-      )
-    }
+              },
+            ),
+          )
+        }
+      })
+      .catch(console.error)
   })
 }
 
@@ -340,7 +410,7 @@ export const workspaceApi = {
       const projectPolicies = new Map(policies?.projects.map((policy) => [policy.projectId, policy]))
       const boardPolicies = new Map(policies?.boards.map((policy) => [policy.boardId, policy]))
       const projects: VisibleProject[] = (await workspaceStore.listProjects())
-        .filter(() => uid || !projectId)
+        .filter((project) => (uid || !projectId) && !deletedProjectIds.has(project.id))
         .map((project) => {
           const policy = projectPolicies.get(project.id)
           return {
@@ -508,7 +578,7 @@ export const workspaceApi = {
     await workspaceStore.bootstrap()
     const document = await workspaceStore.loadBoard(boardId)
     if (!document?.active) return null
-    const projects = await workspaceStore.listProjects()
+    const projects = await workspaceStore.listProjects(true)
     const project = projects.find((p) => p.id === document.projectId) || {
       id: document.projectId,
       name: 'Project',
@@ -534,6 +604,10 @@ export const workspaceApi = {
     try {
       const saved = await workspaceStore.saveBoard(document)
       emitWorkspaceChange()
+      if (deletedProjectIds.has(saved.projectId)) {
+        await blockProjectSync(saved.projectId)
+        return (await workspaceStore.loadBoard(saved.id))!
+      }
       queueSync()
       return saved
     } catch (error) {
@@ -564,6 +638,9 @@ export const workspaceApi = {
     const generation = activation
     await workspaceStore.bootstrap()
     if (activation !== generation || activeUserId !== userId) return
+    for (const board of await workspaceStore.listBoardsForSync(true)) {
+      if (board.syncStatus === 'sync-blocked') deletedProjectIds.add(board.projectId)
+    }
     const claimedProjectIds = await workspaceStore.claimLocalProjects(userId)
     claimedProjectIds.forEach((projectId) => dirtyProjectIds.add(projectId))
     subscribeToRemoteWorkspace(userId)
@@ -580,6 +657,7 @@ export const workspaceApi = {
     if (syncTimer) window.clearTimeout(syncTimer)
     syncTimer = undefined
     dirtyProjectIds.clear()
+    deletedProjectIds.clear()
     activeUserId = null
     setWorkspaceIdentity(null)
     emitWorkspaceChange()

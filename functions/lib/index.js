@@ -8,6 +8,7 @@ import { defineString } from 'firebase-functions/params';
 import { mirrorCurrentPolicy } from './project-access.js';
 export { manageProject, manageBoardAccess, listSharedProjects, createProjectBoard, mirrorProjectAccess, publishProjectBoard, } from './project-access.js';
 initializeApp();
+export { boardAsset } from './board-assets.js';
 const GRACE_PERIOD_MS = 30_000;
 const COMPACTION_LOCK_MS = 120_000;
 // These deploy-time parameters prevent an implicit fallback to a region that
