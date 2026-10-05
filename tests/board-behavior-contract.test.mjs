@@ -131,6 +131,61 @@ async function run(name, work) {
   }
 }
 try {
+  await run('framed-scene-reload', async () => {
+    const context = await browser.createBrowserContext()
+    const page = await open(context)
+    const fixture = await page.evaluate(async () => {
+      const { workspaceApi } = await import('/src/features/workspace/workspace-api.ts')
+      const { convertToExcalidrawElements } = await import('/tests/frame-reload-fixture.ts')
+      const project = await workspaceApi.createProject('Local framed diagram')
+      const board = await workspaceApi.createBoard(project.id, 'Framed diagram')
+      const elements = convertToExcalidrawElements(
+        [
+          {
+            type: 'rectangle',
+            id: 'framed-box',
+            x: 100,
+            y: 120,
+            width: 160,
+            height: 90,
+            label: { text: 'Saved label' },
+          },
+          { type: 'rectangle', id: 'deleted-box', x: 120, y: 240, width: 100, height: 50 },
+          {
+            type: 'frame',
+            id: 'saved-frame',
+            x: 50,
+            y: 60,
+            width: 350,
+            height: 350,
+            children: ['framed-box', 'deleted-box'],
+          },
+        ],
+        { regenerateIds: false },
+      ).map((el) => ({ ...el, version: 7, isDeleted: el.id === 'deleted-box' }))
+      await workspaceApi.saveBoard({ ...board, scene: { elements, appState: { viewBackgroundColor: 'transparent' } } })
+      return { boardId: board.id, elements }
+    })
+    assert.equal(
+      fixture.elements.find((e) => e.id === 'saved-frame').children,
+      undefined,
+      'Persisted frames have frameId membership, not skeleton children',
+    )
+    await page.goto(`${base}/boards/${fixture.boardId}`)
+    await mode(page, false)
+    const reopened = await page.evaluate(() => window.__excalidrawAPI.getSceneElementsIncludingDeleted())
+    for (const expected of fixture.elements) {
+      const element = reopened.find((e) => e.id === expected.id)
+      assert.ok(element, `Restore element ${expected.id}`)
+      assert.equal(element.frameId, expected.frameId)
+      assert.equal(element.isDeleted, expected.isDeleted)
+      assert.equal(element.version, expected.version)
+      // Restoration canonicalizes an absent binding list to an empty array.
+      assert.deepEqual(element.boundElements ?? [], expected.boundElements ?? [])
+      if (expected.type === 'text') assert.equal(element.containerId, expected.containerId)
+    }
+    await context.close()
+  })
   await run('anonymous-local', async () => {
     const context = await browser.createBrowserContext()
     const page = await open(context)
