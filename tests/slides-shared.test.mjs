@@ -204,6 +204,13 @@ try {
     'Owner-local scene survives cloud-read failure',
   )
   assert(await owner.$('[aria-label="Duplicate slide"]'), 'Owner retains editing controls')
+  await owner.click('[aria-label="Sync status and board details"]')
+  await owner.waitForSelector('.sync-simple-desc')
+  assert.equal(
+    await owner.$eval('.sync-simple-desc', (node) => node.textContent),
+    'Saved to this device. Syncing to cloud.',
+  )
+  await owner.keyboard.press('Escape')
   await owner.screenshot({ path: '.system_generated/slides/owner-local-timeout-recovery.png' })
   await viewer.waitForSelector('.access-denied-title')
   assert(await viewer.evaluate(() => window.__boardReadTimeouts > 0), 'Viewer actually encountered the read timeout')
@@ -248,6 +255,10 @@ try {
   })
   await viewer.goto(`${base}/boards/${guest.boardId}`)
   await viewer.waitForSelector('.slide-card')
+  await viewer.click('[aria-label="Sync status and board details"]')
+  await viewer.waitForSelector('.sync-simple-desc')
+  assert.equal(await viewer.$eval('.sync-simple-desc', (node) => node.textContent), 'Saved to this device only.')
+  await viewer.keyboard.press('Escape')
   await viewer.click('.slide-actions button:last-child')
   await viewer.waitForFunction(() => document.querySelector('#slide-notes-input')?.disabled === false)
   await viewer.type('#slide-notes-input', 'Guest notes stay on this device')
