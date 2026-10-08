@@ -2056,8 +2056,16 @@ export function BoardEditor() {
         apiRef={apiRef}
         boardId={boardId}
         projectId={boardMeta?.projectId || ''}
-        identity={authUser?.uid || getFirebaseAuth()?.currentUser?.uid || 'local-user'}
-        cloud={Boolean(isFirebaseConfigured && (authUser || getFirebaseAuth()?.currentUser))}
+        identity={
+          boardMeta?.projectOwnerId === 'local-user'
+            ? 'local-user'
+            : authUser?.uid || getFirebaseAuth()?.currentUser?.uid || 'local-user'
+        }
+        cloud={Boolean(
+          isFirebaseConfigured &&
+          boardMeta?.projectOwnerId !== 'local-user' &&
+          (authUser || getFirebaseAuth()?.currentUser),
+        )}
         canEdit={!isReadOnly && !isSpectator && !isTransitioningCollab && !accessDenied}
         onInteraction={markSlideInteraction}
         onStageChange={setIsSlideStageOpen}

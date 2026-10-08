@@ -219,8 +219,66 @@ try {
   await viewer.click('.access-denied-card button')
   await viewer.waitForFunction(() => document.querySelectorAll('.slide-card').length === 2)
   assert.equal(await viewer.$('[aria-label="Duplicate slide"]'), null, 'Retry restores authorized viewer access only')
+  // Firebase also creates anonymous identities for guest visitors. A private
+  // local workspace must still use local notes, never that cloud identity.
+  const guest = await viewer.evaluate(async (scene) => {
+    const { getFirebaseAuth } = await import('/src/lib/firebase.ts')
+    if (!getFirebaseAuth().currentUser?.isAnonymous) throw new Error('Guest fixture requires anonymous Firebase auth')
+    localStorage.setItem('agentic-whiteboard:local-workspace', 'true')
+    const { workspaceApi } = await import('/src/features/workspace/workspace-api.ts')
+    const { getSlides } = await import('/src/features/slides/slide-model.ts')
+    const project = await workspaceApi.createProject('Guest local slides')
+    if (project.ownerId !== 'local-user') throw new Error('Guest fixture requires a local-only project')
+    const board = await workspaceApi.createBoard(project.id, 'Guest local notes')
+    await workspaceApi.saveBoard({ ...board, scene })
+    return { boardId: board.id, slideId: getSlides(scene.elements)[0].id }
+  }, cached.document.scene)
+  let guestNoteCalls = 0
+  const countGuestNotes = (request) => {
+    if (request.url().endsWith('/slideNotes')) guestNoteCalls++
+  }
+  viewer.on('request', countGuestNotes)
+  viewer.once('dialog', async (dialog) => {
+    assert.equal(
+      dialog.type(),
+      'beforeunload',
+      'Only the existing viewer unload guard may interrupt fixture navigation',
+    )
+    await dialog.accept()
+  })
+  await viewer.goto(`${base}/boards/${guest.boardId}`)
+  await viewer.waitForSelector('.slide-card')
+  await viewer.click('.slide-actions button:last-child')
+  await viewer.waitForFunction(() => document.querySelector('#slide-notes-input')?.disabled === false)
+  await viewer.type('#slide-notes-input', 'Guest notes stay on this device')
+  await viewer.waitForFunction(
+    async ({ boardId, slideId }) => {
+      const { readNoteDraft, noteKey } = await import('/src/features/slides/notes-store.ts')
+      return (await readNoteDraft(noteKey('local-user', boardId, slideId)))?.text === 'Guest notes stay on this device'
+    },
+    {},
+    guest,
+  )
+  await viewer.reload()
+  await viewer.waitForSelector('.slide-card')
+  await viewer.click('.slide-actions button:last-child')
+  await viewer.waitForFunction(
+    () => document.querySelector('#slide-notes-input')?.value === 'Guest notes stay on this device',
+  )
+  await viewer.click('[aria-label="Presentation options"]')
+  const speakerTarget = browser.waitForTarget((target) => target.opener() === viewer.target())
+  await viewer.click('.slides-presentation-menu [role="menuitem"]:last-child')
+  const guestSpeaker = await (await speakerTarget).page()
+  await guestSpeaker.waitForFunction(
+    () => document.querySelector('#presenter-notes-input')?.value === 'Guest notes stay on this device',
+  )
+  assert.equal(await guestSpeaker.$eval('#presenter-notes-input', (node) => node.readOnly), true)
+  assert.equal(guestNoteCalls, 0, 'Anonymous guest-local notes never call the cloud notes service')
+  await guestSpeaker.click('[aria-label="End presentation"]')
+  await viewer.waitForSelector('.fullscreen-slides', { hidden: true })
+  viewer.off('request', countGuestNotes)
   console.log(
-    'PASS shared viewer slide updates, remote reorder without camera movement, editor cloud notes/reload, audience privacy, owner-local timeout recovery and cached-viewer access protection',
+    'PASS shared viewer slide updates, remote reorder without camera movement, editor cloud notes/reload, audience privacy, owner-local timeout recovery, cached-viewer access protection and anonymous guest-local notes/reload/presenter view',
   )
 } finally {
   await browser.close()
