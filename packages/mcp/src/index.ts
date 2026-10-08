@@ -100,6 +100,8 @@ mcp.registerTool(
         'get_schema',
         'add_elements',
         'update_elements',
+        'get_slides',
+        'slide_command',
         'delete_elements',
         'clear_canvas',
         'set_selection',
@@ -214,6 +216,27 @@ mcp.registerTool(
       return { id, changes: safeChanges }
     })
     return dispatch({ type: 'update_elements', patches: safePatches }, expectedRevision)
+  },
+)
+
+mcp.registerTool(
+  'get_slides',
+  { description: 'List ordered Slides on the current board. Speaker notes are never included.' },
+  async () => dispatch({ type: 'get_slides' }),
+)
+
+mcp.registerTool(
+  'slide_command',
+  {
+    description: 'Reorder, duplicate or remove a Slide boundary without deleting its drawings.',
+    inputSchema: {
+      slideId: z.string().min(1),
+      action: z.enum(['earlier', 'later', 'duplicate', 'remove']),
+      expectedRevision: z.number().int().nonnegative().optional(),
+    },
+  },
+  async ({ slideId, action, expectedRevision }) => {
+    return dispatch({ type: 'slide_command', slideId, action }, expectedRevision)
   },
 )
 

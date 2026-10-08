@@ -40,6 +40,7 @@ if (imageCloud) {
     throw new Error('Cloud image tests require local demo-image-persistence emulators.')
   await run('images-cloud-persistence', process.execPath, ['tests/image-persistence.test.mjs', '--cloud'])
   await run('images-cloud-formats', process.execPath, ['tests/image-formats.test.mjs', '--cloud'])
+  await run('slide-notes-access', process.execPath, ['tests/slide-notes-access.test.mjs'])
   await run('deleted-project-sync', process.execPath, ['tests/deleted-project-sync.test.mjs'])
 } else {
   console.log(
@@ -51,6 +52,10 @@ if (imageCloud) {
   const tsx = 'packages/mcp/node_modules/tsx/dist/cli.mjs'
   await run('collaboration-unit', process.execPath, [tsx, 'tests/collab-edge-cases.test.ts'])
   await run('collaboration-load', process.execPath, [tsx, 'tests/collab-load-simulation.test.ts'])
+  await run('slides-model', process.execPath, [tsx, 'tests/slides-model.test.ts'])
+  await run('board-loading', process.execPath, [tsx, 'tests/board-loading.test.ts'])
+  await run('slides-browser', process.execPath, ['tests/run-slides-tests.mjs'])
+  await run('slides-production', process.execPath, ['tests/slides-production.test.mjs'])
   await run('mcp-tools', process.execPath, [tsx, 'tests/mcp-tools-suite.test.ts'])
   await run('image-access-policy', process.execPath, ['tests/image-access-policy.test.mjs'])
 

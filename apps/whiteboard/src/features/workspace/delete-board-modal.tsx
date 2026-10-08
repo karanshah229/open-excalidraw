@@ -25,10 +25,25 @@ export function DeleteBoardModal({ open, onOpenChange, boardName, onConfirm }: D
   }
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+    <Dialog.Root
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!isDeleting) onOpenChange(nextOpen)
+      }}
+    >
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content className="dialog-content delete-modal-content" aria-describedby="delete-board-desc">
+        <Dialog.Content
+          className="dialog-content delete-modal-content"
+          aria-describedby="delete-board-desc"
+          aria-busy={isDeleting}
+          onEscapeKeyDown={(event) => {
+            if (isDeleting) event.preventDefault()
+          }}
+          onInteractOutside={(event) => {
+            if (isDeleting) event.preventDefault()
+          }}
+        >
           <Dialog.Title className="delete-board-title">Delete board</Dialog.Title>
           <Dialog.Description id="delete-board-desc" className="delete-board-desc">
             Are you sure you want to delete <strong>&ldquo;{boardName}&rdquo;</strong>? This action cannot be undone.

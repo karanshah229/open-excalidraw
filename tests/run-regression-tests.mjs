@@ -7,6 +7,7 @@ import { resolve } from 'node:path'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const all = [
+  'slides-shared.test.mjs',
   'board-behavior-contract.test.mjs',
   'e2e-collab-suite.mjs',
   'collab-chaos-live.test.mjs',
