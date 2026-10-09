@@ -11,7 +11,7 @@ export type WorkspaceBoard = Board & {
   project: VisibleProject
   inheritProjectAccess?: boolean
   isPrivate?: boolean
-  role?: 'owner' | 'editor' | 'viewer'
+  role?: 'owner' | 'editor' | 'viewer' | 'presentation'
 }
 export const workspaceStore = new RxDbWorkspaceStore()
 const workspaceRequests = new Map<string, Promise<{ projects: VisibleProject[]; boards: WorkspaceBoard[] }>>()

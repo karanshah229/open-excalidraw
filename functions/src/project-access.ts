@@ -1,3 +1,5 @@
+import { policyRole, strongestRole } from './access-role.js'
+export { policyRole } from './access-role.js'
 import { getFirestore } from 'firebase-admin/firestore'
 import { getDatabase } from 'firebase-admin/database'
 import { HttpsError, onCall, type CallableRequest } from 'firebase-functions/v2/https'
@@ -22,22 +24,13 @@ function identity(request: CallableRequest) {
   }
   return request.auth.uid
 }
-export function policyRole(
-  policy: Policy | undefined,
-  uid?: string,
-  email?: string,
-): 'owner' | 'editor' | 'viewer' | null {
-  if (!policy || policy.deletedAt || policy.pending) return null
-  if (uid && policy.ownerId === uid) return 'owner'
-  const direct =
-    email && policy.invitedEmails?.includes(email) ? (policy.collaborators?.[email]?.role ?? 'viewer') : null
-  if (direct === 'editor' || (policy.generalAccess === 'anyone_with_link' && policy.generalRole === 'editor'))
-    return 'editor'
-  if (direct || policy.generalAccess === 'anyone_with_link') return 'viewer'
-  return null
-}
 function verifiedEmail(request: CallableRequest) {
   return request.auth?.token.email_verified === true ? String(request.auth.token.email ?? '').toLowerCase() : undefined
+}
+function validShareRole(role: unknown) {
+  if (!['viewer', 'editor', 'presentation'].includes(String(role)))
+    throw new HttpsError('invalid-argument', 'Unknown sharing role.')
+  return role as 'viewer' | 'editor' | 'presentation'
 }
 function sanitizePolicy(input: Policy): Policy {
   const collaborators: Policy = {}
@@ -46,13 +39,13 @@ function sanitizePolicy(input: Policy): Policy {
     if (!/^[^\s@|]+@[^\s@|]+\.[^\s@|]+$/.test(normalized)) throw new HttpsError('invalid-argument', 'Invalid email.')
     collaborators[normalized] = {
       email: normalized,
-      role: value.role === 'editor' ? 'editor' : 'viewer',
+      role: validShareRole(value.role ?? 'viewer'),
       addedAt: value.addedAt ?? timestamp(),
     }
   }
   return {
     generalAccess: input.generalAccess === 'anyone_with_link' ? 'anyone_with_link' : 'restricted',
-    generalRole: input.generalRole === 'editor' ? 'editor' : 'viewer',
+    generalRole: validShareRole(input.generalRole ?? 'viewer'),
     collaborators,
     invitedEmails: Object.keys(collaborators),
   }
@@ -65,6 +58,7 @@ export function accessProjection(policy: Policy): Policy {
     projectId: policy.projectId ?? '',
     inheritProjectAccess: policy.inheritProjectAccess !== false,
     blocked: Boolean(policy.deletedAt || policy.pending),
+    ownerActive: !policy.deletedAt,
     publicRead: policy.generalAccess === 'anyone_with_link',
     publicWrite: policy.generalAccess === 'anyone_with_link' && policy.generalRole === 'editor',
     // Strings avoid invalid RTDB email keys; delimiters make membership exact.
@@ -94,6 +88,7 @@ async function mutatePolicy(
   patch: Policy,
   initial: Policy = {},
   actor?: { uid: string; email?: string },
+  expectedRevision?: number,
 ) {
   const db = getFirestore(),
     ref = db.doc(`${kind}Shares/${targetId}`)
@@ -104,12 +99,38 @@ async function mutatePolicy(
     if (actor && actor.uid !== ownerId && policyRole({ ...data, pending: false }, actor.uid, actor.email) !== 'editor')
       fail('Project editor access required.')
     if (data.deletedAt && !patch.deletedAt) fail('This item was deleted.')
+    const same = (left: unknown, right: unknown): boolean => {
+      if (left === right) return true
+      if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false
+      const a = Object.keys(left),
+        b = Object.keys(right)
+      return (
+        a.length === b.length &&
+        a.every((key) => Object.hasOwn(right, key) && same((left as Policy)[key], (right as Policy)[key]))
+      )
+    }
+    if (current.exists && !data.pending && Object.entries(patch).every(([key, value]) => same(data[key], value)))
+      return data
+    if (expectedRevision != null && (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0))
+      throw new HttpsError('invalid-argument', 'Invalid access revision.')
+    const justRegistered =
+      kind === 'board' &&
+      expectedRevision === 0 &&
+      data.accessRevision === 1 &&
+      data.generalAccess === 'restricted' &&
+      data.generalRole === 'viewer' &&
+      data.inheritProjectAccess !== false &&
+      !data.invitedEmails?.length &&
+      !Object.keys(data.collaborators ?? {}).length
+    if (expectedRevision != null && expectedRevision !== Number(data.accessRevision ?? 0) && !justRegistered)
+      throw new HttpsError('aborted', 'Sharing changed. Refresh permissions and retry.')
     const revision = Number(data.accessRevision ?? 0) + 1
     // Replace maps, never recursively merge omitted collaborators.
     const next = { ...data, ...patch, ownerId, accessRevision: revision, pending: true, updatedAt: timestamp() }
     tx.set(ref, next)
     return next
   })
+  if (!pendingPolicy.pending) return pendingPolicy
   await mirrorPolicy(kind, targetId, pendingPolicy)
   const committedPolicy = await db.runTransaction(async (tx) => {
     const current = await tx.get(ref)
@@ -119,6 +140,7 @@ async function mutatePolicy(
     return { ...current.data()!, pending: false }
   })
   await mirrorPolicy(kind, targetId, committedPolicy)
+  return committedPolicy
 }
 export const mirrorProjectAccess = onDocumentWritten(
   { document: 'projectShares/{projectId}', region: triggerRegion },
@@ -126,6 +148,11 @@ export const mirrorProjectAccess = onDocumentWritten(
     await mirrorCurrentPolicy('project', event.params.projectId)
   },
 )
+
+function policyMetadata(policy: Policy) {
+  const { scene: _scene, ...metadata } = policy
+  return metadata
+}
 
 export const manageProject = onCall({ region }, async (request) => {
   const uid = identity(request),
@@ -200,7 +227,7 @@ export const manageProject = onCall({ region }, async (request) => {
         await mirrorCurrentPolicy('board', board.id)
       }
     }
-    await mutatePolicy(
+    const committed = await mutatePolicy(
       'project',
       projectId,
       ownerId,
@@ -218,7 +245,9 @@ export const manageProject = onCall({ region }, async (request) => {
         invitedEmails: [],
       },
       { uid, email },
+      request.data.expectedRevision,
     )
+    if (action === 'share') return { ok: true, policy: policyMetadata(committed) }
     if (action === 'delete') await ref.update({ deletedAt: timestamp(), updatedAt: timestamp() })
   } else throw new HttpsError('invalid-argument', 'Unknown project action.')
   return { ok: true }
@@ -230,8 +259,10 @@ export const manageBoardAccess = onCall({ region }, async (request) => {
     db = getFirestore()
   const existing = await db.doc(`boardShares/${boardId}`).get()
   const projectId = id(existing.data()?.projectId ?? request.data?.projectId)
-  const parent = await db.doc(`users/${uid}/projects/${projectId}`).get()
-  const board = await db.doc(`users/${uid}/projects/${projectId}/boards/${boardId}`).get()
+  const [parent, board] = await Promise.all([
+    db.doc(`users/${uid}/projects/${projectId}`).get(),
+    db.doc(`users/${uid}/projects/${projectId}/boards/${boardId}`).get(),
+  ])
   if (
     !parent.exists ||
     parent.data()?.ownerId !== uid ||
@@ -242,6 +273,7 @@ export const manageBoardAccess = onCall({ region }, async (request) => {
     fail('Board owner access required.')
   }
   const action = request.data.action
+  if (action === 'capabilities') return { presentationSharing: true }
   const patch =
     action === 'private'
       ? { ...sanitizePolicy({}), inheritProjectAccess: false }
@@ -256,7 +288,7 @@ export const manageBoardAccess = onCall({ region }, async (request) => {
             ? { deletedAt: timestamp() }
             : null
   if (!patch) throw new HttpsError('invalid-argument', 'Unknown board action.')
-  await mutatePolicy(
+  const committed = await mutatePolicy(
     'board',
     boardId,
     uid,
@@ -276,9 +308,11 @@ export const manageBoardAccess = onCall({ region }, async (request) => {
       scene: board.data()!.scene,
       createdAt: board.data()!.createdAt,
     },
+    undefined,
+    request.data.expectedRevision,
   )
   if (action === 'delete') await board.ref.update({ active: false, updatedAt: timestamp() })
-  return { ok: true }
+  return { ok: true, policy: policyMetadata(committed) }
 })
 
 export const listSharedProjects = onCall({ region }, async (request) => {
@@ -379,6 +413,7 @@ export const listSharedProjects = onCall({ region }, async (request) => {
               collaborators: policy.collaborators ?? {},
               invitedEmails: policy.invitedEmails ?? [],
               ownerEmail: policy.ownerEmail ?? '',
+              accessRevision: policy.accessRevision ?? 0,
             },
           }
         : {}),
@@ -404,12 +439,7 @@ export const listSharedProjects = onCall({ region }, async (request) => {
         nextSyncAt: null,
         lastSyncError: null,
         inheritProjectAccess: config.inheritProjectAccess !== false,
-        role:
-          directRole === 'editor' || directRole === 'owner'
-            ? directRole
-            : config.inheritProjectAccess !== false
-              ? role
-              : directRole,
+        role: strongestRole(directRole, config.inheritProjectAccess !== false ? role : null),
       })
     }
   }
@@ -530,6 +560,7 @@ export const publishProjectBoard = onDocumentWritten(
     await db.runTransaction(async (tx) => {
       const board = await tx.get(privateRef),
         project = await tx.get(db.doc(`projectShares/${projectId}`)),
+        privateProject = await tx.get(db.doc(`users/${ownerId}/projects/${projectId}`)),
         existing = await tx.get(policyRef)
       if (!board.exists) return
       const data = board.data()!
@@ -546,9 +577,9 @@ export const publishProjectBoard = onDocumentWritten(
         return
       }
       if (
-        !project.exists ||
-        project.data()?.ownerId !== ownerId ||
-        !policyRole(project.data(), ownerId) ||
+        !privateProject.exists ||
+        privateProject.data()?.deletedAt ||
+        (project.exists && (project.data()?.ownerId !== ownerId || project.data()?.deletedAt)) ||
         data.active === false
       )
         return

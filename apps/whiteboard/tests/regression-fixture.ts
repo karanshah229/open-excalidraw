@@ -1,5 +1,5 @@
 import { createUserWithEmailAndPassword, signInAnonymously, type Auth } from 'firebase/auth'
-import { doc, getDoc } from 'firebase/firestore'
+import { doc, getDoc, getDocFromServer } from 'firebase/firestore'
 import { getFirebaseAuth, getFirebaseApp, getFirestoreDb } from '../src/lib/firebase'
 import { sharingService, type BoardShareConfig } from '../src/features/sharing/sharing-service'
 import { workspaceApi } from '../src/features/workspace/workspace-api'
@@ -76,4 +76,10 @@ export async function signInGuest() {
   if (auth.currentUser && !auth.currentUser.isAnonymous)
     throw new Error('Guest fixture must use an isolated browser context.')
   if (!auth.currentUser) await signInAnonymously(auth)
+}
+
+/** Read the authoritative policy through the same Firebase module as the app. */
+export async function readBoardSharePolicy(boardId: string) {
+  requireDemoEmulators()
+  return (await getDocFromServer(doc(getFirestoreDb()!, 'boardShares', boardId))).data()
 }

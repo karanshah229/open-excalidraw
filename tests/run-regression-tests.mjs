@@ -7,6 +7,8 @@ import { resolve } from 'node:path'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const all = [
+  'sharing-flow-audit.test.mjs',
+  'presentation-access.test.mjs',
   'slides-shared.test.mjs',
   'board-behavior-contract.test.mjs',
   'e2e-collab-suite.mjs',
@@ -31,7 +33,8 @@ const all = [
 ]
 const filter = process.argv.find((arg) => arg.startsWith('--test='))?.slice(7)
 const files = process.env.E2E_REGRESSION_FILES ? JSON.parse(process.env.E2E_REGRESSION_FILES) : filter ? [filter] : all
-if (!files.length || files.some((name) => !all.includes(name))) throw new Error('Unknown regression suite')
+if (!files.length || files.some((name) => !all.includes(name) && name !== 'sharing-flow-audit.test.mjs'))
+  throw new Error('Unknown regression suite')
 const run = (command, args, env = process.env) =>
   new Promise((resolveRun, reject) => {
     const child = spawn(command, args, { cwd: root, env, stdio: 'inherit' })

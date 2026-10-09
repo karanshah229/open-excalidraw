@@ -1,11 +1,11 @@
-import { useMemo, useRef, useState } from 'react'
+import { useMemo, useState } from 'react'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import * as Dialog from '@radix-ui/react-dialog'
 import { MoreVertical } from 'lucide-react'
 import { projectService, type VisibleProject } from '../sharing/project-service'
-import { sharingService, type BoardShareConfig } from '../sharing/sharing-service'
+import { type BoardShareConfig } from '../sharing/sharing-service'
 import { ShareModal } from '../../components/share-modal'
-import { workspaceApi, workspaceStore } from './workspace-api'
+import { workspaceApi } from './workspace-api'
 
 export type ProjectAction = 'share' | 'rename' | 'download' | 'archive' | 'delete'
 export function ProjectMenu({
@@ -52,12 +52,11 @@ export function ProjectActionModal({
   project: VisibleProject
   action: Exclude<ProjectAction, 'download' | 'archive'>
   onClose: () => void
-  onComplete: (patch?: Partial<VisibleProject>) => void
+  onComplete: (patch?: Partial<VisibleProject>, refresh?: boolean) => void
 }) {
   const [name, setName] = useState(project.name)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const prepared = useRef(false)
   const initialConfig = useMemo<BoardShareConfig | undefined>(
     () =>
       project.sharePolicy
@@ -86,38 +85,14 @@ export function ProjectActionModal({
         resourceType="project"
         initialConfig={initialConfig}
         shareUrl={`${location.origin}/?projectId=${project.id}`}
-        onShareConfigSaved={() => onComplete()}
         onSaveConfig={async (config) => {
-          if (!prepared.current) {
-            const boards =
-              project.isShared && project.role === 'editor' ? [] : await workspaceStore.listBoards(project.id)
-            const candidates = await Promise.all(
-              boards.map(async (board) => {
-                const cached = sharingService.cachedShareConfig(board.id)
-                if (cached?.accessRevision && cached.projectId === project.id) return null
-                const policy = await sharingService.getShareConfig(board.id, {
-                  boardName: board.name,
-                  ownerId: project.ownerId,
-                })
-                return !policy.accessRevision || policy.projectId !== project.id
-                  ? { ...policy, projectId: project.id }
-                  : null
-              }),
-            )
-            const unpublished = candidates.filter((policy) => policy !== null)
-            if (unpublished.length) {
-              await workspaceApi.flushCloud()
-              // Bound first-publication work without serializing every board round trip.
-              for (let offset = 0; offset < unpublished.length; offset += 8)
-                await Promise.all(
-                  unpublished
-                    .slice(offset, offset + 8)
-                    .map((policy) => sharingService.saveShareConfig(policy, { workspaceFlushed: true })),
-                )
-            }
-            prepared.current = true
-          }
-          await projectService.manage(project.id, 'share', { policy: config })
+          const result = await projectService.manage(project.id, 'share', {
+            policy: config,
+            expectedRevision: config.accessRevision ?? 0,
+          })
+          const committed = { ...config, ...result.policy }
+          onComplete({ id: project.id, sharePolicy: committed }, false)
+          return committed
         }}
       />
     )

@@ -85,10 +85,44 @@ try {
   page.off('request', failChunkOnce)
   assert.equal(await page.evaluate(() => !!window.__excalidrawAPI), false, 'Running production bundle')
   await page.waitForFunction(() => document.body.textContent.includes('Slide 1'))
+  const toolbarPosition = await page.$eval('.shapes-section', (node) => node.getBoundingClientRect().x)
   if (!(await page.$('.slides-panel'))) await page.click('.slides-toggle')
+  assert.equal(
+    await page.$eval('.shapes-section', (node) => node.getBoundingClientRect().x),
+    toolbarPosition,
+    'Production toolbar stays fixed on panel opening',
+  )
+  await page.click('.board-panel-rail [aria-label="Help"]')
+  await page.waitForSelector('.HelpDialog')
+  await page.waitForFunction(() => !!document.activeElement?.closest('.HelpDialog'))
+  await page.keyboard.press('Escape')
+  await page.waitForSelector('.HelpDialog', { hidden: true })
+
   await page.waitForSelector('.slide-card img')
+  assert.equal(await page.$('.sidebar--docked'), null, 'Production sidebar defaults to unpinned')
+  await page.click('[data-testid="sidebar-dock"]')
+  await page.waitForSelector('.sidebar--docked')
+
   await page.click('.slide-actions button:last-child')
   await page.waitForFunction(() => document.querySelector('#slide-notes-input')?.value === 'Production private notes')
+  await page.setViewport({ width: 540, height: 900 })
+  await page.waitForSelector('.excalidraw--mobile')
+  await page.waitForSelector('.slide-card img')
+  assert.equal(await page.$$eval('.sidebar', (nodes) => nodes.length), 1, 'Production mobile resize keeps one sidebar')
+  await page.click('.board-panel-rail [aria-label="Library"]')
+  await page.waitForFunction(() => !document.querySelector('.slides-panel'))
+  assert.equal(await page.$$eval('.sidebar', (nodes) => nodes.length), 1)
+  await page.click('.slides-toggle')
+  await page.waitForFunction(() => document.querySelector('#slide-notes-input')?.value === 'Production private notes')
+  await page.setViewport({ width: 1400, height: 900 })
+  await page.waitForFunction(
+    () =>
+      !document.querySelector('.excalidraw-container.excalidraw--mobile') &&
+      !!document.querySelector('.sidebar--docked'),
+  )
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+  assert.equal(await page.$$eval('.sidebar', (nodes) => nodes.length), 1)
+
   for (const trigger of await page.$$('.App-toolbar__extra-tools-trigger')) {
     if ((await trigger.boundingBox())?.width) {
       await trigger.click()
@@ -134,6 +168,7 @@ try {
   await page.waitForSelector('.slides-panel, .slides-toggle')
   if (!(await page.$('.slides-panel'))) await page.click('.slides-toggle')
   await page.waitForFunction(() => document.querySelectorAll('.slide-card').length === 2)
+  await page.waitForSelector('.sidebar--docked')
   assert.deepEqual(await page.$$eval('.slide-card > span', (nodes) => nodes.map((node) => node.textContent)), [
     'Slide 1',
     'Slide 2',

@@ -1,3 +1,5 @@
+import { policyRole, strongestRole } from './access-role.js';
+export { policyRole } from './access-role.js';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getDatabase } from 'firebase-admin/database';
 import { HttpsError, onCall } from 'firebase-functions/v2/https';
@@ -20,20 +22,13 @@ function identity(request) {
     }
     return request.auth.uid;
 }
-export function policyRole(policy, uid, email) {
-    if (!policy || policy.deletedAt || policy.pending)
-        return null;
-    if (uid && policy.ownerId === uid)
-        return 'owner';
-    const direct = email && policy.invitedEmails?.includes(email) ? (policy.collaborators?.[email]?.role ?? 'viewer') : null;
-    if (direct === 'editor' || (policy.generalAccess === 'anyone_with_link' && policy.generalRole === 'editor'))
-        return 'editor';
-    if (direct || policy.generalAccess === 'anyone_with_link')
-        return 'viewer';
-    return null;
-}
 function verifiedEmail(request) {
     return request.auth?.token.email_verified === true ? String(request.auth.token.email ?? '').toLowerCase() : undefined;
+}
+function validShareRole(role) {
+    if (!['viewer', 'editor', 'presentation'].includes(String(role)))
+        throw new HttpsError('invalid-argument', 'Unknown sharing role.');
+    return role;
 }
 function sanitizePolicy(input) {
     const collaborators = {};
@@ -43,13 +38,13 @@ function sanitizePolicy(input) {
             throw new HttpsError('invalid-argument', 'Invalid email.');
         collaborators[normalized] = {
             email: normalized,
-            role: value.role === 'editor' ? 'editor' : 'viewer',
+            role: validShareRole(value.role ?? 'viewer'),
             addedAt: value.addedAt ?? timestamp(),
         };
     }
     return {
         generalAccess: input.generalAccess === 'anyone_with_link' ? 'anyone_with_link' : 'restricted',
-        generalRole: input.generalRole === 'editor' ? 'editor' : 'viewer',
+        generalRole: validShareRole(input.generalRole ?? 'viewer'),
         collaborators,
         invitedEmails: Object.keys(collaborators),
     };
@@ -62,6 +57,7 @@ export function accessProjection(policy) {
         projectId: policy.projectId ?? '',
         inheritProjectAccess: policy.inheritProjectAccess !== false,
         blocked: Boolean(policy.deletedAt || policy.pending),
+        ownerActive: !policy.deletedAt,
         publicRead: policy.generalAccess === 'anyone_with_link',
         publicWrite: policy.generalAccess === 'anyone_with_link' && policy.generalRole === 'editor',
         // Strings avoid invalid RTDB email keys; delimiters make membership exact.
@@ -87,7 +83,7 @@ export async function mirrorCurrentPolicy(kind, targetId) {
     if (snapshot.exists)
         await mirrorPolicy(kind, targetId, snapshot.data());
 }
-async function mutatePolicy(kind, targetId, ownerId, patch, initial = {}, actor) {
+async function mutatePolicy(kind, targetId, ownerId, patch, initial = {}, actor, expectedRevision) {
     const db = getFirestore(), ref = db.doc(`${kind}Shares/${targetId}`);
     const pendingPolicy = await db.runTransaction(async (tx) => {
         const current = await tx.get(ref), data = current.data() ?? initial;
@@ -97,12 +93,37 @@ async function mutatePolicy(kind, targetId, ownerId, patch, initial = {}, actor)
             fail('Project editor access required.');
         if (data.deletedAt && !patch.deletedAt)
             fail('This item was deleted.');
+        const same = (left, right) => {
+            if (left === right)
+                return true;
+            if (!left || !right || typeof left !== 'object' || typeof right !== 'object')
+                return false;
+            const a = Object.keys(left), b = Object.keys(right);
+            return (a.length === b.length &&
+                a.every((key) => Object.hasOwn(right, key) && same(left[key], right[key])));
+        };
+        if (current.exists && !data.pending && Object.entries(patch).every(([key, value]) => same(data[key], value)))
+            return data;
+        if (expectedRevision != null && (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0))
+            throw new HttpsError('invalid-argument', 'Invalid access revision.');
+        const justRegistered = kind === 'board' &&
+            expectedRevision === 0 &&
+            data.accessRevision === 1 &&
+            data.generalAccess === 'restricted' &&
+            data.generalRole === 'viewer' &&
+            data.inheritProjectAccess !== false &&
+            !data.invitedEmails?.length &&
+            !Object.keys(data.collaborators ?? {}).length;
+        if (expectedRevision != null && expectedRevision !== Number(data.accessRevision ?? 0) && !justRegistered)
+            throw new HttpsError('aborted', 'Sharing changed. Refresh permissions and retry.');
         const revision = Number(data.accessRevision ?? 0) + 1;
         // Replace maps, never recursively merge omitted collaborators.
         const next = { ...data, ...patch, ownerId, accessRevision: revision, pending: true, updatedAt: timestamp() };
         tx.set(ref, next);
         return next;
     });
+    if (!pendingPolicy.pending)
+        return pendingPolicy;
     await mirrorPolicy(kind, targetId, pendingPolicy);
     const committedPolicy = await db.runTransaction(async (tx) => {
         const current = await tx.get(ref);
@@ -112,10 +133,15 @@ async function mutatePolicy(kind, targetId, ownerId, patch, initial = {}, actor)
         return { ...current.data(), pending: false };
     });
     await mirrorPolicy(kind, targetId, committedPolicy);
+    return committedPolicy;
 }
 export const mirrorProjectAccess = onDocumentWritten({ document: 'projectShares/{projectId}', region: triggerRegion }, async (event) => {
     await mirrorCurrentPolicy('project', event.params.projectId);
 });
+function policyMetadata(policy) {
+    const { scene: _scene, ...metadata } = policy;
+    return metadata;
+}
 export const manageProject = onCall({ region }, async (request) => {
     const uid = identity(request), projectId = id(request.data?.projectId), action = request.data?.action;
     const db = getFirestore();
@@ -193,7 +219,7 @@ export const manageProject = onCall({ region }, async (request) => {
                 await mirrorCurrentPolicy('board', board.id);
             }
         }
-        await mutatePolicy('project', projectId, ownerId, action === 'delete' ? { deletedAt: timestamp() } : sanitizePolicy(request.data.policy ?? {}), {
+        const committed = await mutatePolicy('project', projectId, ownerId, action === 'delete' ? { deletedAt: timestamp() } : sanitizePolicy(request.data.policy ?? {}), {
             projectId,
             name: project.name,
             ownerId,
@@ -204,7 +230,9 @@ export const manageProject = onCall({ region }, async (request) => {
             generalRole: 'viewer',
             collaborators: {},
             invitedEmails: [],
-        }, { uid, email });
+        }, { uid, email }, request.data.expectedRevision);
+        if (action === 'share')
+            return { ok: true, policy: policyMetadata(committed) };
         if (action === 'delete')
             await ref.update({ deletedAt: timestamp(), updatedAt: timestamp() });
     }
@@ -216,8 +244,10 @@ export const manageBoardAccess = onCall({ region }, async (request) => {
     const uid = identity(request), boardId = id(request.data?.boardId), db = getFirestore();
     const existing = await db.doc(`boardShares/${boardId}`).get();
     const projectId = id(existing.data()?.projectId ?? request.data?.projectId);
-    const parent = await db.doc(`users/${uid}/projects/${projectId}`).get();
-    const board = await db.doc(`users/${uid}/projects/${projectId}/boards/${boardId}`).get();
+    const [parent, board] = await Promise.all([
+        db.doc(`users/${uid}/projects/${projectId}`).get(),
+        db.doc(`users/${uid}/projects/${projectId}/boards/${boardId}`).get(),
+    ]);
     if (!parent.exists ||
         parent.data()?.ownerId !== uid ||
         parent.data()?.deletedAt ||
@@ -226,6 +256,8 @@ export const manageBoardAccess = onCall({ region }, async (request) => {
         fail('Board owner access required.');
     }
     const action = request.data.action;
+    if (action === 'capabilities')
+        return { presentationSharing: true };
     const patch = action === 'private'
         ? { ...sanitizePolicy({}), inheritProjectAccess: false }
         : action === 'inherit'
@@ -240,7 +272,7 @@ export const manageBoardAccess = onCall({ region }, async (request) => {
                     : null;
     if (!patch)
         throw new HttpsError('invalid-argument', 'Unknown board action.');
-    await mutatePolicy('board', boardId, uid, { ...patch, projectId }, {
+    const committed = await mutatePolicy('board', boardId, uid, { ...patch, projectId }, {
         boardId,
         projectId,
         boardName: board.data().name,
@@ -254,10 +286,10 @@ export const manageBoardAccess = onCall({ region }, async (request) => {
         inheritProjectAccess: true,
         scene: board.data().scene,
         createdAt: board.data().createdAt,
-    });
+    }, undefined, request.data.expectedRevision);
     if (action === 'delete')
         await board.ref.update({ active: false, updatedAt: timestamp() });
-    return { ok: true };
+    return { ok: true, policy: policyMetadata(committed) };
 });
 export const listSharedProjects = onCall({ region }, async (request) => {
     const db = getFirestore(), targetId = request.data?.projectId ? id(request.data.projectId) : undefined;
@@ -354,6 +386,7 @@ export const listSharedProjects = onCall({ region }, async (request) => {
                         collaborators: policy.collaborators ?? {},
                         invitedEmails: policy.invitedEmails ?? [],
                         ownerEmail: policy.ownerEmail ?? '',
+                        accessRevision: policy.accessRevision ?? 0,
                     },
                 }
                 : {}),
@@ -380,11 +413,7 @@ export const listSharedProjects = onCall({ region }, async (request) => {
                 nextSyncAt: null,
                 lastSyncError: null,
                 inheritProjectAccess: config.inheritProjectAccess !== false,
-                role: directRole === 'editor' || directRole === 'owner'
-                    ? directRole
-                    : config.inheritProjectAccess !== false
-                        ? role
-                        : directRole,
+                role: strongestRole(directRole, config.inheritProjectAccess !== false ? role : null),
             });
         }
     }
@@ -494,7 +523,7 @@ export const publishProjectBoard = onDocumentWritten({ document: 'users/{ownerId
     const db = getFirestore(), privateRef = db.doc(`users/${ownerId}/projects/${projectId}/boards/${boardId}`);
     const policyRef = db.doc(`boardShares/${boardId}`);
     await db.runTransaction(async (tx) => {
-        const board = await tx.get(privateRef), project = await tx.get(db.doc(`projectShares/${projectId}`)), existing = await tx.get(policyRef);
+        const board = await tx.get(privateRef), project = await tx.get(db.doc(`projectShares/${projectId}`)), privateProject = await tx.get(db.doc(`users/${ownerId}/projects/${projectId}`)), existing = await tx.get(policyRef);
         if (!board.exists)
             return;
         const data = board.data();
@@ -512,9 +541,9 @@ export const publishProjectBoard = onDocumentWritten({ document: 'users/{ownerId
                 tx.update(policyRef, { projectId });
             return;
         }
-        if (!project.exists ||
-            project.data()?.ownerId !== ownerId ||
-            !policyRole(project.data(), ownerId) ||
+        if (!privateProject.exists ||
+            privateProject.data()?.deletedAt ||
+            (project.exists && (project.data()?.ownerId !== ownerId || project.data()?.deletedAt)) ||
             data.active === false)
             return;
         tx.create(policyRef, {

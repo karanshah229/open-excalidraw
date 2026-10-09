@@ -1,7 +1,7 @@
 import { getFirestore } from 'firebase-admin/firestore'
 import { defineBoolean, defineString } from 'firebase-functions/params'
 import { HttpsError, onCall } from 'firebase-functions/v2/https'
-import { canAccessAsset, isAssetParentActive } from './asset-policy.js'
+import { canAccessAsset, canReadSpeakerNotes, isAssetParentActive } from './asset-policy.js'
 
 const region = defineString('SYNC_ACCESS_FUNCTION_REGION')
 const enforceAppCheck = defineBoolean('ASSET_ENFORCE_APP_CHECK', { default: true })
@@ -51,7 +51,9 @@ export const slideNotes = onCall({ region, enforceAppCheck: enforceAppCheck.valu
       await transaction.get(db.doc(`users/${ownerId}/projects/${resolvedProjectId}/boards/${boardId}`))
     ).data()
     const allowed = shared
-      ? canAccessAsset(shared, request.auth, true, parentPolicy)
+      ? operation === 'read'
+        ? canReadSpeakerNotes(shared, request.auth, parentPolicy)
+        : canAccessAsset(shared, request.auth, true, parentPolicy)
       : ownerId === uid && (!parentPolicy || canAccessAsset(parentPolicy, request.auth, true))
     if (!allowed || !isAssetParentActive(project) || !isAssetParentActive(board)) {
       throw new HttpsError('permission-denied', 'Board editor access required.')

@@ -1,3 +1,4 @@
+import { AppChromeProvider, useAppChrome } from './lib/app-chrome-context'
 import { Link, Outlet, useLocation } from '@tanstack/react-router'
 import { useLayoutEffect, useState } from 'react'
 import { PanelsTopLeft } from 'lucide-react'
@@ -13,7 +14,9 @@ export function AppShell() {
   return (
     <ThemeProvider>
       <AuthProvider>
-        <AuthenticatedApp />
+        <AppChromeProvider>
+          <AuthenticatedApp />
+        </AppChromeProvider>
       </AuthProvider>
     </ThemeProvider>
   )
@@ -28,12 +31,15 @@ function AuthenticatedApp() {
       return false
     }
   })
+  const { presentationActive } = useAppChrome()
   const location = useLocation()
   const isProject = location.pathname.startsWith('/projects')
+  const isPresentation = location.pathname.startsWith('/presentations/') || presentationActive
   const isBoard = location.pathname.startsWith('/boards')
   const showBrandName = !isBoard && !isProject
 
   useLayoutEffect(() => {
+    if (isPresentation) return
     if (!user || user.isAnonymous) {
       workspaceApi.deactivateCloudWorkspace()
       return
@@ -41,13 +47,14 @@ function AuthenticatedApp() {
     void workspaceApi
       .activateCloudWorkspace(user.uid)
       .catch((error) => console.error('Workspace activation failed:', error))
-  }, [user])
+  }, [user, isPresentation])
 
   if (isLoading) return <WorkspaceLoading />
   if (
     (!user || user.isAnonymous) &&
     !localWorkspace &&
     !isBoard &&
+    !isPresentation &&
     !(location.pathname === '/' && new URLSearchParams(location.searchStr).has('projectId'))
   )
     return (
@@ -61,27 +68,29 @@ function AuthenticatedApp() {
 
   return (
     <UserProvider>
-      <header className="app-header">
-        <div className="app-header-left">
-          <Link to="/" className="brand-logo" title="OpenExcalidraw" aria-label="OpenExcalidraw">
-            <span className="brand-icon">
-              <PanelsTopLeft size={16} />
-            </span>
-            {showBrandName && <span className="brand-name">OpenExcalidraw</span>}
-          </Link>
-          <div id="header-nav-slot" />
-        </div>
-        <div className="app-header-right">
-          <div id="header-status-slot" />
-          {user && !user.isAnonymous ? (
-            <UserDropdown />
-          ) : (
-            <button type="button" className="header-share-btn" onClick={signInWithGoogle} title="Sign in with Google">
-              Sign in
-            </button>
-          )}
-        </div>
-      </header>
+      {!isPresentation && (
+        <header className="app-header">
+          <div className="app-header-left">
+            <Link to="/" className="brand-logo" title="OpenExcalidraw" aria-label="OpenExcalidraw">
+              <span className="brand-icon">
+                <PanelsTopLeft size={16} />
+              </span>
+              {showBrandName && <span className="brand-name">OpenExcalidraw</span>}
+            </Link>
+            <div id="header-nav-slot" />
+          </div>
+          <div className="app-header-right">
+            <div id="header-status-slot" />
+            {user && !user.isAnonymous ? (
+              <UserDropdown />
+            ) : (
+              <button type="button" className="header-share-btn" onClick={signInWithGoogle} title="Sign in with Google">
+                Sign in
+              </button>
+            )}
+          </div>
+        </header>
+      )}
       <Outlet />
     </UserProvider>
   )

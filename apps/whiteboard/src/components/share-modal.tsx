@@ -6,11 +6,12 @@ import { Check, ChevronDown, Globe, HelpCircle, Link2, Lock, Plus, Trash2, User 
 import { sharingService, type BoardShareConfig, type ShareAccessLevel } from '../features/sharing/sharing-service'
 import { useAuth } from '../lib/auth-context'
 import { useUser } from '../lib/user-context'
+import { projectService } from '../features/sharing/project-service'
 import type { BoardScene } from '@agentic-whiteboard/storage'
 
 export interface ShareModalProps {
   initialConfig?: BoardShareConfig
-  onSaveConfig?: (config: BoardShareConfig) => Promise<void>
+  onSaveConfig?: (config: BoardShareConfig) => Promise<BoardShareConfig | void>
   shareUrl?: string
   resourceType?: 'board' | 'project'
   open: boolean
@@ -61,6 +62,7 @@ export function ShareModal({
   const [emailInput, setEmailInput] = useState('')
   const [emailError, setEmailError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
+  const [faqOpen, setFaqOpen] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [saveError, setSaveError] = useState('')
   const [isLoading, setIsLoading] = useState(!initialConfig && !sharingService.cachedShareConfig(boardId))
@@ -73,7 +75,9 @@ export function ShareModal({
     if (!open) return
     const known = initialConfig ?? (resourceType === 'board' ? sharingService.cachedShareConfig(boardId) : undefined)
     if (known) {
-      setShareConfig(known)
+      setShareConfig((previous) =>
+        previous && (previous.accessRevision ?? -1) > (known.accessRevision ?? -1) ? previous : known,
+      )
       setIsLoading(false)
       return
     }
@@ -162,10 +166,7 @@ export function ShareModal({
   const displayAccess =
     parentPolicy?.generalAccess === 'anyone_with_link' ? 'anyone_with_link' : effectiveConfig.generalAccess
   const displayRole =
-    (parentPolicy?.generalAccess === 'anyone_with_link' && parentPolicy.generalRole === 'editor') ||
-    (effectiveConfig.generalAccess === 'anyone_with_link' && effectiveConfig.generalRole === 'editor')
-      ? 'editor'
-      : 'viewer'
+    parentPolicy?.generalAccess === 'anyone_with_link' ? parentPolicy.generalRole : effectiveConfig.generalRole
   // An explicit board edit replaces inherited grants; never copy project invitees into board invitations.
   const boardOverride: Partial<BoardShareConfig> =
     resourceType === 'board' && effectiveConfig.projectId
@@ -181,11 +182,26 @@ export function ShareModal({
     setIsSaving(true)
     setSaveError('')
     try {
-      if (onSaveConfig) await onSaveConfig(config)
-      else await sharingService.saveShareConfig(config)
+      const committed = onSaveConfig ? await onSaveConfig(config) : await sharingService.saveShareConfig(config)
+      if (committed) setShareConfig(committed)
       needsSave.current = false
     } catch (error) {
       setShareConfig(effectiveConfig)
+      if ((error as { code?: string })?.code === 'functions/aborted') {
+        needsSave.current = false
+        try {
+          if (resourceType === 'board') setShareConfig(await sharingService.getShareConfig(boardId))
+          else {
+            const latest = await projectService.list(boardId, true)
+            const policy =
+              latest.ownedPolicies?.projects.find((policy) => policy.projectId === boardId) ??
+              latest.projects.find((project) => project.id === boardId)?.sharePolicy
+            if (policy) setShareConfig({ ...effectiveConfig, ...policy })
+          }
+        } catch {
+          /* Keep the conflict visible if refreshing also fails. */
+        }
+      }
       setSaveError(error instanceof Error ? error.message : 'Sharing could not be saved.')
       throw error
     } finally {
@@ -210,9 +226,9 @@ export function ShareModal({
     }
   }
 
-  const handleGeneralRoleChange = async (nextRole: 'viewer' | 'editor') => {
+  const handleGeneralRoleChange = async (nextRole: 'viewer' | 'editor' | 'presentation') => {
     if (!inheritsProject && effectiveConfig.generalRole === nextRole) return
-    const updated: BoardShareConfig = {
+    const updated = {
       ...effectiveConfig,
       ...boardOverride,
       generalRole: nextRole,
@@ -222,12 +238,12 @@ export function ShareModal({
     try {
       await persistShare(updated)
       onShareConfigSaved?.()
-    } catch (err) {
-      console.error('Failed to update general role:', err)
+    } catch (error) {
+      console.error('Failed to update general role:', error)
     }
   }
 
-  const handleCollaboratorRoleChange = async (email: string, role: 'viewer' | 'editor') => {
+  const handleCollaboratorRoleChange = async (email: string, role: 'viewer' | 'editor' | 'presentation') => {
     const normalized = email.toLowerCase()
     const existing = effectiveConfig.collaborators[normalized]
     if (!existing || existing.role === role) return
@@ -333,6 +349,7 @@ export function ShareModal({
       if (copyTimeoutRef.current) window.clearTimeout(copyTimeoutRef.current)
       copyTimeoutRef.current = window.setTimeout(() => setCopied(false), 2500)
     } catch (err) {
+      setSaveError('The link could not be copied. Keep this window active and try again.')
       console.error('Failed to copy link:', err)
     }
   }
@@ -362,10 +379,18 @@ export function ShareModal({
   const controlsDisabled = isSaving || isLoading || !shareConfig
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+    <Dialog.Root
+      open={open}
+      onOpenChange={(next) => {
+        if (!isSaving) onOpenChange(next)
+      }}
+    >
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay animate-fade-in" />
         <Dialog.Content
+          onEscapeKeyDown={(event) => {
+            if (faqOpen) event.preventDefault()
+          }}
           className="dialog-content google-share-dialog animate-scale-in"
           aria-describedby="share-description"
         >
@@ -380,7 +405,7 @@ export function ShareModal({
 
             <div className="google-share-header-actions">
               {/* FAQ / Help popover */}
-              <Popover.Root>
+              <Popover.Root open={faqOpen} onOpenChange={setFaqOpen}>
                 <Popover.Trigger asChild>
                   <button
                     type="button"
@@ -392,7 +417,12 @@ export function ShareModal({
                   </button>
                 </Popover.Trigger>
                 <Popover.Portal>
-                  <Popover.Content className="google-share-popover-info" sideOffset={6} align="end">
+                  <Popover.Content
+                    className="google-share-popover-info"
+                    sideOffset={6}
+                    align="end"
+                    onEscapeKeyDown={(event) => event.stopPropagation()}
+                  >
                     <p className="google-share-popover-title">Sharing options</p>
                     <div className="google-share-faq-item">
                       <strong>Restricted</strong>
@@ -401,6 +431,10 @@ export function ShareModal({
                     <div className="google-share-faq-item">
                       <strong>Anyone with the link</strong>
                       <p>Anyone with the link can access without logging in.</p>
+                    </div>
+                    <div className="google-share-faq-item">
+                      <strong>Present</strong>
+                      <p>Opens the presentation start screen with speaker notes. Board changes appear automatically.</p>
                     </div>
                     <div className="google-share-faq-item">
                       <strong>Viewer vs Editor</strong>
@@ -417,7 +451,7 @@ export function ShareModal({
 
           {saveError && <p role="alert">{saveError}</p>}
 
-          <fieldset disabled={controlsDisabled} style={{ border: 0, padding: 0, margin: 0 }}>
+          <fieldset disabled={controlsDisabled} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
             {resourceType === 'board' && effectiveConfig.projectId && (
               <div className="board-sharing-source">
                 <p>
@@ -526,7 +560,9 @@ export function ShareModal({
                       <div className="google-share-user-email">Via project</div>
                     </div>
                     <div className="google-share-role-col">
-                      <span className="google-share-owner-badge">{collab.role === 'editor' ? 'Editor' : 'Viewer'}</span>
+                      <span className="google-share-owner-badge">
+                        {collab.role === 'editor' ? 'Editor' : collab.role === 'presentation' ? 'Present' : 'Viewer'}
+                      </span>
                     </div>
                   </div>
                 ))}
@@ -547,7 +583,13 @@ export function ShareModal({
                       <DropdownMenu.Root modal={false}>
                         <DropdownMenu.Trigger asChild>
                           <button type="button" className="google-share-role-trigger" aria-label="Change permission">
-                            <span>{collab.role === 'editor' ? 'Editor' : 'Viewer'}</span>
+                            <span>
+                              {collab.role === 'editor'
+                                ? 'Editor'
+                                : collab.role === 'presentation'
+                                  ? 'Present'
+                                  : 'Viewer'}
+                            </span>
                             <ChevronDown size={14} />
                           </button>
                         </DropdownMenu.Trigger>
@@ -576,6 +618,18 @@ export function ShareModal({
                                 <span className="google-share-empty-check" />
                               )}
                               <span>Editor</span>
+                            </DropdownMenu.Item>
+                            <DropdownMenu.Item
+                              disabled={controlsDisabled}
+                              className={`google-share-dropdown-item ${collab.role === 'presentation' ? 'selected' : ''}`}
+                              onSelect={() => handleCollaboratorRoleChange(collab.email, 'presentation')}
+                            >
+                              {collab.role === 'presentation' ? (
+                                <Check size={16} className="google-share-check-icon" />
+                              ) : (
+                                <span className="google-share-empty-check" />
+                              )}
+                              <span>Present</span>
                             </DropdownMenu.Item>
                             <DropdownMenu.Separator className="google-share-dropdown-separator" />
                             <DropdownMenu.Item
@@ -658,7 +712,9 @@ export function ShareModal({
                     {displayAccess === 'anyone_with_link'
                       ? displayRole === 'editor'
                         ? 'Anyone on the internet with the link can edit'
-                        : 'Anyone on the internet with the link can view'
+                        : displayRole === 'presentation'
+                          ? 'Anyone with the link can present this board and read speaker notes.'
+                          : 'Anyone on the internet with the link can view'
                       : 'Only people with access can open with the link'}
                   </p>
                 </div>
@@ -668,7 +724,13 @@ export function ShareModal({
                     <DropdownMenu.Root modal={false}>
                       <DropdownMenu.Trigger asChild>
                         <button type="button" className="google-share-role-trigger" aria-label="General access role">
-                          <span>{displayRole === 'editor' ? 'Editor' : 'Viewer'}</span>
+                          <span>
+                            {displayRole === 'presentation'
+                              ? 'Present'
+                              : displayRole === 'editor'
+                                ? 'Editor'
+                                : 'Viewer'}
+                          </span>
                           <ChevronDown size={14} />
                         </button>
                       </DropdownMenu.Trigger>
@@ -698,6 +760,20 @@ export function ShareModal({
                             )}
                             <span>Editor</span>
                           </DropdownMenu.Item>
+                          {
+                            <DropdownMenu.Item
+                              disabled={controlsDisabled}
+                              className={`google-share-dropdown-item ${displayRole === 'presentation' ? 'selected' : ''}`}
+                              onSelect={() => handleGeneralRoleChange('presentation')}
+                            >
+                              {displayRole === 'presentation' ? (
+                                <Check size={16} className="google-share-check-icon" />
+                              ) : (
+                                <span className="google-share-empty-check" />
+                              )}
+                              <span>Present</span>
+                            </DropdownMenu.Item>
+                          }
                         </DropdownMenu.Content>
                       </DropdownMenu.Portal>
                     </DropdownMenu.Root>
@@ -712,9 +788,10 @@ export function ShareModal({
               type="button"
               className={`google-share-copy-btn ${copied ? 'copied' : ''}`}
               onClick={handleCopyLink}
+              disabled={controlsDisabled}
             >
               {copied ? <Check size={16} /> : <Link2 size={16} />}
-              <span>{copied ? 'Link copied' : 'Copy link'}</span>
+              <span>{copied ? 'Link copied' : 'Copy Link'}</span>
             </button>
 
             <button type="button" className="google-share-done-btn" onClick={handleDone} disabled={controlsDisabled}>

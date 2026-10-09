@@ -4,6 +4,7 @@ import type { BoardDocument, Project } from '@agentic-whiteboard/storage'
 import type { BoardShareConfig, ShareAccessLevel, ShareRole } from './sharing-service'
 
 export type ProjectPolicy = {
+  accessRevision?: number
   generalAccess: ShareAccessLevel
   generalRole: ShareRole
   collaborators: Record<string, { email: string; role: ShareRole; addedAt: string }>
@@ -39,13 +40,19 @@ export async function projectCall<T>(name: string, data: Record<string, unknown>
 }
 export const projectService = {
   manage: (projectId: string, action: 'share' | 'rename' | 'delete' | 'repair', extra: Record<string, unknown> = {}) =>
-    projectCall('manageProject', { projectId, action, ...extra }),
+    projectCall<{ ok: boolean; policy?: ProjectPolicy }>('manageProject', { projectId, action, ...extra }),
   boardAccess: (
     boardId: string,
     projectId: string,
     action: 'share' | 'private' | 'inherit' | 'delete',
-    policy?: ProjectPolicy,
-  ) => projectCall('manageBoardAccess', { boardId, projectId, action, ...(policy ? { policy } : {}) }),
+    policy?: Omit<ProjectPolicy, 'generalRole'> & { generalRole: BoardShareConfig['generalRole'] },
+  ) =>
+    projectCall<{ ok: boolean; policy: BoardShareConfig }>('manageBoardAccess', {
+      boardId,
+      projectId,
+      action,
+      ...(policy ? { policy, expectedRevision: policy.accessRevision ?? 0 } : {}),
+    }),
   list: (projectId?: string, includeOwnedPolicies = false, includeDirectBoards = false) =>
     projectCall<{
       projects: VisibleProject[]

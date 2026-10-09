@@ -40,6 +40,7 @@ if (imageCloud) {
     throw new Error('Cloud image tests require local demo-image-persistence emulators.')
   await run('images-cloud-persistence', process.execPath, ['tests/image-persistence.test.mjs', '--cloud'])
   await run('images-cloud-formats', process.execPath, ['tests/image-formats.test.mjs', '--cloud'])
+  await run('presentation-access', process.execPath, ['tests/presentation-access.test.mjs'])
   await run('slide-notes-access', process.execPath, ['tests/slide-notes-access.test.mjs'])
   await run('deleted-project-sync', process.execPath, ['tests/deleted-project-sync.test.mjs'])
 } else {
