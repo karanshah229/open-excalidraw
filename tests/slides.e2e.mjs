@@ -90,6 +90,9 @@ try {
   const rectangle = await page.evaluate(() => window.__excalidrawAPI.getSceneElements()[0])
   await tool('slide')
   await draw(300, 210, 560, 420)
+  await page.waitForSelector('.slides-toggle')
+  assert.equal(await page.$('.slides-panel'), null, 'Discovering slides does not automatically open the panel')
+  await page.click('.slides-toggle')
   await page.waitForSelector('.slide-card')
   assert.equal(await page.$('[aria-label="Fullscreen slides"]'), null, 'Only Present is exposed on the board')
   assert.equal(await page.$('.slides-panel header strong'), null, 'Expanded header has no duplicate title/count')
@@ -514,7 +517,9 @@ try {
   await page.waitForFunction(
     () => window.__excalidrawAPI?.getSceneElements().filter((e) => e.customData?.agenticWhiteboard?.slide).length === 2,
   )
-  if (!(await page.$('.slides-panel'))) await page.click('.slides-toggle')
+  await page.waitForSelector('.slides-toggle')
+  assert.equal(await page.$('.slides-panel'), null, 'Reloading a board with slides keeps the panel closed')
+  await page.click('.slides-toggle')
   await page.waitForSelector('.slide-actions')
   await page.click('.slide-actions button:last-child')
   await page.waitForFunction(

@@ -90,7 +90,6 @@ export function SlidesPanel({
   const active = slides.find((slide) => slide.id === activeId) ?? slides[0]
   const position = active ? slides.indexOf(active) : -1
   useEffect(() => {
-    if (slides.length && !previous.current.length && !api?.getAppState().openSidebar) setOpen(true)
     const prior = previous.current
     setActiveId((id) => activeSlideAfterChange(prior, slides, id))
     previous.current = slides

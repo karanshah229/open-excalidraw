@@ -5,6 +5,7 @@ const require = createRequire(new URL('../apps/whiteboard/package.json', import.
 const { createServer } = await import(require.resolve('vite'))
 const server = await createServer({
   root: fileURLToPath(new URL('../apps/whiteboard', import.meta.url)),
+  mode: 'e2e',
   server: { host: '127.0.0.1', port: 5189, strictPort: true },
 })
 try {
