@@ -7,7 +7,7 @@ const require = createRequire(new URL('../apps/whiteboard/package.json', import.
 const { createServer, preview } = await import(require.resolve('vite'))
 const root = fileURLToPath(new URL('../apps/whiteboard', import.meta.url)),
   port = 5198
-let server = await createServer({ root, server: { host: '127.0.0.1', port, strictPort: true } })
+let server = await createServer({ root, mode: 'e2e', server: { host: '127.0.0.1', port, strictPort: true } })
 await server.listen()
 const browser = await puppeteer.launch({
   executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
@@ -68,8 +68,21 @@ try {
   await server.close()
   const production = await preview({ root, preview: { host: '127.0.0.1', port, strictPort: true } })
   server = { close: () => new Promise((resolve) => production.httpServer.close(resolve)) }
+  // A stale deployment chunk must reload once and recover the persisted board.
+  await page.setRequestInterception(true)
+  let failedChunks = 0
+  const failChunkOnce = async (request) => {
+    if (/\/assets\/board-editor-[^/]+\.js/.test(request.url()) && failedChunks === 0) {
+      failedChunks++
+      await request.respond({ status: 404, contentType: 'text/html', body: '<!doctype html>Missing chunk' })
+    } else await request.continue()
+  }
+  page.on('request', failChunkOnce)
   await page.goto(`${base}/boards/${boardId}`)
   await page.waitForSelector('.slides-panel, .slides-toggle')
+  assert.equal(failedChunks, 1, 'Production recovery exercises a real missing editor chunk')
+  await page.setRequestInterception(false)
+  page.off('request', failChunkOnce)
   assert.equal(await page.evaluate(() => !!window.__excalidrawAPI), false, 'Running production bundle')
   await page.waitForFunction(() => document.body.textContent.includes('Slide 1'))
   if (!(await page.$('.slides-panel'))) await page.click('.slides-toggle')
@@ -125,9 +138,39 @@ try {
     'Slide 1',
     'Slide 2',
   ])
+  let activeEditorReloads = 0
+  const countEditorReloads = (frame) => {
+    if (frame === page.mainFrame()) activeEditorReloads++
+  }
+  page.on('framenavigated', countEditorReloads)
+  await page.evaluate(() => window.dispatchEvent(new Event('vite:preloadError')))
+  await new Promise((resolve) => setTimeout(resolve, 500))
+  assert.equal(activeEditorReloads, 0, 'Chunk recovery never auto-reloads an active drawing')
+  page.off('framenavigated', countEditorReloads)
+  // A persistent failure must stop after one automatic reload and offer Retry.
+  await page.evaluate(() => sessionStorage.removeItem('agentic-whiteboard:chunk-recovery'))
+  await page.setRequestInterception(true)
+  let persistentFailures = 0
+  const alwaysFailChunk = async (request) => {
+    if (/\/assets\/board-editor-[^/]+\.js/.test(request.url())) {
+      persistentFailures++
+      await request.respond({ status: 404, contentType: 'text/html', body: '<!doctype html>Missing chunk' })
+    } else await request.continue()
+  }
+  page.on('request', alwaysFailChunk)
+  await page.reload()
+  await page.waitForSelector('.access-denied-card [role="alert"], .access-denied-card button')
+  assert.equal(await page.$eval('.access-denied-title', (node) => node.textContent), 'Could not load this page')
+  await new Promise((resolve) => setTimeout(resolve, 500))
+  assert.equal(persistentFailures, 2, 'Persistent failure reloads only once')
+  await page.setRequestInterception(false)
+  page.off('request', alwaysFailChunk)
+  await page.click('.access-denied-card button')
+  await page.waitForSelector('.slide-card')
+  assert.equal(await page.$$eval('.slide-card', (nodes) => nodes.length), 2, 'Manual reload preserves saved slides')
   assert.deepEqual(errors, [])
   console.log(
-    'PASS production bundle: Slide toolbar/creation, numbering, thumbnails, private local notes, windowed Presenter view, Escape exit and reload',
+    'PASS production bundle: Slide toolbar/creation, numbering, thumbnails, private local notes, windowed Presenter view, Escape exit, persisted reload, missing-chunk recovery, loop prevention and active-editor protection',
   )
 } catch (error) {
   await page.screenshot({ path: '.system_generated/slides/production-failure.png' })

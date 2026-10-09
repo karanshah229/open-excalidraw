@@ -45,7 +45,7 @@
     "test:e2e:regression": "node tests/run-regression-tests.mjs",
     "test": "node tests/run-all-tests.mjs",
     "test:slides": "pnpm dlx tsx tests/slides-model.test.ts && node tests/run-slides-tests.mjs",
-    "test:slides:prod": "pnpm --filter @agentic-whiteboard/whiteboard build && node tests/slides-production.test.mjs",
+    "test:slides:prod": "pnpm --filter @agentic-whiteboard/whiteboard exec vite build --mode e2e && node tests/slides-production.test.mjs",
     "test:slides:notes": "pnpm --filter @agentic-whiteboard/functions build && firebase emulators:exec --only auth,firestore,storage,database,functions --project demo-image-persistence --config image-persistence.firebase.json 'node tests/slide-notes-access.test.mjs'"
   },
   "devDependencies": {
