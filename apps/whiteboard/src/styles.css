@@ -2169,9 +2169,21 @@ button {
     border-color 0.15s ease,
     transform 0.15s ease;
 }
+.sign-in-button + .sign-in-button {
+  margin-top: 12px;
+}
 .sign-in-button:hover:not(:disabled) {
   background: var(--accent-hover);
   border-color: var(--accent-hover);
+}
+.sign-in-button--secondary {
+  background: var(--bg-surface);
+  border-color: var(--border-color);
+  color: var(--text-primary);
+}
+.sign-in-button--secondary:hover:not(:disabled) {
+  background: var(--bg-surface-hover);
+  border-color: var(--border-color);
 }
 .sign-in-button:active:not(:disabled) {
   transform: translateY(1px);
@@ -2201,12 +2213,6 @@ button {
   font-size: 13px;
   font-weight: 800;
   font-family: Arial, sans-serif;
-}
-.sign-in-note {
-  margin: 16px 0 0;
-  color: var(--text-muted);
-  font-size: 12px;
-  text-align: center;
 }
 .sign-in-hint,
 .sign-in-error {

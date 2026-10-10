@@ -1,0 +1,2 @@
+# Copy local development Firebase configuration into new Codex-managed worktrees.
+apps/whiteboard/.env.development
