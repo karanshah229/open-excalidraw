@@ -8,6 +8,7 @@ import { resolve } from 'node:path'
 const root = fileURLToPath(new URL('..', import.meta.url))
 const all = [
   'sharing-flow-audit.test.mjs',
+  'export-retry.test.mjs',
   'presentation-access.test.mjs',
   'slides-shared.test.mjs',
   'board-behavior-contract.test.mjs',
@@ -25,6 +26,7 @@ const all = [
   'solo-delete-collab-undo.test.mjs',
   'collab-undo-further-ops.test.mjs',
   'mcp-live-e2e.test.mjs',
+  'mcp-slides-e2e.test.mjs',
   'create-board-modal-dropdown-scroll.test.mjs',
   'e2e-smoke-test-and-screenshots.mjs',
   'e2e-non-anonymous-test.mjs',
@@ -83,6 +85,7 @@ if (!process.argv.includes('--inside-emulators')) {
   if (process.env.GCLOUD_PROJECT !== 'demo-regression' || !process.env.FIRESTORE_EMULATOR_HOST)
     throw new Error('Regression runner requires its local demo emulators')
   Object.assign(process.env, {
+    VITE_MCP_BRIDGE_URL: process.env.VITE_MCP_BRIDGE_URL || 'ws://127.0.0.1:47887',
     VITE_FIREBASE_API_KEY: 'emulator-only',
     VITE_FIREBASE_AUTH_DOMAIN: 'demo-regression.firebaseapp.com',
     VITE_FIREBASE_PROJECT_ID: 'demo-regression',

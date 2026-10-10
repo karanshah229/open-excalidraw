@@ -1,3 +1,8 @@
+import {
+  createSlideDataHandler,
+  slideDataOperations,
+  describeSlides,
+} from '../features/mcp-bridge/slide-data-operations'
 import { PresentationView } from './presentation'
 import { AccessDenied } from '../components/access-denied'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
@@ -46,7 +51,12 @@ import { reconcileElementsLWW } from '../features/collaboration/reconcile'
 import { getFirebaseAuth, getFirestoreDb, isFirebaseConfigured } from '../lib/firebase'
 import { createSceneSession } from '../features/scene/scene-session'
 import { getSlides, newSlideData, slideLabel, slideMetadata } from '../features/slides/slide-model'
-import { commitSlideCommand, duplicateSlide, normalizeDuplicatedSlides } from '../features/slides/slide-commands'
+import {
+  commitSlideCommand,
+  createSlide,
+  duplicateSlide,
+  normalizeDuplicatedSlides,
+} from '../features/slides/slide-commands'
 import { copySlideNotes } from '../features/slides/notes-store'
 import { readSidebarPinned } from '../features/sidebar/sidebar-preferences'
 import { SlidesPanel } from '../features/slides/slides-panel'
@@ -297,9 +307,14 @@ export function BoardEditor() {
     }
     checkAndZoom()
   }, [zoomToContentWithPadding])
+  const slideDataHandler = useMemo(createSlideDataHandler, [boardId, authUser?.uid])
+  useEffect(() => () => slideDataHandler.clear(), [slideDataHandler])
   const [isReadOnly, setIsReadOnly] = useState(false)
   const [presentationConfig, setPresentationConfig] = useState<BoardShareConfig | undefined>()
   const [isSharedBoard, setIsSharedBoard] = useState(false)
+  const ownedSyncBlockedRef = useRef(false)
+  const isSharedBoardRef = useRef(isSharedBoard)
+  isSharedBoardRef.current = isSharedBoard
   const [accessDenied, setAccessDenied] = useState(false)
   const accessDeniedRef = useRef(accessDenied)
   accessDeniedRef.current = accessDenied
@@ -518,6 +533,7 @@ export function BoardEditor() {
     setRecoveredSharedScene(null)
     documentRef.current = null
     setIsSharedBoard(false)
+    ownedSyncBlockedRef.current = false
     setPresentationConfig(undefined)
     setAccessDenied(false)
     setBoardNotFound(false)
@@ -599,7 +615,8 @@ export function BoardEditor() {
             ? config.effectiveRole === 'owner' || config.effectiveRole === 'editor'
             : isOwner || isGeneralEditor || isCollabEditor
 
-          setIsReadOnly(!canEdit)
+          ownedSyncBlockedRef.current = details?.document?.syncStatus === 'sync-blocked'
+          setIsReadOnly(ownedSyncBlockedRef.current || !canEdit)
           if (draft) setRecoveredSharedScene(finalScene)
           awaitingInitialSceneRef.current = true
           savedSignature.current = getSceneSignature(finalScene)
@@ -609,8 +626,8 @@ export function BoardEditor() {
           appStateRef.current = finalScene.appState
 
           // Update local IndexedDB with authoritative cloud/merged state
-          if (details?.document) {
-            documentRef.current = details.document
+          documentRef.current = details?.document ?? null
+          if (details?.document && !ownedSyncBlockedRef.current) {
             saveChainRef.current = saveChainRef.current
               .then(async () => {
                 const latest = await workspaceApi.loadBoard(details.document.id)
@@ -647,7 +664,7 @@ export function BoardEditor() {
             libraryItems: Promise.resolve(libraryItems),
           })
           triggerAutoCenter()
-          setState(draft ? 'Saving' : 'Synced')
+          setState(ownedSyncBlockedRef.current ? 'Project deleted' : draft ? 'Saving' : 'Synced')
           return
         }
 
@@ -756,7 +773,7 @@ export function BoardEditor() {
         const canEdit = updatedConfig.effectiveRole
           ? updatedConfig.effectiveRole === 'owner' || updatedConfig.effectiveRole === 'editor'
           : isOwner || isGeneralEditor || isCollabEditor
-        setIsReadOnly(!canEdit)
+        setIsReadOnly(ownedSyncBlockedRef.current || !canEdit)
 
         setBoardMeta((prev) =>
           prev
@@ -823,22 +840,25 @@ export function BoardEditor() {
   }, [boardId, isSharedBoard, authUser?.email, authUser?.uid])
 
   useEffect(() => {
-    if (isSharedBoard) return
     return workspaceApi.subscribeToBoardSyncStatus(boardId, (status) => {
+      // Registered owned boards also have shared scenes. Their private project
+      // lifecycle still blocks edits and retains pending bytes until restoration.
+      if (isSharedBoard && status !== 'sync-blocked' && !ownedSyncBlockedRef.current) return
+      ownedSyncBlockedRef.current = status === 'sync-blocked'
       setState(statusLabel(status))
-      setIsReadOnly(status === 'sync-blocked')
+      setIsReadOnly(ownedSyncBlockedRef.current)
     })
   }, [boardId, isSharedBoard])
 
   const sendScene = useCallback(
     (elements = elementsRef.current, operationId?: string, result?: unknown) => {
-      if (isReadOnly) return
       if (socketRef.current?.readyState !== WebSocket.OPEN) return
       const selected = appStateRef.current?.selectedElementIds as Record<string, boolean> | undefined
       const selectionIds = selected ? Object.keys(selected).filter((id) => selected[id]) : []
       socketRef.current.send(
         JSON.stringify({
           type: 'scene',
+          boardId,
           operationId,
           scene: { elements, appState: appStateRef.current },
           selectionIds,
@@ -846,7 +866,7 @@ export function BoardEditor() {
         }),
       )
     },
-    [isReadOnly],
+    [boardId],
   )
 
   const sendOperationResult = useCallback((operationId: string, ok: boolean, data?: unknown, error?: string) => {
@@ -863,7 +883,7 @@ export function BoardEditor() {
   }, [])
 
   useEffect(() => {
-    if (isReadOnly) return
+    if (presentationConfig || accessDenied || boardNotFound || !initialData) return
     let disposed = false
     let retryId: number | undefined
     let retryDelay = 5_000
@@ -881,9 +901,63 @@ export function BoardEditor() {
       }
       socket.onmessage = async ({ data }) => {
         const message = JSON.parse(data) as { type?: string; operation?: any }
-        if (message.type !== 'operation' || !apiRef.current) return
-        userHasInteractedRef.current = true
+        if (message.type !== 'operation') return
         const operation = message.operation
+        if (slideDataOperations.has(operation.type)) {
+          try {
+            const data = await slideDataHandler.handle(operation, {
+              boardId,
+              projectId: boardMeta?.projectId ?? '',
+              identity: authUser?.uid ?? 'local-user',
+              role: isReadOnly
+                ? 'viewer'
+                : !isSharedBoardRef.current || boardMeta?.projectOwnerId === authUser?.uid
+                  ? 'owner'
+                  : 'editor',
+              local: !isFirebaseConfigured || (!isSharedBoardRef.current && (!authUser || authUser.isAnonymous)),
+              scene: {
+                elements: elementsRef.current,
+                files: apiRef.current?.getFiles() ?? {},
+                background: String(appStateRef.current.viewBackgroundColor ?? '#ffffff'),
+                theme: resolvedTheme,
+              },
+            })
+            const sharedCurrentBoard =
+              operation.type === 'share_board' && (!operation.boardId || operation.boardId === boardId)
+            if (sharedCurrentBoard && !isSharedBoardRef.current) {
+              // A board opened before its share registration completed still uses
+              // private saves. Publish its current scene once, then use live shared saves.
+              await sharingService.updateSharedScene(boardId, {
+                elements: elementsRef.current,
+                files: apiRef.current?.getFiles() ?? {},
+                appState: {
+                  theme: resolvedTheme,
+                  viewBackgroundColor: appStateRef.current.viewBackgroundColor,
+                  gridModeEnabled: appStateRef.current.gridModeEnabled,
+                  objectsSnapModeEnabled: appStateRef.current.objectsSnapModeEnabled,
+                },
+              })
+            }
+            sendOperationResult(operation.id, true, data)
+            if (sharedCurrentBoard) {
+              isSharedBoardRef.current = true
+              setIsSharedBoard(true)
+            }
+          } catch (error) {
+            sendOperationResult(operation.id, false, undefined, error instanceof Error ? error.message : String(error))
+          }
+          return
+        }
+        if (isReadOnly || !apiRef.current) {
+          sendOperationResult(
+            operation.id,
+            false,
+            undefined,
+            'Canvas mutations require editor access and a mounted editor.',
+          )
+          return
+        }
+        userHasInteractedRef.current = true
         operationRef.current = operation.id
         const wasEmpty = elementsRef.current.length === 0
         let next = elementsRef.current
@@ -906,17 +980,20 @@ export function BoardEditor() {
           elementsRef.current = next
           apiRef.current.updateScene({ elements: next })
           sendScene(next, operation.id)
-        } else if (operation.type === 'get_slides') {
-          sendOperationResult(operation.id, true, {
-            slides: getSlides(apiRef.current.getSceneElements()).map((slide, index) => ({
-              id: slide.id,
-              number: index + 1,
-              x: slide.x,
-              y: slide.y,
-              width: slide.width,
-              height: slide.height,
-            })),
-          })
+        } else if (operation.type === 'create_slide') {
+          try {
+            const slideId = createSlide(apiRef.current, operation)
+            const elements = [...apiRef.current.getSceneElementsIncludingDeleted()]
+            elementsRef.current = elements
+            sendScene(elements, operation.id, {
+              boardId,
+              slide: describeSlides({ elements, files: {}, background: '#ffffff', theme: resolvedTheme }).find(
+                (slide) => slide.id === slideId,
+              ),
+            })
+          } catch (error) {
+            sendOperationResult(operation.id, false, undefined, error instanceof Error ? error.message : String(error))
+          }
         } else if (operation.type === 'slide_command') {
           const slide = getSlides(apiRef.current.getSceneElements()).find((entry) => entry.id === operation.slideId)
           if (!slide) sendOperationResult(operation.id, false, null, 'Slide not found.')
@@ -929,7 +1006,9 @@ export function BoardEditor() {
                     identity: authUser?.uid || 'local-user',
                     boardId,
                     projectId: boardMeta?.projectId || '',
-                    cloud: Boolean(isFirebaseConfigured && authUser),
+                    cloud: Boolean(
+                      isFirebaseConfigured && (isSharedBoardRef.current || (authUser && !authUser.isAnonymous)),
+                    ),
                   },
                   slide.id,
                   copiedId,
@@ -939,6 +1018,18 @@ export function BoardEditor() {
                 type: 'move',
                 id: slide.id,
                 offset: operation.action === 'earlier' ? -1 : 1,
+              })
+            } else if (operation.action === 'move_before' || operation.action === 'move_after') {
+              if (!getSlides(apiRef.current.getSceneElements()).some((entry) => entry.id === operation.targetSlideId)) {
+                sendOperationResult(operation.id, false, undefined, 'Target slide not found.')
+                operationRef.current = null
+                return
+              }
+              commitSlideCommand(apiRef.current, {
+                type: 'place',
+                id: slide.id,
+                targetId: operation.targetSlideId,
+                after: operation.action === 'move_after',
               })
             } else if (operation.action === 'remove')
               commitSlideCommand(apiRef.current, { type: 'remove', id: slide.id })
@@ -1220,67 +1311,6 @@ export function BoardEditor() {
           } catch (err: any) {
             sendOperationResult(operation.id, false, null, err?.message || 'Failed to switch board')
           }
-        } else if (operation.type === 'get_share_info') {
-          try {
-            const targetBoardId = (operation.boardId as string) || boardId
-            const config = await sharingService.getShareConfig(targetBoardId, {
-              boardName: boardMeta?.boardName,
-              ownerId: boardMeta?.projectOwnerId,
-            })
-            const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:5173'
-            sendOperationResult(operation.id, true, {
-              ok: true,
-              boardId: targetBoardId,
-              boardName: config.boardName,
-              shareUrl: `${origin}/boards/${targetBoardId}`,
-              generalAccess: config.generalAccess,
-              generalRole: config.generalRole,
-              invitedEmails: config.invitedEmails,
-              collaborators: config.collaborators,
-            })
-          } catch (err: any) {
-            sendOperationResult(operation.id, false, null, err?.message || 'Failed to get share info')
-          }
-        } else if (operation.type === 'share_board') {
-          try {
-            const targetBoardId = (operation.boardId as string) || boardId
-            const currentConfig = await sharingService.getShareConfig(targetBoardId, {
-              boardName: boardMeta?.boardName,
-              ownerId: boardMeta?.projectOwnerId,
-            })
-            const updated = {
-              ...currentConfig,
-              generalAccess: operation.generalAccess ?? currentConfig.generalAccess,
-              generalRole: operation.generalRole ?? currentConfig.generalRole,
-            }
-            if (operation.inviteEmail) {
-              const email = String(operation.inviteEmail).trim().toLowerCase()
-              if (!updated.invitedEmails.includes(email)) {
-                updated.invitedEmails = [...updated.invitedEmails, email]
-              }
-              updated.collaborators = {
-                ...updated.collaborators,
-                [email]: {
-                  email,
-                  role: operation.inviteRole || 'editor',
-                  addedAt: new Date().toISOString(),
-                },
-              }
-            }
-            await sharingService.saveShareConfig(updated)
-            const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:5173'
-            sendOperationResult(operation.id, true, {
-              ok: true,
-              boardId: targetBoardId,
-              shareUrl: `${origin}/boards/${targetBoardId}`,
-              generalAccess: updated.generalAccess,
-              generalRole: updated.generalRole,
-              invitedEmails: updated.invitedEmails,
-              collaborators: updated.collaborators,
-            })
-          } catch (err: any) {
-            sendOperationResult(operation.id, false, null, err?.message || 'Failed to update sharing')
-          }
         }
         operationRef.current = null
       }
@@ -1299,6 +1329,8 @@ export function BoardEditor() {
         failedAttempts = 0
         retryDelay = 5_000
         void connect()
+      } else {
+        sendScene()
       }
     }
 
@@ -1311,7 +1343,19 @@ export function BoardEditor() {
       if (retryId) window.clearTimeout(retryId)
       socketRef.current?.close()
     }
-  }, [isReadOnly, sendScene, authUser, boardId, boardMeta?.projectId])
+  }, [
+    isReadOnly,
+    sendScene,
+    authUser,
+    boardId,
+    boardMeta?.projectId,
+    Boolean(presentationConfig),
+    accessDenied,
+    boardNotFound,
+    Boolean(initialData),
+    slideDataHandler,
+    resolvedTheme,
+  ])
 
   /**
    * Saves use optimistic revisions, so concurrent writes with the same stale
@@ -2015,7 +2059,7 @@ export function BoardEditor() {
                       identity: authUser?.uid || 'local-user',
                       boardId,
                       projectId: boardMeta?.projectId || '',
-                      cloud: Boolean(isFirebaseConfigured && authUser),
+                      cloud: Boolean(isFirebaseConfigured && (isSharedBoard || (authUser && !authUser.isAnonymous))),
                     },
                     source.id,
                     copy.id,

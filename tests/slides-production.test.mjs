@@ -70,19 +70,23 @@ try {
   server = { close: () => new Promise((resolve) => production.httpServer.close(resolve)) }
   // A stale deployment chunk must reload once and recover the persisted board.
   await page.setRequestInterception(true)
-  let failedChunks = 0
-  const failChunkOnce = async (request) => {
-    if (/\/assets\/board-editor-[^/]+\.js/.test(request.url()) && failedChunks === 0) {
-      failedChunks++
+  let failedChunks = 0,
+    persistentFailures = 0
+  let chunkFailure = 'once'
+  // Keep one interceptor installed. Disabling it while requests are queued
+  // can make Puppeteer's pending continue() calls fail before app assertions.
+  page.on('request', async (request) => {
+    const editorChunk = /\/assets\/board-editor-[^/]+\.js/.test(request.url())
+    if (editorChunk && (chunkFailure === 'always' || (chunkFailure === 'once' && failedChunks === 0))) {
+      if (chunkFailure === 'always') persistentFailures++
+      else failedChunks++
       await request.respond({ status: 404, contentType: 'text/html', body: '<!doctype html>Missing chunk' })
     } else await request.continue()
-  }
-  page.on('request', failChunkOnce)
+  })
   await page.goto(`${base}/boards/${boardId}`)
   await page.waitForSelector('.slides-panel, .slides-toggle')
   assert.equal(failedChunks, 1, 'Production recovery exercises a real missing editor chunk')
-  await page.setRequestInterception(false)
-  page.off('request', failChunkOnce)
+  chunkFailure = 'none'
   assert.equal(await page.evaluate(() => !!window.__excalidrawAPI), false, 'Running production bundle')
   await page.waitForFunction(() => document.body.textContent.includes('Slide 1'))
   const toolbarPosition = await page.$eval('.shapes-section', (node) => node.getBoundingClientRect().x)
@@ -184,22 +188,24 @@ try {
   page.off('framenavigated', countEditorReloads)
   // A persistent failure must stop after one automatic reload and offer Retry.
   await page.evaluate(() => sessionStorage.removeItem('agentic-whiteboard:chunk-recovery'))
-  await page.setRequestInterception(true)
-  let persistentFailures = 0
-  const alwaysFailChunk = async (request) => {
-    if (/\/assets\/board-editor-[^/]+\.js/.test(request.url())) {
-      persistentFailures++
-      await request.respond({ status: 404, contentType: 'text/html', body: '<!doctype html>Missing chunk' })
-    } else await request.continue()
-  }
-  page.on('request', alwaysFailChunk)
+  chunkFailure = 'always'
+  const secondChunkFailure = page.waitForResponse(
+    (response) =>
+      /\/assets\/board-editor-[^/]+\.js/.test(response.url()) && response.status() === 404 && persistentFailures === 2,
+  )
   await page.reload()
-  await page.waitForSelector('.access-denied-card [role="alert"], .access-denied-card button')
+  // The first error screen can render briefly before automatic recovery. The
+  // second response belongs to the reloaded document, where the loop stops.
+  await secondChunkFailure
+  // Automatic chunk recovery can replace the document during this wait.
+  // Poll a boolean instead of transferring an element from the old context.
+  await page.waitForFunction(() =>
+    Boolean(document.querySelector('.access-denied-card [role="alert"], .access-denied-card button')),
+  )
   assert.equal(await page.$eval('.access-denied-title', (node) => node.textContent), 'Could not load this page')
   await new Promise((resolve) => setTimeout(resolve, 500))
   assert.equal(persistentFailures, 2, 'Persistent failure reloads only once')
-  await page.setRequestInterception(false)
-  page.off('request', alwaysFailChunk)
+  chunkFailure = 'none'
   await page.click('.access-denied-card button')
   await page.waitForSelector('.slides-toggle')
   assert.equal(await page.$('.slides-panel'), null, 'Recovery reload keeps Slides collapsed')

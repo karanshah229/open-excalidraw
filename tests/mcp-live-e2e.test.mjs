@@ -6,7 +6,7 @@ import { StdioClientTransport } from '../packages/mcp/node_modules/@modelcontext
 
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 const BASE_URL = process.env.E2E_BASE_URL || 'http://localhost:5173'
-const BRIDGE_PORT = 8787
+const BRIDGE_PORT = Number(new URL(process.env.VITE_MCP_BRIDGE_URL || 'ws://127.0.0.1:8787').port)
 
 async function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))

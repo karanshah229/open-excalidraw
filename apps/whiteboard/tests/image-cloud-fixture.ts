@@ -163,6 +163,7 @@ export async function createPrivateImageBoard(dataURL: string) {
     files: { asset: { id: 'asset', dataURL, mimeType: 'image/png', created: 1 } },
   }
   await workspaceApi.saveBoard({ ...board, scene })
+  await workspaceApi.flushCloud()
   return board.id
 }
 
@@ -224,8 +225,9 @@ export async function exerciseAssetLifecycle(boardId: string) {
       return error.code === 'functions/permission-denied'
     }
   }
-  const sharePolicy = (generalAccess: 'restricted' | 'anyone_with_link', generalRole: 'viewer' | 'editor') =>
+  const sharePolicy = async (generalAccess: 'restricted' | 'anyone_with_link', generalRole: 'viewer' | 'editor') =>
     projectService.boardAccess(boardId, board.projectId, 'share', {
+      accessRevision: (await getDoc(shareRef)).data()?.accessRevision ?? 0,
       generalAccess,
       generalRole,
       invitedEmails: [],

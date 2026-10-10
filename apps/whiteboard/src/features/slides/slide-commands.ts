@@ -1,9 +1,18 @@
-import { CaptureUpdateAction, newElementWith, restoreElements } from '@excalidraw/excalidraw'
+import {
+  CaptureUpdateAction,
+  newElementWith,
+  restoreElements,
+  getCommonBounds,
+  convertToExcalidrawElements,
+} from '@excalidraw/excalidraw'
 import type { ExcalidrawImperativeAPI } from '@excalidraw/excalidraw/types'
 import type { ExcalidrawElement } from '@excalidraw/excalidraw/element/types'
-import { getSlides, orderBetween, slideCustomData, slideMetadata } from './slide-model'
+import { getSlides, orderBetween, slideCustomData, slideMetadata, newSlideData } from './slide-model'
 
-export type SlideCommand = { type: 'move'; id: string; offset: -1 | 1 } | { type: 'remove'; id: string }
+export type SlideCommand =
+  | { type: 'move'; id: string; offset: -1 | 1 }
+  | { type: 'remove'; id: string }
+  | { type: 'place'; id: string; targetId: string; after: boolean }
 
 export function applySlideCommand(elements: readonly ExcalidrawElement[], command: SlideCommand): ExcalidrawElement[] {
   const slides = getSlides(elements)
@@ -18,16 +27,19 @@ export function applySlideCommand(elements: readonly ExcalidrawElement[], comman
           : element,
     )
   const from = slides.indexOf(slide),
-    to = from + command.offset
+    to = command.type === 'place' ? slides.findIndex((entry) => entry.id === command.targetId) : from + command.offset
   if (to < 0 || to >= slides.length) return [...elements]
   const sorted = [...slides]
   sorted.splice(from, 1)
-  sorted.splice(to, 0, slide)
+  const insertion =
+    command.type === 'place' ? sorted.findIndex((entry) => entry.id === command.targetId) + Number(command.after) : to
+  if (insertion < 0 || (command.type === 'place' && command.targetId === slide.id)) return [...elements]
+  sorted.splice(insertion, 0, slide)
   let key: string
   try {
     key = orderBetween(
-      sorted[to - 1] && slideMetadata(sorted[to - 1])!.orderKey,
-      sorted[to + 1] && slideMetadata(sorted[to + 1])!.orderKey,
+      sorted[insertion - 1] && slideMetadata(sorted[insertion - 1])!.orderKey,
+      sorted[insertion + 1] && slideMetadata(sorted[insertion + 1])!.orderKey,
     )
     if (key.length > 160) throw new Error('Rebalance')
   } catch {
@@ -135,4 +147,66 @@ function duplicateIntoScene(
     captureUpdate: CaptureUpdateAction.IMMEDIATELY,
   })
   return ids.get(id)!
+}
+
+/** Native frame membership and a single undo transaction, shared with MCP creation. */
+export function createSlide(
+  api: ExcalidrawImperativeAPI,
+  options: { elementIds?: string[]; bounds?: { x: number; y: number; width: number; height: number }; padding: number },
+) {
+  const elements = api.getSceneElements()
+  if (Boolean(options.elementIds) === Boolean(options.bounds))
+    throw new Error('Provide elementIds or bounds, not both.')
+  const ids = new Set(options.elementIds)
+  const selected = elements.filter((element) => ids.has(element.id))
+  if (options.elementIds && selected.length !== ids.size) throw new Error('One or more elements were not found.')
+  if (selected.some((element) => element.frameId || element.type === 'frame' || element.type === 'magicframe'))
+    throw new Error('Slide creation requires drawings outside existing frames.')
+  const groups = new Set(selected.flatMap((element) => element.groupIds))
+  const contents = elements.filter(
+    (element) =>
+      ids.has(element.id) ||
+      element.groupIds.some((group) => groups.has(group)) ||
+      (element.type === 'text' && element.containerId && ids.has(element.containerId)),
+  )
+  if (contents.some((element) => element.frameId)) throw new Error('A selected group belongs to another frame.')
+  const [left, top, right, bottom] = contents.length ? getCommonBounds(contents) : [0, 0, 0, 0]
+  const bounds = options.bounds ?? {
+    x: left - options.padding,
+    y: top - options.padding,
+    width: Math.max(1, right - left + options.padding * 2),
+    height: Math.max(1, bottom - top + options.padding * 2),
+  }
+  const [frame] = convertToExcalidrawElements([
+    { type: 'frame', children: [], ...bounds, customData: newSlideData(elements) },
+  ])
+  const contained = new Set(
+    elements
+      .filter((element) => {
+        if (element.frameId || element.type === 'frame' || element.type === 'magicframe') return false
+        const [x1, y1, x2, y2] = getCommonBounds([element])
+        return x1 >= bounds.x && y1 >= bounds.y && x2 <= bounds.x + bounds.width && y2 <= bounds.y + bounds.height
+      })
+      .map((element) => element.id),
+  )
+  // Never split a group across a frame boundary.
+  for (const element of elements) {
+    if (
+      contained.has(element.id) &&
+      element.groupIds.some((group) =>
+        elements.some((other) => other.groupIds.includes(group) && !contained.has(other.id)),
+      )
+    )
+      contained.delete(element.id)
+  }
+  api.updateScene({
+    elements: [
+      ...api
+        .getSceneElementsIncludingDeleted()
+        .map((element) => (contained.has(element.id) ? newElementWith(element, { frameId: frame.id }) : element)),
+      frame,
+    ],
+    captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+  })
+  return frame.id
 }

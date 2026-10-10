@@ -150,6 +150,15 @@ export function SlideNotes({
     }
   }, [boardId, projectId, slideId, identity, cloud, reload, readOnly])
 
+  useEffect(() => {
+    const updated = (event: Event) => {
+      const detail = (event as CustomEvent).detail
+      if (detail?.boardId === boardId && detail?.slideId === slideId) setReload((value) => value + 1)
+    }
+    window.addEventListener('slide-notes-updated', updated)
+    return () => window.removeEventListener('slide-notes-updated', updated)
+  }, [boardId, slideId])
+
   function change(value: string) {
     if (readOnly) return
     setText(value)

@@ -9,9 +9,14 @@ type Scene = { elements: Record<string, unknown>[]; appState: Record<string, unk
 const bridgePort = Number(process.env.AGENTIC_WHITEBOARD_BRIDGE_PORT ?? 8787)
 let scene: Scene | null = null
 let revision = 0
+let activeAdapter: WebSocket | undefined
+let activeBoardId: string | undefined
 let selectionIds: string[] = []
 const adapters = new Set<WebSocket>()
-const pending = new Map<string, { resolve: (value?: unknown) => void; reject: (error: Error) => void }>()
+const pending = new Map<
+  string,
+  { adapter: WebSocket; resolve: (value?: unknown) => void; reject: (error: Error) => void }
+>()
 
 const json = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }] })
 const failure = (error: string, detail?: Record<string, unknown>) => ({
@@ -47,9 +52,11 @@ const dispatch = async (operation: Record<string, unknown>, expectedRevision?: n
 
   const id = randomUUID()
   const message = JSON.stringify({ type: 'operation', operation: { ...operation, id } })
-  for (const adapter of adapters) {
-    if (adapter.readyState === WebSocket.OPEN) adapter.send(message)
-  }
+  const adapter =
+    activeAdapter?.readyState === WebSocket.OPEN
+      ? activeAdapter
+      : [...adapters].find((entry) => entry.readyState === WebSocket.OPEN)
+  if (!adapter) return failure('whiteboard_offline')
 
   try {
     const result = await new Promise<unknown>((resolve, reject) => {
@@ -58,6 +65,7 @@ const dispatch = async (operation: Record<string, unknown>, expectedRevision?: n
         reject(new Error(`The browser adapter did not acknowledge the operation '${String(operation.type)}' in time.`))
       }, timeoutMs)
       pending.set(id, {
+        adapter,
         resolve: (val) => {
           clearTimeout(timeout)
           resolve(val)
@@ -67,8 +75,20 @@ const dispatch = async (operation: Record<string, unknown>, expectedRevision?: n
           reject(error)
         },
       })
+      adapter.send(message)
     })
-    return json(result ?? { ok: true, operationId: id, ...summarize() })
+    const data = (result ?? { ok: true, operationId: id }) as Record<string, unknown>
+    if (data.ok === false) return failure(String(data.error ?? 'operation_failed'), data)
+    if (operation.type === 'get_slide_preview' && typeof data.image === 'string') {
+      const { image, ...metadata } = data
+      return {
+        content: [
+          ...json({ ...metadata, revision }).content,
+          { type: 'image' as const, mimeType: 'image/png', data: image },
+        ],
+      }
+    }
+    return json({ ...data, revision })
   } catch (error) {
     return failure('operation_failed', {
       operation: operation.type,
@@ -91,8 +111,10 @@ mcp.registerTool(
   async () =>
     json({
       whiteboardConnected: adapters.size > 0,
+      activeBoardId,
       revision,
-      writeGuarantee: 'Writes return only after the browser adapter acknowledges the applied Excalidraw scene.',
+      writeGuarantee:
+        'Drawing writes acknowledge the applied undoable scene; notes and sharing writes acknowledge their permission/revision-checked storage service.',
       tools: [
         'get_capabilities',
         'get_canvas',
@@ -101,6 +123,11 @@ mcp.registerTool(
         'add_elements',
         'update_elements',
         'get_slides',
+        'create_slide',
+        'get_slide_notes',
+        'set_slide_notes',
+        'get_slide_preview',
+        'share_project',
         'slide_command',
         'delete_elements',
         'clear_canvas',
@@ -221,23 +248,89 @@ mcp.registerTool(
 
 mcp.registerTool(
   'get_slides',
-  { description: 'List ordered Slides on the current board. Speaker notes are never included.' },
+  {
+    description:
+      'List ordered Slides, bounds and contained element IDs on the current board. Includes scene revision; speaker notes are never included.',
+  },
   async () => dispatch({ type: 'get_slides' }),
 )
 
 mcp.registerTool(
   'slide_command',
   {
-    description: 'Reorder, duplicate or remove a Slide boundary without deleting its drawings.',
+    description:
+      'Reorder, duplicate or remove a Slide boundary without deleting its drawings. move_before/move_after place it relative to targetSlideId.',
     inputSchema: {
       slideId: z.string().min(1),
-      action: z.enum(['earlier', 'later', 'duplicate', 'remove']),
+      action: z.enum(['earlier', 'later', 'duplicate', 'remove', 'move_before', 'move_after']),
+      targetSlideId: z.string().min(1).optional().describe('Required for move_before/move_after.'),
       expectedRevision: z.number().int().nonnegative().optional(),
     },
   },
-  async ({ slideId, action, expectedRevision }) => {
-    return dispatch({ type: 'slide_command', slideId, action }, expectedRevision)
+  async ({ slideId, action, targetSlideId, expectedRevision }) => {
+    return dispatch({ type: 'slide_command', slideId, action, targetSlideId }, expectedRevision)
   },
+)
+
+mcp.registerTool(
+  'create_slide',
+  {
+    description:
+      'Create an undoable Slide boundary around existing element IDs, or explicit canvas bounds. Drawings are preserved.',
+    inputSchema: {
+      elementIds: z.array(z.string().min(1)).min(1).optional(),
+      bounds: z
+        .object({
+          x: z.number().finite(),
+          y: z.number().finite(),
+          width: z.number().positive().finite(),
+          height: z.number().positive().finite(),
+        })
+        .optional(),
+      padding: z.number().min(0).max(1000).default(24),
+      expectedRevision: z.number().int().nonnegative().optional(),
+    },
+  },
+  async ({ expectedRevision, ...args }) => dispatch({ type: 'create_slide', ...args }, expectedRevision),
+)
+
+mcp.registerTool(
+  'get_slide_notes',
+  {
+    description:
+      'Read speaker notes and their note revision. Owner/editor/Present only; ordinary Viewer access is denied. Notes stay outside canvas elements.',
+    inputSchema: { slideId: z.string().min(1) },
+  },
+  async (args) => dispatch({ type: 'get_slide_notes', ...args }, undefined, 25_000),
+)
+
+mcp.registerTool(
+  'set_slide_notes',
+  {
+    description:
+      'Set or clear speaker notes. Owner/editor only. Read get_slide_notes first and pass its note revision; unsynced browser drafts are protected.',
+    inputSchema: {
+      slideId: z.string().min(1),
+      text: z.string().max(20000),
+      expectedRevision: z.number().int().nonnegative().describe('Note revision, not the scene revision.'),
+      mutationId: z.string().uuid().optional().describe('Reuse for an idempotent retry.'),
+      expectedDraftMutationId: z
+        .string()
+        .optional()
+        .describe('Pass draftMutationId from get_slide_notes for local notes.'),
+    },
+  },
+  async (args) => dispatch({ type: 'set_slide_notes', ...args }, undefined, 25_000),
+)
+
+mcp.registerTool(
+  'get_slide_preview',
+  {
+    description:
+      'Return a cropped PNG image of a Slide, using the board theme and bounded preview cache. Does not include speaker notes.',
+    inputSchema: { slideId: z.string().min(1), size: z.number().int().min(64).max(2048).default(800) },
+  },
+  async (args) => dispatch({ type: 'get_slide_preview', ...args }, undefined, 25_000),
 )
 
 mcp.registerTool(
@@ -495,12 +588,14 @@ mcp.registerTool(
 mcp.registerTool(
   'get_share_info',
   {
-    description: 'Get the shareable URL, general access permissions, and collaborator list for the current board.',
+    description:
+      'Read board or project share URL, access revision, effective role and inherited policy. Does not change permissions or publish content.',
     inputSchema: {
       boardId: z.string().optional().describe('Board ID to inspect. Defaults to currently open board.'),
+      projectId: z.string().optional().describe('Inspect a project instead of a board. Do not combine with boardId.'),
     },
   },
-  async ({ boardId }) => dispatch({ type: 'get_share_info', boardId }),
+  async ({ boardId, projectId }) => dispatch({ type: 'get_share_info', boardId, projectId }),
 )
 
 mcp.registerTool(
@@ -510,20 +605,67 @@ mcp.registerTool(
       "Update sharing settings for the board (e.g., set public link access to 'anyone_with_link' or invite collaborators by email).",
     inputSchema: {
       boardId: z.string().optional().describe('Board ID to update. Defaults to currently open board.'),
+      inheritProjectAccess: z.boolean().optional(),
+      expectedAccessRevision: z.number().int().nonnegative().optional(),
+      removeEmail: z.string().email().optional(),
       generalAccess: z
         .enum(['restricted', 'anyone_with_link'])
         .optional()
         .describe("Access level: 'restricted' or 'anyone_with_link'."),
-      generalRole: z.enum(['viewer', 'editor']).optional().describe("Role for link visitors: 'viewer' or 'editor'."),
+      generalRole: z
+        .enum(['viewer', 'editor', 'presentation'])
+        .optional()
+        .describe('Role for link visitors: viewer, editor or presentation (Present).'),
       inviteEmail: z.string().email().optional().describe('Email address to invite to this board.'),
       inviteRole: z
-        .enum(['viewer', 'editor'])
+        .enum(['viewer', 'editor', 'presentation'])
         .default('editor')
-        .describe("Role to grant the invited email: 'viewer' or 'editor'."),
+        .describe('Role to grant the invited email: viewer, editor or presentation (Present).'),
     },
   },
-  async ({ boardId, generalAccess, generalRole, inviteEmail, inviteRole }) =>
-    dispatch({ type: 'share_board', boardId, generalAccess, generalRole, inviteEmail, inviteRole }),
+  async ({
+    boardId,
+    generalAccess,
+    generalRole,
+    inviteEmail,
+    inviteRole,
+    inheritProjectAccess,
+    expectedAccessRevision,
+    removeEmail,
+  }) =>
+    dispatch(
+      {
+        type: 'share_board',
+        boardId,
+        generalAccess,
+        generalRole,
+        inviteEmail,
+        inviteRole,
+        inheritProjectAccess,
+        expectedAccessRevision,
+        removeEmail,
+      },
+      undefined,
+      25_000,
+    ),
+)
+
+mcp.registerTool(
+  'share_project',
+  {
+    description:
+      'Update project sharing, including Present access inherited by its boards. Uses the existing owner-only permission service; does not publish board snapshots.',
+    inputSchema: {
+      projectId: z.string().min(1),
+      generalAccess: z.enum(['restricted', 'anyone_with_link']).optional(),
+      generalRole: z.enum(['viewer', 'editor', 'presentation']).optional(),
+      inviteEmail: z.string().email().optional(),
+      inviteRole: z.enum(['viewer', 'editor', 'presentation']).default('editor'),
+      removeEmail: z.string().email().optional(),
+      expectedAccessRevision: z.number().int().nonnegative().optional(),
+    },
+  },
+  async (args) => dispatch({ type: 'share_project', ...args }, undefined, 25_000),
 )
 
 // ==========================================
@@ -578,6 +720,7 @@ socketServer.on('connection', (socket) => {
     try {
       const message = JSON.parse(raw.toString()) as {
         type?: string
+        boardId?: string
         scene?: Scene
         operationId?: string
         selectionIds?: string[]
@@ -586,7 +729,10 @@ socketServer.on('connection', (socket) => {
         data?: unknown
         error?: string
       }
+      if (message.operationId && pending.get(message.operationId)?.adapter !== socket) return
       if (message.type === 'scene' && message.scene && Array.isArray(message.scene.elements)) {
+        activeAdapter = socket
+        activeBoardId = message.boardId
         scene = message.scene
         selectionIds = Array.isArray(message.selectionIds) ? message.selectionIds : []
         revision += 1
@@ -609,7 +755,20 @@ socketServer.on('connection', (socket) => {
     }
   })
 
-  socket.on('close', () => adapters.delete(socket))
+  socket.on('close', () => {
+    adapters.delete(socket)
+    for (const [id, operation] of pending)
+      if (operation.adapter === socket) {
+        operation.reject(new Error('The active browser adapter disconnected.'))
+        pending.delete(id)
+      }
+    if (activeAdapter === socket) {
+      activeAdapter = undefined
+      activeBoardId = undefined
+      scene = null
+      selectionIds = []
+    }
+  })
 })
 
 await mcp.connect(new StdioServerTransport())

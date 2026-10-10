@@ -272,6 +272,7 @@ try {
       if (frame === recipient.mainFrame()) navigations++
     })
     await share(owner)
+    await owner.bringToFront()
     await owner.locator('input[type="email"]').fill(identity.email)
     assert.equal(await owner.$eval('input[type="email"]', (input) => input.value), identity.email)
     await clickText(owner, 'Add')
@@ -357,6 +358,9 @@ try {
     const guestContext = await browser.createBrowserContext()
     const guest = await open(guestContext, `/boards/${id}`)
     await mode(guest, false)
+    // The owner mount publishes the initial scene asynchronously. This case
+    // closes a saved owner tab before testing unsaved edits in the guest tab.
+    await owner.waitForFunction(() => !window.__hasUnsavedChanges())
     await closeTab(owner)
     await guest.waitForFunction(() => window.__lazyCollab?.isLazyCollabActive === false)
     await guest.setOfflineMode(true)

@@ -1,3 +1,4 @@
+import { usePresentationDataBridge } from '../features/mcp-bridge/presentation-data-bridge'
 import { useAppChrome } from '../lib/app-chrome-context'
 import { getFirebaseAuth } from '../lib/firebase'
 import { ensureAuthenticatedUser } from '../features/collaboration/anonymous-user'
@@ -52,6 +53,14 @@ export function PresentationView({ boardId, config: providedConfig }: { boardId:
   const cache = useRef(new Map<string, Promise<Blob>>())
   const [config, setConfig] = useState<BoardShareConfig | undefined>(providedConfig)
   const [notes, setNotes] = useState<Record<string, string>>({})
+  const [notesRevision, setNotesRevision] = useState(0)
+  useEffect(() => {
+    const updated = (event: Event) => {
+      if ((event as CustomEvent).detail?.boardId === boardId) setNotesRevision((value) => value + 1)
+    }
+    window.addEventListener('slide-notes-updated', updated)
+    return () => window.removeEventListener('slide-notes-updated', updated)
+  }, [boardId])
   const urls = useRef(new Set<string>())
   const [error, setError] = useState('')
   const speaker = useSpeakerWindow()
@@ -117,6 +126,19 @@ export function PresentationView({ boardId, config: providedConfig }: { boardId:
       1000
     : 255
   const resolvedTheme = brightness < 128 ? 'dark' : (scene?.theme ?? appTheme)
+  usePresentationDataBridge(
+    config && scene
+      ? {
+          boardId,
+          projectId: config.projectId ?? '',
+          identity: user?.uid ?? 'local-user',
+          role: config.effectiveRole ?? (config.ownerId === user?.uid ? 'owner' : null),
+          local: false,
+          scene,
+          config,
+        }
+      : null,
+  )
   const slides = scene ? getSlides(scene.elements) : []
   useEffect(() => {
     setManifest(config ? { title: config.boardName, count: slides.length } : null)
@@ -201,6 +223,7 @@ export function PresentationView({ boardId, config: providedConfig }: { boardId:
   }, [
     started,
     presenterMode,
+    notesRevision,
     slideId,
     boardId,
     config?.accessRevision,

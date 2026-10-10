@@ -1757,6 +1757,7 @@ try {
     },
   )
   await record('Soft delete blocks direct links and stale scene saves; data retained', async () => {
+    await editor.bringToFront()
     await editor.goto(base)
     await editor.waitForSelector('[aria-label="Project actions for Project Beta"]')
     await menu(editor, 'Project Beta', 'Delete')
@@ -1777,7 +1778,23 @@ try {
     assert.equal(await editor.$eval('.project-delete-dialog', (node) => node.offsetWidth), 400)
     assert.equal(await editor.$eval('.project-delete-btn', (node) => getComputedStyle(node).paddingLeft), '16px')
     await editor.screenshot({ path: `${out}/delete-project-compact.png` })
-    await clickText(editor, 'Delete project')
+    const deletion = editor.waitForResponse(
+      (response) => {
+        const request = response.request()
+        return (
+          request.method() === 'POST' &&
+          response.url().endsWith('/manageProject') &&
+          JSON.parse(request.postData() || '{}').data?.action === 'delete'
+        )
+      },
+      { timeout: 60000 },
+    )
+    await editor.click('.project-delete-btn')
+    assert.equal(
+      (await deletion).status(),
+      200,
+      'Project deletion must finish successfully before checking its tombstone',
+    )
     await editor.waitForFunction(() => !document.querySelector('[role="dialog"]'), { timeout: 60000 })
     assert.ok((await project.ref.get()).data().deletedAt)
     assert.equal((await project.ref.collection('boards').get()).size, 2)

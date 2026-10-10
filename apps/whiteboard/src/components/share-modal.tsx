@@ -493,6 +493,9 @@ export function ShareModal({
                       if (emailError) setEmailError(null)
                     }}
                     onKeyDown={(e) => {
+                      // Excalidraw does not classify email inputs as writable targets.
+                      // Keep typing here from triggering canvas shortcuts.
+                      if (e.key !== 'Escape') e.stopPropagation()
                       if (e.key === 'Enter') {
                         e.preventDefault()
                         handleAddEmail()

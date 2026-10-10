@@ -56,6 +56,8 @@ Start the whiteboard, then use the configured agent normally. The agent starts i
 
 Read `get_schema` before writing, `get_canvas` before editing existing items, and `get_selection` when acting on the current selection. `validate_dag` detects cycles among bound Excalidraw arrows.
 
+For slide creation, previews, notes and Present sharing, see the [MCP slideshow tool contracts](docs/slideshow.md#mcp-slideshow-tools).
+
 ## Local persistence
 
 The web app stores projects and board documents in IndexedDB through `@agentic-whiteboard/storage`. The current adapter creates one local project and an initial board, autosaves canvas changes after a short idle period, and migrates any former localStorage scene into that board. The UI does not depend on IndexedDB directly, leaving SQLite for Tauri, platform storage for React Native, and cloud providers as future adapters. See [ADR 002](docs/decisions/002-storage-seam-and-local-indexeddb.md).

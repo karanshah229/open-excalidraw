@@ -1,3 +1,4 @@
+import { setWorkspaceIdentity } from '@agentic-whiteboard/storage'
 import { createUserWithEmailAndPassword, signInAnonymously, type Auth } from 'firebase/auth'
 import { doc, getDoc, getDocFromServer } from 'firebase/firestore'
 import { getFirebaseAuth, getFirebaseApp, getFirestoreDb } from '../src/lib/firebase'
@@ -26,6 +27,15 @@ export async function signInOwner(auth: Auth) {
   localStorage.removeItem('agentic-whiteboard:e2e-user')
   await workspaceApi.activateCloudWorkspace(credential.user.uid)
   return credential
+}
+
+/** Keep local-byte recovery separate from automatic cloud revision changes. */
+export function pauseCloudReplication() {
+  requireDemoEmulators()
+  const uid = getFirebaseAuth()!.currentUser?.uid
+  if (!uid) throw new Error('A fixture owner must be signed in.')
+  workspaceApi.deactivateCloudWorkspace()
+  setWorkspaceIdentity(uid)
 }
 
 /** Seed the actual owned board and publish policy through the application callable. */

@@ -9,8 +9,10 @@ const output = resolve(root, '.system_generated/all-tests')
 await mkdir(output, { recursive: true })
 const results = []
 const imageCloud = process.argv.includes('--image-cloud')
+const selectedStages = process.env.E2E_TEST_STAGES?.split(',')
 
 async function run(name, command, args) {
+  if (selectedStages && !selectedStages.includes(name)) return true
   const start = Date.now()
   const logPath = resolve(output, `${name}.log`)
   const log = createWriteStream(logPath)

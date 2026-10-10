@@ -38,6 +38,25 @@ export interface BoardShareConfig {
   projectRole?: 'owner' | ShareRole | null
 }
 
+/** Matches the strongest grant used when opening a shared board. */
+export function policyRole(
+  policy?: ProjectPolicy & { ownerId?: string; pending?: boolean; deletedAt?: unknown },
+  user = getFirebaseAuth()?.currentUser,
+): 'owner' | ShareRole | null {
+  if (!policy || policy.deletedAt) return null
+  if (user?.uid && policy.ownerId === user.uid) return 'owner'
+  if (policy.pending) return null
+  const email = user?.emailVerified ? user.email?.trim().toLowerCase() : undefined
+  const publicRole = policy.generalAccess === 'anyone_with_link' ? (policy.generalRole ?? 'viewer') : null
+  const invited =
+    email && policy.invitedEmails?.includes(email) ? (policy.collaborators?.[email]?.role ?? 'viewer') : null
+  return strongestRole(publicRole, invited || null)
+}
+export function strongestRole(a: 'owner' | ShareRole | null, b: 'owner' | ShareRole | null) {
+  const rank = { owner: 4, editor: 3, viewer: 2, presentation: 1 }
+  return a && (!b || rank[a] >= rank[b]) ? a : b
+}
+
 async function getDocWithTimeout<T>(docRef: any, timeoutMs = 3000): Promise<T> {
   return Promise.race([
     getDoc(docRef) as Promise<T>,
@@ -312,8 +331,8 @@ export const sharingService = {
 
   async getSharedBoard(
     boardId: string,
-    currentUserEmail?: string | null,
-    currentUserId?: string | null,
+    _currentUserEmail?: string | null,
+    _currentUserId?: string | null,
     knownFiles: BoardScene['files'] = {},
   ): Promise<{
     status: 'allowed' | 'restricted' | 'not-found'
@@ -352,32 +371,16 @@ export const sharingService = {
       return { status: 'allowed' as const, config: remoteData! }
     }
 
-    const userEmail = getFirebaseAuth()?.currentUser?.emailVerified ? currentUserEmail?.trim().toLowerCase() : undefined
-    const grant = (
-      policy?: ProjectPolicy & { ownerId?: string; pending?: boolean; deletedAt?: unknown },
-    ): 'owner' | ShareRole | null => {
-      if (!policy || policy.deletedAt) return null
-      if (currentUserId && policy.ownerId === currentUserId) return 'owner'
-      if (policy.pending) return null
-      const rank = { owner: 4, editor: 3, viewer: 2, presentation: 1 }
-      const roles: ShareRole[] = []
-      if (policy.generalAccess === 'anyone_with_link') roles.push(policy.generalRole ?? 'viewer')
-      if (userEmail && policy.invitedEmails?.includes(userEmail))
-        roles.push(policy.collaborators?.[userEmail]?.role ?? 'viewer')
-      return roles.reduce<ShareRole | null>((best, role) => (!best || rank[role] > rank[best] ? role : best), null)
-    }
     let parent: (ProjectPolicy & { ownerId?: string; pending?: boolean; deletedAt?: unknown }) | undefined
     if (remoteData.projectId && db) {
       const snapshot = await getDoc(doc(db, 'projectShares', remoteData.projectId)).catch(() => null)
       if (snapshot?.exists()) parent = snapshot.data() as typeof parent
     }
     remoteData.projectPolicy = parent
-    const inheritedRole = remoteData.inheritProjectAccess !== false ? grant(parent) : null
+    const inheritedRole = remoteData.inheritProjectAccess !== false ? policyRole(parent) : null
     remoteData.projectRole = inheritedRole
-    const rank = { owner: 4, editor: 3, viewer: 2, presentation: 1 }
-    const directRole = grant(remoteData)
-    remoteData.effectiveRole =
-      directRole && (!inheritedRole || rank[directRole] >= rank[inheritedRole]) ? directRole : inheritedRole
+    const directRole = policyRole(remoteData)
+    remoteData.effectiveRole = strongestRole(directRole, inheritedRole)
     if (!remoteData.effectiveRole) return { status: 'restricted' }
     return allowed()
   },
