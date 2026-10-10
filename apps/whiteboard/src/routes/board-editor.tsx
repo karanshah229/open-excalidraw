@@ -50,6 +50,7 @@ import {
 import { reconcileElementsLWW } from '../features/collaboration/reconcile'
 import { getFirebaseAuth, getFirestoreDb, isFirebaseConfigured } from '../lib/firebase'
 import { createSceneSession } from '../features/scene/scene-session'
+import { scheduleWhiteboardFontPreload } from '../features/fonts/font-loading'
 import { getSlides, newSlideData, slideLabel, slideMetadata } from '../features/slides/slide-model'
 import {
   commitSlideCommand,
@@ -1438,6 +1439,11 @@ export function BoardEditor() {
       handleSaveFailure(scene, error)
     }
   }, [enqueueSceneSave, handleSaveFailure, isReadOnly])
+
+  useEffect(() => {
+    if (!initialData) return
+    return scheduleWhiteboardFontPreload()
+  }, [initialData])
 
   // Task 1: Auto-downgrade & state persistence when room membership changes
   const prevLazyActiveRef = useRef(false)

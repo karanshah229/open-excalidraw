@@ -5072,3 +5072,26 @@ button {
   outline: 2px solid var(--color-on-surface);
   outline-offset: -3px;
 }
+
+.properties-content[data-fonts-loading='true'],
+.fonts button[data-font-load-state='loading'] {
+  cursor: progress;
+}
+
+.font-loading-feedback {
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
+.font-loading-feedback button {
+  display: block;
+  margin-top: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  cursor: pointer;
+}
