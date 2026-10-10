@@ -51,7 +51,7 @@ interface StatusConfig {
   colorTheme: 'synced' | 'local' | 'saving' | 'error' | 'conflict'
 }
 
-function getStatusConfig(state: EditorStatus): StatusConfig {
+function getStatusConfig(state: EditorStatus, cloudSyncEnabled: boolean): StatusConfig {
   switch (state) {
     case 'Synced':
       return {
@@ -63,7 +63,7 @@ function getStatusConfig(state: EditorStatus): StatusConfig {
     case 'Synced locally':
       return {
         title: 'Synced locally',
-        description: 'Saved to this device. Syncing to cloud.',
+        description: cloudSyncEnabled ? 'Saved to this device. Syncing to cloud.' : 'Saved to this device only.',
         icon: HardDrive,
         colorTheme: 'local',
       }
@@ -169,9 +169,9 @@ export function SyncStatusDropdown({
   const [isOpen, setIsOpen] = useState(false)
   const [copied, setCopied] = useState(false)
   const { fullName, user } = useUser()
-  const { user: authUser } = useAuth()
+  const { user: authUser, isConfigured } = useAuth()
 
-  const config = getStatusConfig(state)
+  const config = getStatusConfig(state, Boolean(isConfigured && authUser && !authUser.isAnonymous))
   const StatusIcon = config.icon
 
   // Compute live scene size and element count when popover is open

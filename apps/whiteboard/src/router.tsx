@@ -35,7 +35,21 @@ const boardRoute = createRoute({
   ),
 })
 const routeTree = rootRoute.addChildren([homeRoute, projectRoute, settingsRoute, boardRoute])
-export const router = createRouter({ routeTree, defaultPreload: 'intent' })
+export const router = createRouter({
+  routeTree,
+  defaultPreload: 'intent',
+  defaultErrorComponent: () => (
+    <div className="access-denied-container">
+      <div className="access-denied-card" role="alert">
+        <h2 className="access-denied-title">Could not load this page</h2>
+        <p className="access-denied-desc">Please reload to try again.</p>
+        <button className="google-share-done-btn" onClick={() => window.location.reload()}>
+          Reload
+        </button>
+      </div>
+    </div>
+  ),
+})
 declare module '@tanstack/react-router' {
   interface Register {
     router: typeof router

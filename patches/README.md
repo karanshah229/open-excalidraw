@@ -7,3 +7,9 @@ The patch also replaces the pending image preview cursor with `move`, after imag
 Both `dist/dev` and `dist/prod` are patched. The generated production diff is large because the upstream artifact is minified. The upstream picker, file decoding, and byte persistence remain intact. The format E2E suite asserts `move` before placement and a cleared pending image/no `wait` cursor after placement for every format.
 
 pnpm applies this version-scoped patch on install through `pnpm-workspace.yaml`; the lockfile contains its content hash. When updating Excalidraw, check whether upstream accepts both ICO MIME types and supports the desired placement cursor, then remove or rebase the patch. Run `pnpm test:images:formats`, `pnpm test:images:formats:cloud`, and `pnpm test:images:formats:prod-bundle` after changing it.
+
+## Slide frames
+
+The same patch adds two optional host props: `frameTool: { label, createCustomData(elements) }` and `getFrameLabel(frame, elements)`. The first adds **Components → Slide** beside ordinary Frame, keeps tool intent local to the engine, and tags the frame at native creation time so metadata and drawing share one undo step. The second derives the displayed slide number without changing the saved native frame name or its title editor. The ordinary Frame action/shortcut resets slide intent.
+
+These hooks are forwarded through the engine wrapper and typed in its declarations. Both development and production artifacts must be patched together. Rebase these narrow hooks when upgrading Excalidraw, preserving the existing ICO/cursor changes. Run `pnpm test:slides`, `pnpm test:slides:prod`, and the image suites above after patch changes.

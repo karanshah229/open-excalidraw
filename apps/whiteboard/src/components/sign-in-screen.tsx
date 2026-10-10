@@ -23,7 +23,7 @@ export function SignInScreen({ onContinueLocal }: { onContinueLocal: () => void 
           </span>
           Continue with Google
         </button>
-        <button type="button" className="sign-in-button" onClick={onContinueLocal}>
+        <button type="button" className="sign-in-button sign-in-button-secondary" onClick={onContinueLocal}>
           Continue without signing in
         </button>
         <p className="sign-in-note">Local boards are saved only in this browser.</p>
