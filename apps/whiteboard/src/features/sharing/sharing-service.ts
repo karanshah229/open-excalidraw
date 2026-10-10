@@ -1,11 +1,12 @@
-import { doc, getDoc, onSnapshot, updateDoc } from 'firebase/firestore'
+import { doc, getDoc, onSnapshot } from 'firebase/firestore'
 import { onDisconnect, onValue, ref, remove, set } from 'firebase/database'
 import { projectService, type ProjectPolicy } from './project-service'
 import { getFirebaseAuth, getFirebaseRtdb, getFirestoreDb } from '../../lib/firebase'
 import { restoreSceneAssets, storeSceneAssets } from '../assets/scene-assets'
-import { firestoreValue, workspaceStore, workspaceValue } from '../workspace/workspace-api'
+import { workspaceStore, workspaceValue } from '../workspace/workspace-api'
 import type { BoardScene } from '@agentic-whiteboard/storage'
 import type { ActiveSessionRecord } from '../collaboration/types'
+import { sceneService } from '../scenes/scene-service'
 
 export type ShareAccessLevel = 'restricted' | 'anyone_with_link'
 export type ShareRole = 'viewer' | 'editor' | 'presentation'
@@ -31,6 +32,8 @@ export interface BoardShareConfig {
   invitedEmails: string[]
   collaborators: Record<string, BoardCollaborator>
   scene?: BoardScene
+  sceneRevisionId?: string
+  sceneGeneration?: number
   createdAt: string
   updatedAt: string
   accessRevision?: number
@@ -61,15 +64,6 @@ async function getDocWithTimeout<T>(docRef: any, timeoutMs = 3000): Promise<T> {
   return Promise.race([
     getDoc(docRef) as Promise<T>,
     new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Firestore getDoc timeout')), timeoutMs)),
-  ])
-}
-
-function withFirestoreWriteTimeout<T>(operation: Promise<T>, timeoutMs = 15_000): Promise<T> {
-  return Promise.race([
-    operation,
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`Firestore write acknowledgement timed out after ${timeoutMs}ms`)), timeoutMs),
-    ),
   ])
 }
 
@@ -197,38 +191,28 @@ export const sharingService = {
     return normalizedConfig
   },
 
-  async syncBoardSceneToShare(boardId: string, scene: BoardScene, boardName?: string): Promise<void> {
+  async syncBoardSceneToShare(
+    boardId: string,
+    scene: BoardScene,
+    _boardName?: string,
+    expectedGeneration?: number,
+  ): Promise<void> {
     const db = getFirestoreDb()
-    if (db) {
-      try {
-        const ref = doc(db, 'boardShares', boardId)
-        if (!(await getDoc(ref)).exists()) return
-        const updatePayload: Record<string, unknown> = {
-          scene: firestoreValue(await storeSharedAssets(boardId, scene)),
-          updatedAt: new Date().toISOString(),
-        }
-        if (boardName) updatePayload.boardName = boardName
-        await withFirestoreWriteTimeout(updateDoc(ref, updatePayload))
-        window.dispatchEvent(new Event('workspace-changed'))
-      } catch (error: any) {
-        // An unshared board has no share document. Surface actual upload failures.
-        if (error?.code !== 'not-found') throw error
-      }
-    }
+    const uid = getFirebaseAuth()?.currentUser?.uid
+    if (!db || !(await getDoc(doc(db, 'boardShares', boardId))).exists()) return
+    const stored = await storeSharedAssets(boardId, scene)
+    if (!uid || getFirebaseAuth()?.currentUser?.uid !== uid) throw new Error('Account changed while saving the board.')
+    await sceneService.commit(boardId, stored, { expectedGeneration })
+    window.dispatchEvent(new Event('workspace-changed'))
   },
 
-  async updateSharedScene(boardId: string, scene: BoardScene): Promise<void> {
-    const db = getFirestoreDb()
-    if (db) {
-      const ref = doc(db, 'boardShares', boardId)
-      await withFirestoreWriteTimeout(
-        updateDoc(ref, {
-          scene: firestoreValue(await storeSharedAssets(boardId, scene)),
-          updatedAt: new Date().toISOString(),
-        }),
-      )
-      window.dispatchEvent(new Event('workspace-changed'))
-    }
+  async updateSharedScene(boardId: string, scene: BoardScene, expectedGeneration?: number): Promise<void> {
+    if (!getFirestoreDb()) return
+    const uid = getFirebaseAuth()?.currentUser?.uid
+    const stored = await storeSharedAssets(boardId, scene)
+    if (!uid || getFirebaseAuth()?.currentUser?.uid !== uid) throw new Error('Account changed while saving the board.')
+    await sceneService.commit(boardId, stored, { expectedGeneration })
+    window.dispatchEvent(new Event('workspace-changed'))
   },
 
   subscribeToSharedBoard(
@@ -245,6 +229,7 @@ export const sharingService = {
     let hydration = Promise.resolve()
     let disposed = false
     let boardUnsubscribe: (() => void) | undefined
+    let sceneUnsubscribe: (() => void) | undefined
     let parentUnsubscribe: (() => void) | undefined
     let parentId: string | undefined
     let retryTimer: ReturnType<typeof setTimeout> | undefined
@@ -269,6 +254,15 @@ export const sharingService = {
       if (disposed || boardUnsubscribe) return
       boardUnsubscribe = onSnapshot(boardRef, refresh, (error) => {
         boardUnsubscribe = undefined // Firestore terminates a denied listener.
+        denied(error)
+      })
+    }
+    const attachScene = () => {
+      if (disposed || sceneUnsubscribe) return
+      sceneUnsubscribe = sceneService.subscribeHead(boardId, refresh, (error) => {
+        // Firestore terminates denied listeners. Recovery must reattach the
+        // scene head as well as policy listeners, or later drawing commits disappear.
+        sceneUnsubscribe = undefined
         denied(error)
       })
     }
@@ -298,6 +292,7 @@ export const sharingService = {
           retryTimer = undefined
           onUpdate(result.config)
           attachBoard()
+          attachScene()
           if (
             result.config.projectId &&
             result.config.projectRole &&
@@ -320,11 +315,13 @@ export const sharingService = {
         })
     }
     attachBoard()
+    attachScene()
     return () => {
       disposed = true
       generation++
       if (retryTimer) clearTimeout(retryTimer)
       boardUnsubscribe?.()
+      sceneUnsubscribe?.()
       parentUnsubscribe?.()
     }
   },
@@ -363,9 +360,21 @@ export const sharingService = {
     const allowed = async () => {
       sharingService.rememberShareConfig(remoteData!, requestUser)
       try {
-        if (remoteData!.scene) remoteData!.scene = await restoreSceneAssets(remoteData!.scene, knownFiles)
+        // A committed empty scene is authoritative; never substitute legacy content.
+        let canonical = await sceneService.load(boardId)
+        if (!canonical) {
+          await sceneService.ensure(boardId, remoteData!.projectId)
+          canonical = await sceneService.load(boardId)
+        }
+        if (canonical) {
+          remoteData!.scene = await restoreSceneAssets(canonical.scene, knownFiles)
+          remoteData!.sceneRevisionId = canonical.revisionId
+          remoteData!.sceneGeneration = canonical.generation
+        } else if (remoteData!.scene) remoteData!.scene = await restoreSceneAssets(remoteData!.scene, knownFiles)
       } catch (error: any) {
-        if (error?.code === 'functions/permission-denied') return { status: 'restricted' as const }
+        if (error?.code === 'functions/permission-denied' || error?.code === 'permission-denied') {
+          return { status: 'restricted' as const }
+        }
         throw error
       }
       return { status: 'allowed' as const, config: remoteData! }

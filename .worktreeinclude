@@ -1,2 +1,5 @@
-# Copy local development Firebase configuration into new Codex-managed worktrees.
+# Copy local Firebase build and deployment configuration into new Codex-managed worktrees.
 apps/whiteboard/.env.development
+functions/.env.open-excalidraw-dev-2
+apps/whiteboard/.env.production
+functions/.env.open-excalidraw-b2ab4

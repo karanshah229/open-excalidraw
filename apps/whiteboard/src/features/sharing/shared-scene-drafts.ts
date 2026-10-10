@@ -1,7 +1,7 @@
 import type { BoardScene } from '@agentic-whiteboard/storage'
 import { reconcileElementsLWW } from '../collaboration/reconcile'
 
-export type SharedSceneDraft = { key: string; revision: string; scene: BoardScene }
+export type SharedSceneDraft = { key: string; revision: string; scene: BoardScene; generation?: number }
 const storeName = 'drafts'
 let database: Promise<IDBDatabase> | undefined
 
@@ -27,19 +27,35 @@ export async function readSharedSceneDraft(boardId: string, uid: string): Promis
 }
 
 // Merge inside the transaction so another tab cannot overwrite a newer draft.
-export async function saveSharedSceneDraft(boardId: string, uid: string, scene: BoardScene): Promise<SharedSceneDraft> {
+export async function saveSharedSceneDraft(
+  boardId: string,
+  uid: string,
+  scene: BoardScene,
+  generation?: number,
+): Promise<SharedSceneDraft> {
   const db = await openDatabase()
   return new Promise((resolve, reject) => {
     const transaction = db.transaction(storeName, 'readwrite')
     const store = transaction.objectStore(storeName)
     const key = `${uid}:${boardId}`
     let draft: SharedSceneDraft
+    let failure: Error | undefined
     const request = store.get(key)
     request.onsuccess = () => {
       const previous = request.result as SharedSceneDraft | undefined
+      if (
+        previous &&
+        generation !== undefined &&
+        (previous.generation === undefined ? generation > 1 : previous.generation !== generation)
+      ) {
+        failure = new Error('Board generation changed. The previous local draft is retained for explicit recovery.')
+        transaction.abort()
+        return
+      }
       draft = {
         key,
         revision: crypto.randomUUID(),
+        generation: generation ?? previous?.generation,
         scene: previous
           ? {
               ...scene,
@@ -51,7 +67,7 @@ export async function saveSharedSceneDraft(boardId: string, uid: string, scene: 
       store.put(draft)
     }
     transaction.oncomplete = () => resolve(draft)
-    transaction.onerror = transaction.onabort = () => reject(transaction.error)
+    transaction.onerror = transaction.onabort = () => reject(failure ?? transaction.error)
   })
 }
 

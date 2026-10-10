@@ -1,3 +1,4 @@
+import { ensureScene } from './board-scenes.js';
 import { policyRole, strongestRole } from './access-role.js';
 export { policyRole } from './access-role.js';
 import { getFirestore } from 'firebase-admin/firestore';
@@ -284,7 +285,7 @@ export const manageBoardAccess = onCall({ region }, async (request) => {
         invitedEmails: [],
         collaborators: {},
         inheritProjectAccess: true,
-        scene: board.data().scene,
+        sceneId: boardId,
         createdAt: board.data().createdAt,
     }, undefined, request.data.expectedRevision);
     if (action === 'delete')
@@ -489,7 +490,9 @@ export const createProjectBoard = onCall({ region }, async (request) => {
         scene: { elements: [], appState: { viewBackgroundColor: 'transparent' }, files: {} },
     };
     await db.runTransaction(async (tx) => {
-        const parent = await tx.get(db.doc(`projectShares/${projectId}`)), existing = await tx.get(ref);
+        const parent = await tx.get(db.doc(`projectShares/${projectId}`)), existing = await tx.get(ref), privateParent = await tx.get(db.doc(`users/${policy.ownerId}/projects/${projectId}`));
+        if (!privateParent.exists || privateParent.data()?.deletedAt || privateParent.data()?.ownerId !== policy.ownerId)
+            fail('Project was deleted or ownership changed.');
         const currentRole = policyRole(parent.data(), uid, verifiedEmail(request));
         if (currentRole !== 'owner' && currentRole !== 'editor')
             fail('Project editing access was revoked.');
@@ -504,7 +507,7 @@ export const createProjectBoard = onCall({ region }, async (request) => {
             ownerName: policy.ownerName,
             createdAt,
             updatedAt: createdAt,
-            scene: board.scene,
+            sceneId: boardId,
             inheritProjectAccess: true,
             generalAccess: 'restricted',
             generalRole: 'viewer',
@@ -514,6 +517,7 @@ export const createProjectBoard = onCall({ region }, async (request) => {
             pending: false,
         });
     });
+    await ensureScene(boardId, { uid, email: verifiedEmail(request) }, projectId);
     await mirrorCurrentPolicy('board', boardId);
     return board;
 });
@@ -557,7 +561,7 @@ export const publishProjectBoard = onDocumentWritten({ document: 'users/{ownerId
             collaborators: {},
             invitedEmails: [],
             inheritProjectAccess: true,
-            scene: data.scene,
+            sceneId: boardId,
             createdAt: data.createdAt,
             updatedAt: data.updatedAt,
             accessRevision: 1,

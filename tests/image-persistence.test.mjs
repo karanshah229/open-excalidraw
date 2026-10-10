@@ -35,7 +35,7 @@ Object.assign(
 )
 const server = await createServer({
   root: fileURLToPath(new URL('../apps/whiteboard', import.meta.url)),
-  server: { host: '127.0.0.1', port: 15179, strictPort: true },
+  server: { host: '127.0.0.1', port: 15179, strictPort: true, hmr: false },
 })
 await server.listen()
 const browser = await puppeteer.launch({

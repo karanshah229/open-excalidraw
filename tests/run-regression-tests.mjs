@@ -7,6 +7,8 @@ import { resolve } from 'node:path'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const all = [
+  'chunked-scenes.test.mjs',
+  'five-chunk-scene.test.mjs',
   'sharing-flow-audit.test.mjs',
   'export-retry.test.mjs',
   'presentation-access.test.mjs',
@@ -35,7 +37,10 @@ const all = [
 ]
 const filter = process.argv.find((arg) => arg.startsWith('--test='))?.slice(7)
 const files = process.env.E2E_REGRESSION_FILES ? JSON.parse(process.env.E2E_REGRESSION_FILES) : filter ? [filter] : all
-if (!files.length || files.some((name) => !all.includes(name) && name !== 'sharing-flow-audit.test.mjs'))
+if (
+  !files.length ||
+  files.some((name) => !all.includes(name) && !['sharing-flow-audit.test.mjs', 'scene-backend.test.mjs'].includes(name))
+)
   throw new Error('Unknown regression suite')
 const run = (command, args, env = process.env) =>
   new Promise((resolveRun, reject) => {
@@ -116,7 +121,19 @@ if (!process.argv.includes('--inside-emulators')) {
   const server = await createServer({
     root: resolve(root, 'apps/whiteboard'),
     cacheDir: resolve(out, 'vite-cache'),
-    server: { host: '127.0.0.1', port: 15190, strictPort: true },
+    plugins:
+      files.length === 1 && files[0] === 'chunked-scenes.test.mjs'
+        ? [
+            {
+              name: 'chunk-scene-tracing',
+              transformIndexHtml: {
+                order: 'pre',
+                handler: (html) => html.replace('/src/main.tsx', '/tests/chunked-scenes-bootstrap.ts'),
+              },
+            },
+          ]
+        : [],
+    server: { host: '127.0.0.1', port: 15190, strictPort: true, hmr: false },
   })
   const results = []
   try {

@@ -3,6 +3,7 @@ import { createRootRoute, createRoute, createRouter } from '@tanstack/react-rout
 import { AppShell } from './app'
 import { WorkspaceHome } from './features/workspace/workspace-home'
 import { SettingsPage } from './features/settings/settings-page'
+import { BoardLoading } from './components/board-loading'
 
 const BoardEditor = lazy(() => import('./routes/board-editor').then((module) => ({ default: module.BoardEditor })))
 const PresentationPage = lazy(() =>
@@ -32,7 +33,7 @@ const boardRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/boards/$boardId',
   component: () => (
-    <Suspense fallback={<div className="workspace-loading">Loading editor…</div>}>
+    <Suspense fallback={<BoardLoading />}>
       <BoardEditor />
     </Suspense>
   ),

@@ -39,3 +39,6 @@ scratch/
 
 # Generated browser screenshots and test diagnostics
 .system_generated/
+
+# Local Git worktrees
+/.worktrees/

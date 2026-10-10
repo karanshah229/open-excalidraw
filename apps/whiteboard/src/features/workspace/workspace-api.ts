@@ -5,7 +5,7 @@ import { getFirestoreDb } from '../../lib/firebase'
 import { restoreSceneAssets, storeSceneAssets } from '../assets/scene-assets'
 import { sharingService } from '../sharing/sharing-service'
 import { projectService, type VisibleProject } from '../sharing/project-service'
-import { reconcileElementsLWW } from '../collaboration/reconcile'
+import { sceneService, SceneGenerationError } from '../scenes/scene-service'
 
 export type WorkspaceBoard = Board & {
   project: VisibleProject
@@ -113,11 +113,6 @@ export function workspaceValue(value: unknown): unknown {
   return value
 }
 
-async function updateSyncStatus(boardId: string, syncStatus: Board['syncStatus']) {
-  await workspaceStore.updateBoardSyncStatus(boardId, syncStatus)
-  window.dispatchEvent(new CustomEvent(`board-sync:${boardId}`, { detail: syncStatus }))
-}
-
 function queueSync() {
   if (!activeUserId || syncTimer) return
   const delay = Math.max(SYNC_DEBOUNCE_MS, nextWriteAt - Date.now())
@@ -149,10 +144,6 @@ const cloudBoard = (board: BoardDocument): BoardDocument => {
     lastSyncError: null,
   }
 }
-
-/** A reload may happen after Firestore committed a write but before the local ACK was recorded. */
-const matchesCommittedVersion = (local: BoardDocument, remote: BoardDocument) =>
-  local.revision === remote.revision && local.updatedAt === remote.updatedAt
 
 async function performWorkspaceSync(userId: string) {
   const generation = activation
@@ -192,56 +183,60 @@ async function performWorkspaceSync(userId: string) {
     const wait = Math.max(0, nextWriteAt - Date.now())
     if (wait) await new Promise<void>((resolve) => window.setTimeout(resolve, wait))
     nextWriteAt = Date.now() + MIN_WRITE_INTERVAL_MS
+    let saveGeneration: number | undefined
     try {
       await withSyncLock(async () => {
         const current = await workspaceStore.loadBoard(board.id)
         if (!current || (current.syncStatus !== 'local-only' && current.syncStatus !== 'sync-failed')) return
+        if (current.cloudScenePending) throw new Error('Load the complete board before saving. Your draft is retained.')
+        saveGeneration = current.cloudGeneration ?? 1
         const ref = doc(db, 'users', userId, 'projects', current.projectId, 'boards', current.id)
-        const assetRoot = `users/${userId}/boards/${current.id}/assets`
-        const cloudScene = await storeSceneAssets(current.scene, assetRoot, current.projectId)
-        let resolvedBoard = current
+        // Metadata establishes ownership; it never carries the scene payload.
         await runTransaction(db, async (transaction) => {
           const parent = await transaction.get(doc(db, 'users', userId, 'projects', current.projectId))
-          if (isProjectDeleted(parent.data())) throw new DeletedProjectError(PROJECT_DELETED_MESSAGE)
-          const remoteSnapshot = await transaction.get(ref)
-          if (remoteSnapshot.exists() && remoteSnapshot.data().active === false && current.active)
-            throw new Error('Board was deleted.')
-          if (remoteSnapshot.exists()) {
-            const remoteData = workspaceValue(remoteSnapshot.data()) as BoardDocument
-            const remoteRevision = Number(remoteData.revision ?? 0)
-            if (remoteRevision !== current.baseRevision) {
-              remoteData.scene = await restoreSceneAssets(remoteData.scene, current.scene.files)
-              // Element-level LWW reconciliation
-              const mergedElements = reconcileElementsLWW(
-                current.scene?.elements ?? [],
-                remoteData.scene?.elements ?? [],
-              )
-              const nextRev = Math.max(current.revision, remoteRevision) + 1
-              resolvedBoard = {
-                ...current,
-                revision: nextRev,
-                baseRevision: nextRev,
-                scene: {
-                  ...current.scene,
-                  elements: mergedElements,
-                  files: { ...remoteData.scene.files, ...current.scene.files },
-                },
-                updatedAt: new Date().toISOString(),
-              }
-              const mergedScene = await storeSceneAssets(resolvedBoard.scene, assetRoot, current.projectId)
-              transaction.set(ref, firestoreValue(cloudBoard({ ...resolvedBoard, scene: mergedScene })))
-              return
-            }
-          }
-          transaction.set(ref, firestoreValue(cloudBoard({ ...current, scene: cloudScene })))
+          if (!parent.exists() || isProjectDeleted(parent.data()))
+            throw new DeletedProjectError(PROJECT_DELETED_MESSAGE)
+          const remote = await transaction.get(ref)
+          if (remote.exists() && remote.data().active === false && current.active) throw new Error('Board was deleted.')
+          const { scene: _scene, ...metadata } = cloudBoard(current)
+          // Preserve legacy payload until trusted registration migrates both copies.
+          transaction.set(ref, firestoreValue({ ...metadata, sceneId: current.id }) as Record<string, unknown>, {
+            merge: true,
+          })
         })
-        if (resolvedBoard !== current) {
-          await workspaceStore.upsertBoard(resolvedBoard)
+        if (generation !== activation || activeUserId !== userId) return
+        if (!current.active) {
+          await workspaceStore.markBoardSynced(current.id, current.revision)
+          return
         }
-        await workspaceStore.markBoardSynced(resolvedBoard.id, resolvedBoard.revision)
-        window.dispatchEvent(new CustomEvent(`board-sync:${resolvedBoard.id}`, { detail: 'synced' }))
+        await sceneService.ensure(current.id, current.projectId)
+        const assetRoot = `users/${userId}/boards/${current.id}/assets`
+        const cloudScene = await storeSceneAssets(current.scene, assetRoot, current.projectId)
+        const result = await sceneService.commit(current.id, cloudScene, {
+          expectedGeneration: current.cloudGeneration,
+        })
+        if (generation !== activation || activeUserId !== userId) return
+        const restored = await restoreSceneAssets(result.scene, current.scene.files)
+        await workspaceStore.acknowledgeBoardScene(
+          current.id,
+          current.revision,
+          restored,
+          result.revisionId,
+          result.generation,
+          { expectedCloudRevisionId: current.cloudRevisionId },
+        )
+        const resolvedBoard = (await workspaceStore.loadBoard(current.id))!
+        window.dispatchEvent(new CustomEvent(`board-sync:${resolvedBoard.id}`, { detail: resolvedBoard.syncStatus }))
       })
     } catch (error) {
+      if (generation !== activation || activeUserId !== userId) return
+      if (error instanceof SceneGenerationError) {
+        await workspaceStore.markBoardConflict(board.id, error.message, saveGeneration)
+        const latest = await workspaceStore.loadBoard(board.id)
+        if (generation === activation && activeUserId === userId)
+          window.dispatchEvent(new CustomEvent(`board-sync:${board.id}`, { detail: latest?.syncStatus ?? 'conflict' }))
+        continue
+      }
       // The project can be deleted between the metadata write and image upload.
       const permissionDenied = (error as { code?: string })?.code === 'functions/permission-denied'
       let deleted = error instanceof DeletedProjectError || deletedProjectIds.has(board.projectId)
@@ -331,44 +326,21 @@ function subscribeToRemoteWorkspace(userId: string) {
                   void (async () => {
                     if (generation !== activation || activeUserId !== userId || deletedProjectIds.has(project.id))
                       return
-                    const normalized = cloudBoard(remote)
-                    if (!normalized.active) {
-                      await workspaceStore.upsertBoard(normalized)
-                      emitWorkspaceChange()
-                      return
-                    }
-                    const known = await workspaceStore.loadBoard(remote.id)
-                    normalized.scene = await restoreSceneAssets(normalized.scene, known?.scene.files)
-                    if (generation !== activation || activeUserId !== userId || deletedProjectIds.has(project.id))
-                      return
-                    const local = await workspaceStore.loadBoard(remote.id)
-                    if (local?.syncStatus === 'local-only' || local?.syncStatus === 'sync-failed') {
-                      if (matchesCommittedVersion(local, normalized)) {
-                        await workspaceStore.markBoardSynced(local.id, local.revision)
-                        emitWorkspaceChange()
-                      } else if (normalized.revision !== local.baseRevision && normalized.revision !== local.revision) {
-                        // Element-level LWW reconciliation
-                        const mergedElements = reconcileElementsLWW(
-                          local.scene?.elements ?? [],
-                          normalized.scene?.elements ?? [],
-                        )
-                        const mergedBoard: BoardDocument = {
-                          ...local,
-                          revision: Math.max(local.revision, normalized.revision) + 1,
-                          scene: {
-                            ...local.scene,
-                            elements: mergedElements,
-                            files: { ...normalized.scene.files, ...local.scene.files },
-                          },
-                        }
-                        await workspaceStore.upsertBoard(mergedBoard)
-                        queueSync()
-                      }
-                    } else if (!local || normalized.revision >= local.revision) {
-                      await workspaceStore.upsertBoard(normalized)
-                      await updateSyncStatus(remote.id, 'synced')
-                      emitWorkspaceChange()
-                    }
+                    // Workspace discovery stays metadata-only. Large scenes are loaded on open,
+                    // or explicitly for export; listing must not fan out into chunk downloads.
+                    await workspaceStore.upsertBoardMetadata(
+                      cloudBoard({
+                        ...remote,
+                        cloudScenePending: Boolean(
+                          (remote as BoardDocument & { sceneId?: string }).sceneId || !remote.scene,
+                        ),
+                        scene: (remote as BoardDocument & { sceneId?: string }).sceneId
+                          ? { elements: [], appState: {} }
+                          : (remote.scene ?? { elements: [], appState: {} }),
+                        formatVersion: 1,
+                      }),
+                    )
+                    emitWorkspaceChange()
                   })().catch((error) => {
                     console.error(`Failed to restore cloud board ${remote.id}:`, error)
                     window.dispatchEvent(new CustomEvent(`board-sync:${remote.id}`, { detail: 'sync-failed' }))
@@ -381,6 +353,69 @@ function subscribeToRemoteWorkspace(userId: string) {
       })
       .catch(console.error)
   })
+}
+
+const hydrationVersions = new Map<string, number>()
+async function hydrateBoardOnOpen(boardId: string): Promise<BoardDocument | null> {
+  const loadVersion = (hydrationVersions.get(boardId) ?? 0) + 1
+  hydrationVersions.set(boardId, loadVersion)
+  const userId = activeUserId
+  const currentActivation = activation
+  const local = await workspaceStore.loadBoard(boardId)
+  if (!local?.active || !userId || !getFirestoreDb()) return local
+  // A project tombstone intentionally denies scene/asset reads. Keep the owner's
+  // retained local draft available in the explicit read-only deleted-project view.
+  if (local.syncStatus === 'sync-blocked') return local
+  if (deletedProjectIds.has(local.projectId)) {
+    await blockProjectSync(local.projectId)
+    return workspaceStore.loadBoard(boardId)
+  }
+  const localProject = (await workspaceStore.listProjects(true)).find((project) => project.id === local.projectId)
+  if (currentActivation !== activation || userId !== activeUserId) return null
+  if (localProject && isProjectDeleted(localProject as unknown as Record<string, unknown>)) {
+    await blockProjectSync(local.projectId)
+    return workspaceStore.loadBoard(boardId)
+  }
+  if (!navigator.onLine) {
+    if (local.cloudScenePending) throw new Error('Connect to download this board before editing it offline.')
+    return local
+  }
+  let canonical
+  try {
+    canonical = await sceneService.load(boardId)
+  } catch (error) {
+    const code = (error as { code?: string }).code ?? ''
+    if (!local.cloudScenePending && ['unavailable', 'deadline-exceeded'].includes(code)) return local
+    // The parent can be deleted while the page is closed or during chunk fetch.
+    // Only the verified owner gets this local recovery path; other access denials stay denied.
+    if ((code === 'permission-denied' || code === 'functions/permission-denied') && localProject?.ownerId === userId) {
+      try {
+        const parent = await getDoc(doc(getFirestoreDb()!, 'users', userId, 'projects', local.projectId))
+        if (currentActivation !== activation || userId !== activeUserId) return null
+        if (parent.exists() && isProjectDeleted(parent.data())) {
+          await workspaceStore.upsertProject({ ...parent.data(), id: local.projectId, ownerId: userId } as Project)
+          await blockProjectSync(local.projectId)
+          return workspaceStore.loadBoard(boardId)
+        }
+      } catch {
+        // Preserve the original authorization error for unrelated revocations or transport failures.
+      }
+    }
+    throw error
+  }
+  if (currentActivation !== activation || userId !== activeUserId) return null
+  if (hydrationVersions.get(boardId) !== loadVersion) return workspaceStore.loadBoard(boardId)
+  if (!canonical) {
+    if (local.cloudScenePending) throw new Error('Board scene is not available yet. Retry loading before editing.')
+    return local // Legacy migration is performed on the next owner sync.
+  }
+  const scene = await restoreSceneAssets(canonical.scene, local.scene.files)
+  if (currentActivation !== activation || userId !== activeUserId) return null
+  if (hydrationVersions.get(boardId) !== loadVersion) return workspaceStore.loadBoard(boardId)
+  await workspaceStore.applyCloudBoardScene(boardId, scene, canonical.revisionId, canonical.generation, {
+    expectedCloudRevisionId: local.cloudRevisionId,
+  })
+  return workspaceStore.loadBoard(boardId)
 }
 
 export const workspaceApi = {
@@ -576,7 +611,7 @@ export const workspaceApi = {
   },
   async loadBoardWithProject(boardId: string): Promise<{ document: BoardDocument; project: Project } | null> {
     await workspaceStore.bootstrap()
-    const document = await workspaceStore.loadBoard(boardId)
+    const document = await hydrateBoardOnOpen(boardId)
     if (!document?.active) return null
     const projects = await workspaceStore.listProjects(true)
     const project = projects.find((p) => p.id === document.projectId) || {
@@ -602,6 +637,7 @@ export const workspaceApi = {
   },
   async saveBoard(document: BoardDocument) {
     try {
+      if (document.cloudScenePending) throw new Error('Load the complete board before saving.')
       const saved = await workspaceStore.saveBoard(document)
       emitWorkspaceChange()
       if (deletedProjectIds.has(saved.projectId)) {
@@ -654,6 +690,7 @@ export const workspaceApi = {
   },
   deactivateCloudWorkspace() {
     activation++
+    hydrationVersions.clear()
     if (syncTimer) window.clearTimeout(syncTimer)
     syncTimer = undefined
     dirtyProjectIds.clear()
@@ -665,6 +702,38 @@ export const workspaceApi = {
     projectListeners.clear()
     projectsListener?.()
     projectsListener = undefined
+  },
+  subscribeToCloudScene(
+    boardId: string,
+    onUpdate: (document: BoardDocument) => void,
+    onError?: (error: unknown) => void,
+  ) {
+    let disposed = false
+    let version = 0
+    const uid = activeUserId
+    const active = activation
+    const unsubscribe = sceneService.subscribeHead(
+      boardId,
+      () => {
+        const read = ++version
+        void hydrateBoardOnOpen(boardId)
+          .then((document) => {
+            if (!disposed && read === version && active === activation && uid === activeUserId && document) {
+              onUpdate(document)
+              if (document.syncStatus === 'local-only') queueSync()
+            }
+          })
+          .catch((error) => {
+            if (!disposed && read === version) onError?.(error)
+          })
+      },
+      onError,
+    )
+    return () => {
+      disposed = true
+      version++
+      unsubscribe()
+    }
   },
   subscribeToBoardSyncStatus(boardId: string, listener: (status: Board['syncStatus']) => void) {
     const eventName = `board-sync:${boardId}`
