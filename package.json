@@ -19,6 +19,7 @@
     "test:e2e:collab": "node tests/run-regression-tests.mjs --test=e2e-collab-suite.mjs",
     "test:e2e:chaos": "node tests/run-regression-tests.mjs --test=collab-chaos-live.test.mjs",
     "test:e2e:visual": "node tests/run-regression-tests.mjs --test=e2e-visual-screenshots.mjs",
+    "test:e2e:metadata": "pnpm --filter @agentic-whiteboard/whiteboard build && node tests/metadata-assets.test.mjs",
     "test:network": "node tests/run-regression-tests.mjs --test=network-lifecycle.test.mjs",
     "test:repro": "node tests/run-regression-tests.mjs --test=repro-user-str.mjs",
     "test:inactive": "node tests/run-regression-tests.mjs --test=inactive-tab-presence-cursor.test.mjs",
