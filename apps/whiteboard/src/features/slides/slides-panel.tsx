@@ -1,6 +1,15 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type MutableRefObject } from 'react'
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type MutableRefObject,
+} from 'react'
 import { createPortal, flushSync } from 'react-dom'
 import {
+  Share2,
   ChevronLeft,
   ChevronRight,
   ChevronDown,
@@ -21,6 +30,8 @@ import { createSlidePreviewCache } from './slide-preview-cache'
 import { SlideNotes } from './slide-notes'
 import { copySlideNotes } from './notes-store'
 import { SpeakerView, useSpeakerWindow } from './speaker-view'
+import { BoardSidebar } from '../sidebar/board-sidebar'
+import type { ReactNode } from 'react'
 
 export function SlidesPanel({
   session,
@@ -33,6 +44,7 @@ export function SlidesPanel({
   canEdit,
   onInteraction,
   onStageChange,
+  onSharePresentation,
 }: {
   session: ReturnType<typeof createSceneSession>
   containerRef: MutableRefObject<HTMLElement | null>
@@ -44,6 +56,7 @@ export function SlidesPanel({
   canEdit: boolean
   onInteraction: () => void
   onStageChange: (open: boolean) => void
+  onSharePresentation: () => void
 }) {
   const previewCache = useMemo(createSlidePreviewCache, [boardId, identity])
   useEffect(() => () => previewCache.clear(), [previewCache])
@@ -53,24 +66,6 @@ export function SlidesPanel({
   const [open, setOpen] = useState(false),
     [activeId, setActiveId] = useState<string | null>(null)
   const [warmPreviews, setWarmPreviews] = useState(false)
-  const [sidebarOpen, setSidebarOpen] = useState(false)
-  useEffect(() => {
-    if (!api) return
-    const syncSidebar = () => {
-      const isOpen = !!api.getAppState().openSidebar
-      setSidebarOpen(isOpen)
-      if (isOpen) setOpen(false)
-    }
-    syncSidebar()
-    return api.onChange(syncSidebar)
-  }, [api])
-  function toggleSlides() {
-    if (!open) {
-      api?.toggleSidebar({ name: null, force: false })
-      setSidebarOpen(false)
-    }
-    setOpen(!open)
-  }
   const [notes, setNotes] = useState(false),
     [stage, setStage] = useState(false),
     [presentationMenu, setPresentationMenu] = useState(false),
@@ -84,6 +79,7 @@ export function SlidesPanel({
   const speaker = useSpeakerWindow()
   const previous = useRef(slides),
     panelRef = useRef<HTMLElement>(null),
+    scrollPosition = useRef(0),
     stageRef = useRef<HTMLDivElement>(null),
     enteredFullscreen = useRef(false),
     opener = useRef<HTMLElement | null>(null)
@@ -111,7 +107,7 @@ export function SlidesPanel({
       onInteraction()
       const state = api.getAppState()
       const panel = panelRef.current?.getBoundingClientRect()
-      // The floating panel overlays the canvas; fit and center in the remaining space.
+      // Fit in the canvas left of the native sidebar; the rail has its own layout space.
       const right = panel ? Math.max(0, state.offsetLeft + state.width - panel.left) : 0
       api.scrollToContent(slide, {
         fitToViewport: true,
@@ -180,69 +176,88 @@ export function SlidesPanel({
   }
 
   const container = containerRef.current?.querySelector<HTMLElement>('.excalidraw')
-  if (!slides.length || !container) return null
+  if (!container) return null
 
-  return createPortal(
+  return (
     <SlidePreviewCacheContext.Provider value={previewCache}>
-      {!open && (
-        <div className={`slides-controls${sidebarOpen ? ' slides-controls-sidebar-open' : ''}`}>
-          <button
-            className="slides-toggle sidebar-trigger"
-            onClick={toggleSlides}
-            aria-expanded={open}
-            aria-controls="slides-panel"
-          >
-            <Presentation size={17} /> Slides · {slides.length}
-          </button>
-        </div>
-      )}
-      {open && (
-        <aside ref={panelRef} id="slides-panel" className="slides-panel" aria-label="Slides">
-          <header>
-            <div className="slides-present-split">
-              <button
-                className="slides-present sidebar-trigger"
-                aria-label="Present slides"
-                title="Start fullscreen slideshow"
-                onClick={() => openStage()}
-              >
-                Slideshow
-              </button>
-              <DropdownMenu.Root open={presentationMenu} onOpenChange={setPresentationMenu}>
-                <DropdownMenu.Trigger asChild>
-                  <button className="slides-present-options sidebar-trigger" aria-label="Presentation options">
-                    <ChevronDown size={14} />
-                  </button>
-                </DropdownMenu.Trigger>
-                <DropdownMenu.Portal container={container}>
-                  <DropdownMenu.Content
-                    className="slides-presentation-menu"
-                    align="end"
-                    sideOffset={6}
-                    onCloseAutoFocus={(event) => {
-                      if (stageRef.current) event.preventDefault()
-                    }}
-                  >
-                    <DropdownMenu.Item onSelect={() => openStage()}>
-                      <Presentation size={17} /> Slideshow
-                    </DropdownMenu.Item>
-                    {canEdit && (
-                      <DropdownMenu.Item onSelect={() => openStage(true)}>
-                        <PanelRightClose size={17} /> Presenter view
+      <BoardSidebar
+        api={api}
+        containerRef={containerRef}
+        slideCount={slides.length}
+        theme={scene.theme}
+        onSlidesVisibilityChange={setOpen}
+        slidesHeader={
+          slides.length ? (
+            <>
+              <div className="slides-present-split">
+                <button
+                  className="slides-present sidebar-trigger"
+                  aria-label="Present slides"
+                  title="Start fullscreen slideshow"
+                  onClick={() => openStage()}
+                >
+                  Slideshow
+                </button>
+                <DropdownMenu.Root open={presentationMenu} onOpenChange={setPresentationMenu}>
+                  <DropdownMenu.Trigger asChild>
+                    <button className="slides-present-options sidebar-trigger" aria-label="Presentation options">
+                      <ChevronDown size={14} />
+                    </button>
+                  </DropdownMenu.Trigger>
+                  <DropdownMenu.Portal container={container}>
+                    <DropdownMenu.Content
+                      className="slides-presentation-menu"
+                      data-prevent-outside-click
+                      align="end"
+                      sideOffset={6}
+                      onCloseAutoFocus={(event) => {
+                        if (stageRef.current) event.preventDefault()
+                      }}
+                    >
+                      <DropdownMenu.Item onSelect={() => openStage()}>
+                        <Presentation size={17} /> Slideshow
                       </DropdownMenu.Item>
-                    )}
-                  </DropdownMenu.Content>
-                </DropdownMenu.Portal>
-              </DropdownMenu.Root>
-            </div>
-            <button aria-label="Close slides" onClick={() => setOpen(false)}>
-              <PanelRightClose size={18} />
-            </button>
-          </header>
+                      {canEdit && (
+                        <DropdownMenu.Item onSelect={() => openStage(true)}>
+                          <PanelRightClose size={17} /> Presenter view
+                        </DropdownMenu.Item>
+                      )}
+                    </DropdownMenu.Content>
+                  </DropdownMenu.Portal>
+                </DropdownMenu.Root>
+              </div>
+              {canEdit && (
+                <button
+                  className="sidebar-trigger slides-share-presentation"
+                  aria-label="Share board"
+                  title="Share board"
+                  onClick={onSharePresentation}
+                >
+                  <Share2 size={18} />
+                </button>
+              )}
+            </>
+          ) : null
+        }
+      >
+        <SlidesTab panelRef={panelRef} scrollPosition={scrollPosition}>
           {!slides.length ? (
-            <p className="slides-empty">
-              Choose <strong>Components → Slide</strong> in the toolbar, then draw around your content.
-            </p>
+            <div className="slides-empty">
+              <h2>Slides</h2>
+              <p>Turn any part of your board into a presentation.</p>
+              <button
+                className="slides-create"
+                disabled={!canEdit}
+                onClick={() => {
+                  onInteraction()
+                  const tool = { type: 'frame', frameVariant: 'slide' } as const
+                  api?.setActiveTool(tool)
+                  container.querySelector<HTMLElement>('.excalidraw-container')?.focus()
+                }}
+              >
+                Create slide
+              </button>
+            </div>
           ) : (
             <>
               <div
@@ -341,71 +356,110 @@ export function SlidesPanel({
               {message}
             </p>
           )}
-        </aside>
-      )}
-      {stage && active && canEdit && speaker.host && (
-        <SpeakerView
-          host={speaker.host}
-          slides={slides}
-          active={active}
-          scene={scene}
-          onGo={(index) => go(index, false, false)}
-          onEnd={closeStage}
-          boardId={boardId}
-          projectId={projectId}
-          identity={identity}
-          cloud={cloud}
-        />
-      )}
-      {stage && active && (
-        <div
-          ref={stageRef}
-          className="fullscreen-slides"
-          tabIndex={-1}
-          role="dialog"
-          aria-modal="true"
-          aria-label="Slideshow"
-          data-slide-number={position + 1}
-          onKeyDown={(event) => {
-            event.stopPropagation()
-            if (event.key === 'Escape') {
-              event.preventDefault()
-              closeStage()
-            }
-            if (['ArrowRight', 'PageDown', ' '].includes(event.key)) {
-              event.preventDefault()
-              go(position + 1, false)
-            }
-            if (['ArrowLeft', 'PageUp'].includes(event.key)) {
-              event.preventDefault()
-              go(position - 1, false)
-            }
-            if (event.key === 'Home') {
-              event.preventDefault()
-              go(0, false)
-            }
-            if (event.key === 'End') {
-              event.preventDefault()
-              go(slides.length - 1, false)
-            }
-            if (event.key === 'Tab') {
-              event.preventDefault()
-            }
-          }}
-        >
-          <div className="presentation-body">
-            <div className="fullscreen-slide-content">
-              <SlidePreview key={active.id} slide={active} scene={scene} large />
-            </div>
-          </div>
-          {message && (
-            <p role="status" className="presentation-message">
-              {message}
-            </p>
+        </SlidesTab>
+      </BoardSidebar>
+      {createPortal(
+        <>
+          {stage && active && canEdit && speaker.host && (
+            <SpeakerView
+              host={speaker.host}
+              slides={slides}
+              active={active}
+              scene={scene}
+              onGo={(index) => go(index, false, false)}
+              onEnd={closeStage}
+              boardId={boardId}
+              projectId={projectId}
+              identity={identity}
+              cloud={cloud}
+            />
           )}
-        </div>
+          {stage && active && (
+            <div
+              ref={stageRef}
+              className="fullscreen-slides"
+              tabIndex={-1}
+              role="dialog"
+              aria-modal="true"
+              aria-label="Slideshow"
+              data-slide-number={position + 1}
+              onKeyDown={(event) => {
+                event.stopPropagation()
+                if (event.key === 'Escape') {
+                  event.preventDefault()
+                  closeStage()
+                }
+                if (['ArrowRight', 'PageDown', ' '].includes(event.key)) {
+                  event.preventDefault()
+                  go(position + 1, false)
+                }
+                if (['ArrowLeft', 'PageUp'].includes(event.key)) {
+                  event.preventDefault()
+                  go(position - 1, false)
+                }
+                if (event.key === 'Home') {
+                  event.preventDefault()
+                  go(0, false)
+                }
+                if (event.key === 'End') {
+                  event.preventDefault()
+                  go(slides.length - 1, false)
+                }
+                if (event.key === 'Tab') {
+                  event.preventDefault()
+                }
+              }}
+            >
+              <div className="presentation-body">
+                <div className="fullscreen-slide-content">
+                  <SlidePreview key={active.id} slide={active} scene={scene} large />
+                </div>
+              </div>
+              {message && (
+                <p role="status" className="presentation-message">
+                  {message}
+                </p>
+              )}
+            </div>
+          )}
+        </>,
+        container,
       )}
-    </SlidePreviewCacheContext.Provider>,
-    container,
+    </SlidePreviewCacheContext.Provider>
+  )
+}
+
+function SlidesTab({
+  children,
+  panelRef,
+  scrollPosition,
+}: {
+  children: ReactNode
+  panelRef: MutableRefObject<HTMLElement | null>
+  scrollPosition: MutableRefObject<number>
+}) {
+  useLayoutEffect(() => {
+    const list = panelRef.current?.querySelector<HTMLElement>('.slides-list')
+    if (!list) return
+    const previous = scrollPosition.current
+    list.scrollTop = previous
+    const restore = requestAnimationFrame(() => {
+      list.scrollTop = previous
+    })
+    return () => cancelAnimationFrame(restore)
+  }, [panelRef, scrollPosition])
+  return (
+    <aside
+      ref={panelRef}
+      id="slides-panel"
+      className="slides-panel"
+      aria-label="Slides"
+      onScrollCapture={(event) => {
+        const target = event.target as HTMLElement
+        if (target.classList.contains('slides-list')) scrollPosition.current = target.scrollTop
+      }}
+    >
+      {children}
+    </aside>
   )
 }

@@ -5,6 +5,9 @@ import { WorkspaceHome } from './features/workspace/workspace-home'
 import { SettingsPage } from './features/settings/settings-page'
 
 const BoardEditor = lazy(() => import('./routes/board-editor').then((module) => ({ default: module.BoardEditor })))
+const PresentationPage = lazy(() =>
+  import('./routes/presentation').then((module) => ({ default: module.PresentationPage })),
+)
 const rootRoute = createRootRoute({ component: AppShell })
 
 export interface HomeSearch {
@@ -34,7 +37,16 @@ const boardRoute = createRoute({
     </Suspense>
   ),
 })
-const routeTree = rootRoute.addChildren([homeRoute, projectRoute, settingsRoute, boardRoute])
+const presentationRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/presentations/$boardId',
+  component: () => (
+    <Suspense fallback={<div>Loading presentation…</div>}>
+      <PresentationPage />
+    </Suspense>
+  ),
+})
+const routeTree = rootRoute.addChildren([homeRoute, projectRoute, settingsRoute, boardRoute, presentationRoute])
 export const router = createRouter({
   routeTree,
   defaultPreload: 'intent',

@@ -8,7 +8,7 @@ import type { BoardScene } from '@agentic-whiteboard/storage'
 import type { ActiveSessionRecord } from '../collaboration/types'
 
 export type ShareAccessLevel = 'restricted' | 'anyone_with_link'
-export type ShareRole = 'viewer' | 'editor'
+export type ShareRole = 'viewer' | 'editor' | 'presentation'
 
 export interface BoardCollaborator {
   email: string
@@ -36,6 +36,25 @@ export interface BoardShareConfig {
   accessRevision?: number
   projectPolicy?: ProjectPolicy
   projectRole?: 'owner' | ShareRole | null
+}
+
+/** Matches the strongest grant used when opening a shared board. */
+export function policyRole(
+  policy?: ProjectPolicy & { ownerId?: string; pending?: boolean; deletedAt?: unknown },
+  user = getFirebaseAuth()?.currentUser,
+): 'owner' | ShareRole | null {
+  if (!policy || policy.deletedAt) return null
+  if (user?.uid && policy.ownerId === user.uid) return 'owner'
+  if (policy.pending) return null
+  const email = user?.emailVerified ? user.email?.trim().toLowerCase() : undefined
+  const publicRole = policy.generalAccess === 'anyone_with_link' ? (policy.generalRole ?? 'viewer') : null
+  const invited =
+    email && policy.invitedEmails?.includes(email) ? (policy.collaborators?.[email]?.role ?? 'viewer') : null
+  return strongestRole(publicRole, invited || null)
+}
+export function strongestRole(a: 'owner' | ShareRole | null, b: 'owner' | ShareRole | null) {
+  const rank = { owner: 4, editor: 3, viewer: 2, presentation: 1 }
+  return a && (!b || rank[a] >= rank[b]) ? a : b
 }
 
 async function getDocWithTimeout<T>(docRef: any, timeoutMs = 3000): Promise<T> {
@@ -110,6 +129,7 @@ export const sharingService = {
     // Default restricted configuration
     const defaultConfig: BoardShareConfig = {
       boardId,
+      projectId: (await workspaceStore.loadBoard(boardId))?.projectId,
       boardName: fallback?.boardName ?? 'Untitled',
       ownerId: fallback?.ownerId ?? 'local-user',
       ownerName: fallback?.ownerName ?? 'User',
@@ -127,7 +147,10 @@ export const sharingService = {
     return sharingService.rememberShareConfig(defaultConfig, requestUser)
   },
 
-  async saveShareConfig(config: BoardShareConfig, options?: { workspaceFlushed?: boolean }): Promise<void> {
+  async saveShareConfig(
+    config: BoardShareConfig,
+    _options?: { workspaceFlushed?: boolean },
+  ): Promise<BoardShareConfig> {
     let resolvedScene = config.scene
     if (!resolvedScene || !resolvedScene.elements || resolvedScene.elements.length === 0) {
       try {
@@ -158,8 +181,7 @@ export const sharingService = {
       const local = await workspaceStore.loadBoard(config.boardId)
       const projectId = config.projectId ?? local?.projectId
       if (!projectId) throw new Error('Board ownership could not be verified. Reload the board.')
-      const { workspaceApi } = await import('../workspace/workspace-api')
-      if (!options?.workspaceFlushed) await workspaceApi.flushCloud()
+
       const {
         scene: _scene,
         projectPolicy: _parent,
@@ -167,10 +189,12 @@ export const sharingService = {
         effectiveRole: _effective,
         ...policy
       } = normalizedConfig
-      await projectService.boardAccess(config.boardId, projectId, 'share', policy)
-      sharingService.rememberShareConfig(normalizedConfig, authenticatedOwnerId ?? 'local-user')
-      // Policy changes must never overwrite a newer scene with the modal's snapshot.
+      const result = await projectService.boardAccess(config.boardId, projectId, 'share', policy)
+      const committed = { ...normalizedConfig, ...result.policy, scene: resolvedScene }
+      sharingService.rememberShareConfig(committed, authenticatedOwnerId ?? 'local-user')
+      return committed
     }
+    return normalizedConfig
   },
 
   async syncBoardSceneToShare(boardId: string, scene: BoardScene, boardName?: string): Promise<void> {
@@ -307,8 +331,8 @@ export const sharingService = {
 
   async getSharedBoard(
     boardId: string,
-    currentUserEmail?: string | null,
-    currentUserId?: string | null,
+    _currentUserEmail?: string | null,
+    _currentUserId?: string | null,
     knownFiles: BoardScene['files'] = {},
   ): Promise<{
     status: 'allowed' | 'restricted' | 'not-found'
@@ -347,40 +371,17 @@ export const sharingService = {
       return { status: 'allowed' as const, config: remoteData! }
     }
 
-    let inheritedRole: ShareRole | 'owner' | null = null
-    if (
-      remoteData.projectId &&
-      (remoteData.inheritProjectAccess !== false || remoteData.ownerId === currentUserId) &&
-      db
-    ) {
-      const parent = await getDoc(doc(db, 'projectShares', remoteData.projectId)).catch(() => null)
-      if (parent?.exists()) {
-        const policy = parent.data()
-        remoteData.projectPolicy = policy as ProjectPolicy
-        const email = getFirebaseAuth()?.currentUser?.emailVerified ? currentUserEmail?.toLowerCase() : null
-        inheritedRole =
-          policy.ownerId === currentUserId
-            ? 'owner'
-            : policy.generalAccess === 'anyone_with_link' && policy.generalRole === 'editor'
-              ? 'editor'
-              : email && policy.collaborators?.[email]?.role === 'editor'
-                ? 'editor'
-                : 'viewer'
-      }
+    let parent: (ProjectPolicy & { ownerId?: string; pending?: boolean; deletedAt?: unknown }) | undefined
+    if (remoteData.projectId && db) {
+      const snapshot = await getDoc(doc(db, 'projectShares', remoteData.projectId)).catch(() => null)
+      if (snapshot?.exists()) parent = snapshot.data() as typeof parent
     }
-    if (remoteData.inheritProjectAccess === false) inheritedRole = null
+    remoteData.projectPolicy = parent
+    const inheritedRole = remoteData.inheritProjectAccess !== false ? policyRole(parent) : null
     remoteData.projectRole = inheritedRole
-    const email = getFirebaseAuth()?.currentUser?.emailVerified ? currentUserEmail?.toLowerCase() : null
-    remoteData.effectiveRole =
-      remoteData.ownerId === currentUserId
-        ? 'owner'
-        : remoteData.generalAccess === 'anyone_with_link' && remoteData.generalRole === 'editor'
-          ? 'editor'
-          : email && remoteData.invitedEmails?.includes(email) && remoteData.collaborators?.[email]?.role === 'editor'
-            ? 'editor'
-            : inheritedRole === 'editor' || inheritedRole === 'owner'
-              ? inheritedRole
-              : 'viewer'
+    const directRole = policyRole(remoteData)
+    remoteData.effectiveRole = strongestRole(directRole, inheritedRole)
+    if (!remoteData.effectiveRole) return { status: 'restricted' }
     return allowed()
   },
 

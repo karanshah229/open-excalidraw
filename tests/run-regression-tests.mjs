@@ -7,6 +7,9 @@ import { resolve } from 'node:path'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const all = [
+  'sharing-flow-audit.test.mjs',
+  'export-retry.test.mjs',
+  'presentation-access.test.mjs',
   'slides-shared.test.mjs',
   'board-behavior-contract.test.mjs',
   'e2e-collab-suite.mjs',
@@ -23,6 +26,7 @@ const all = [
   'solo-delete-collab-undo.test.mjs',
   'collab-undo-further-ops.test.mjs',
   'mcp-live-e2e.test.mjs',
+  'mcp-slides-e2e.test.mjs',
   'create-board-modal-dropdown-scroll.test.mjs',
   'e2e-smoke-test-and-screenshots.mjs',
   'e2e-non-anonymous-test.mjs',
@@ -31,7 +35,8 @@ const all = [
 ]
 const filter = process.argv.find((arg) => arg.startsWith('--test='))?.slice(7)
 const files = process.env.E2E_REGRESSION_FILES ? JSON.parse(process.env.E2E_REGRESSION_FILES) : filter ? [filter] : all
-if (!files.length || files.some((name) => !all.includes(name))) throw new Error('Unknown regression suite')
+if (!files.length || files.some((name) => !all.includes(name) && name !== 'sharing-flow-audit.test.mjs'))
+  throw new Error('Unknown regression suite')
 const run = (command, args, env = process.env) =>
   new Promise((resolveRun, reject) => {
     const child = spawn(command, args, { cwd: root, env, stdio: 'inherit' })
@@ -80,6 +85,7 @@ if (!process.argv.includes('--inside-emulators')) {
   if (process.env.GCLOUD_PROJECT !== 'demo-regression' || !process.env.FIRESTORE_EMULATOR_HOST)
     throw new Error('Regression runner requires its local demo emulators')
   Object.assign(process.env, {
+    VITE_MCP_BRIDGE_URL: process.env.VITE_MCP_BRIDGE_URL || 'ws://127.0.0.1:47887',
     VITE_FIREBASE_API_KEY: 'emulator-only',
     VITE_FIREBASE_AUTH_DOMAIN: 'demo-regression.firebaseapp.com',
     VITE_FIREBASE_PROJECT_ID: 'demo-regression',

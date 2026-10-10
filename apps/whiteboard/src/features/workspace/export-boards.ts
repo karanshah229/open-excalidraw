@@ -135,7 +135,12 @@ async function capture(board: ExportBoard): Promise<Capture> {
       cloudScene = data.scene
       remoteRevision = data.revision
     }
-    const shared = await sharingService.getSharedBoard(board.id, getFirebaseAuth()?.currentUser?.email, uid)
+    const shared = await sharingService.getSharedBoard(
+      board.id,
+      getFirebaseAuth()?.currentUser?.email,
+      uid,
+      local?.scene.files,
+    )
     if (shared.status === 'restricted') throw new Error('Board access was revoked or the board was deleted.')
     if (shared.config?.scene) {
       const published = shared.config.scene

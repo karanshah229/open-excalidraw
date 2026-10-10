@@ -1,5 +1,6 @@
+import { setWorkspaceIdentity } from '@agentic-whiteboard/storage'
 import { createUserWithEmailAndPassword, signInAnonymously, type Auth } from 'firebase/auth'
-import { doc, getDoc } from 'firebase/firestore'
+import { doc, getDoc, getDocFromServer } from 'firebase/firestore'
 import { getFirebaseAuth, getFirebaseApp, getFirestoreDb } from '../src/lib/firebase'
 import { sharingService, type BoardShareConfig } from '../src/features/sharing/sharing-service'
 import { workspaceApi } from '../src/features/workspace/workspace-api'
@@ -26,6 +27,15 @@ export async function signInOwner(auth: Auth) {
   localStorage.removeItem('agentic-whiteboard:e2e-user')
   await workspaceApi.activateCloudWorkspace(credential.user.uid)
   return credential
+}
+
+/** Keep local-byte recovery separate from automatic cloud revision changes. */
+export function pauseCloudReplication() {
+  requireDemoEmulators()
+  const uid = getFirebaseAuth()!.currentUser?.uid
+  if (!uid) throw new Error('A fixture owner must be signed in.')
+  workspaceApi.deactivateCloudWorkspace()
+  setWorkspaceIdentity(uid)
 }
 
 /** Seed the actual owned board and publish policy through the application callable. */
@@ -76,4 +86,10 @@ export async function signInGuest() {
   if (auth.currentUser && !auth.currentUser.isAnonymous)
     throw new Error('Guest fixture must use an isolated browser context.')
   if (!auth.currentUser) await signInAnonymously(auth)
+}
+
+/** Read the authoritative policy through the same Firebase module as the app. */
+export async function readBoardSharePolicy(boardId: string) {
+  requireDemoEmulators()
+  return (await getDocFromServer(doc(getFirestoreDb()!, 'boardShares', boardId))).data()
 }

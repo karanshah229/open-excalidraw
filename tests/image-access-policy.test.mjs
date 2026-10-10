@@ -27,7 +27,7 @@ assert.equal(
   canAccessAsset({ ...config, generalAccess: 'anyone_with_link', generalRole: 'editor' }, undefined, true),
   true,
 )
-for (const tombstone of [{ active: false }, { deletedAt: '2026-10-03T00:00:00Z' }, { pending: true }]) {
+for (const tombstone of [{ active: false }, { deletedAt: '2026-10-03T00:00:00Z' }]) {
   assert.equal(canAccessAsset({ ...config, ...tombstone }, owner, false), false)
   assert.equal(canAccessAsset({ ...config, generalAccess: 'anyone_with_link', ...tombstone }, undefined, false), false)
   if (!tombstone.pending) assert.equal(isAssetParentActive(tombstone), false)
@@ -40,7 +40,19 @@ const parent = { ...config, generalAccess: 'anyone_with_link', generalRole: 'edi
 assert.equal(canAccessAsset(config, undefined, false, parent), true)
 assert.equal(canAccessAsset(config, undefined, true, parent), true)
 assert.equal(canAccessAsset({ ...config, inheritProjectAccess: false }, undefined, false, parent), false)
-for (const gate of [{ pending: true }, { deletedAt: 'deleted' }, { ownerId: 'foreign-owner' }]) {
+for (const gate of [{ deletedAt: 'deleted' }, { ownerId: 'foreign-owner' }]) {
   assert.equal(canAccessAsset(config, owner, false, { ...parent, ...gate }), false)
 }
 console.log('PASS: inherited project roles, custom board grants, pending gates, and owner binding')
+
+assert.equal(canAccessAsset({ ...config, pending: true }, owner, true), true)
+assert.equal(canAccessAsset({ ...config, pending: true }, invited('editor@example.com'), true), false)
+assert.equal(canAccessAsset(config, owner, true, { ...parent, pending: true }), true)
+assert.equal(
+  canAccessAsset({ ...config, generalAccess: 'anyone_with_link', generalRole: 'presentation' }, undefined, false),
+  true,
+)
+assert.equal(
+  canAccessAsset({ ...config, generalAccess: 'anyone_with_link', generalRole: 'presentation' }, undefined, true),
+  false,
+)

@@ -14,7 +14,12 @@ const owner = await ownerContext.newPage(),
 for (const page of [owner, viewer]) {
   page.setDefaultTimeout(30000)
   await page.setViewport({ width: 1400, height: 900 })
+  await page.evaluateOnNewDocument(() => localStorage.setItem('agentic-whiteboard:theme:v1', 'light'))
 }
+owner.on('dialog', async (dialog) => {
+  assert.equal(dialog.type(), 'beforeunload')
+  await dialog.accept()
+})
 try {
   await owner.goto(base)
   const id = await owner.evaluate(async () => {
@@ -30,8 +35,30 @@ try {
     const elements = convertToExcalidrawElements(
       [
         {
+          type: 'rectangle',
+          id: 'content-one',
+          x: 145,
+          y: 160,
+          width: 310,
+          height: 180,
+          backgroundColor: '#d0bfff',
+          strokeColor: '#6741d9',
+          label: { text: 'Product roadmap', fontSize: 30 },
+        },
+        {
+          type: 'rectangle',
+          id: 'content-two',
+          x: 745,
+          y: 160,
+          width: 310,
+          height: 180,
+          backgroundColor: '#b2f2bb',
+          strokeColor: '#2b8a3e',
+          label: { text: 'From ideas\nto delivery', fontSize: 30 },
+        },
+        {
           type: 'frame',
-          children: [],
+          children: ['content-one'],
           id: 'slide-one',
           x: 100,
           y: 100,
@@ -41,7 +68,7 @@ try {
         },
         {
           type: 'frame',
-          children: [],
+          children: ['content-two'],
           id: 'slide-two',
           x: 700,
           y: 100,
@@ -52,7 +79,7 @@ try {
       ],
       { regenerateIds: false },
     )
-    const scene = { elements, appState: { viewBackgroundColor: '#ffffff' } }
+    const scene = { elements, appState: { viewBackgroundColor: '#ffffff', theme: 'light' } }
     await workspaceApi.saveBoard({ ...board, scene })
     await workspaceApi.flushCloud()
     const config = await sharingService.getShareConfig(board.id, { ownerId: user.uid, boardName: board.name, scene })
@@ -60,8 +87,14 @@ try {
     return board.id
   })
   await owner.goto(`${base}/boards/${id}`)
+  await owner.waitForSelector('.slides-toggle')
+  if (!(await owner.$('.slides-panel'))) await owner.click('.slides-toggle')
   await owner.waitForSelector('.slide-card')
   await viewer.goto(`${base}/boards/${id}`)
+  await viewer.waitForSelector('.slides-toggle')
+  if (!(await viewer.$('.slides-panel'))) await viewer.click('.slides-toggle')
+  await viewer.waitForSelector('.slides-toggle')
+  if (!(await viewer.$('.slides-panel'))) await viewer.click('.slides-toggle')
   await viewer.waitForFunction(() => document.querySelectorAll('.slide-card').length === 2)
   assert.equal(await viewer.$('.slide-properties'), null)
   const camera = await viewer.evaluate(() => {
@@ -88,6 +121,7 @@ try {
     }),
     camera,
   )
+  await owner.waitForSelector('.slide-actions button:last-child')
   await owner.click('.slide-actions button:last-child')
   await owner.waitForFunction(
     () => document.querySelector('#slide-notes-input') && !document.querySelector('#slide-notes-input').disabled,
@@ -104,13 +138,13 @@ try {
     else void request.continue()
   }
   owner.on('request', failNotes)
-  await owner.type('#slide-notes-input', 'Cloud-only editor talking points')
+  await owner.type('#slide-notes-input', 'Introduce the roadmap and explain the three priorities.')
   await owner.waitForFunction(() =>
     document.querySelector('.slide-notes [role="status"]')?.textContent.includes('service unavailable'),
   )
   assert.equal(
     await owner.$eval('#slide-notes-input', (node) => node.value),
-    'Cloud-only editor talking points',
+    'Introduce the roadmap and explain the three priorities.',
     'Failure preserves local typing',
   )
   await owner.waitForSelector('.slide-notes-retry')
@@ -123,23 +157,31 @@ try {
   )
   assert.equal(
     await viewer.evaluate(() =>
-      JSON.stringify(window.__excalidrawAPI.getSceneElements()).includes('Cloud-only editor talking points'),
+      JSON.stringify(window.__excalidrawAPI.getSceneElements()).includes(
+        'Introduce the roadmap and explain the three priorities.',
+      ),
     ),
     false,
   )
   await owner.reload()
+  await owner.waitForSelector('.slides-toggle')
+  if (!(await owner.$('.slides-panel'))) await owner.click('.slides-toggle')
   await owner.waitForSelector('.slide-card')
   await owner.click('[aria-label="Go to slide 2"]')
+  await owner.waitForSelector('.slide-actions button:last-child')
   await owner.click('.slide-actions button:last-child')
   await owner.waitForFunction(
-    () => document.querySelector('#slide-notes-input')?.value === 'Cloud-only editor talking points',
+    () =>
+      document.querySelector('#slide-notes-input')?.value === 'Introduce the roadmap and explain the three priorities.',
   )
   await viewer.click('[aria-label="Present slides"]')
   await viewer.waitForSelector('.fullscreen-slides img')
   assert.equal(await viewer.$('.presenter-notes'), null, 'Viewer presentation never exposes editor notes')
   assert.equal(await viewer.$('[aria-label="Open speaker view"]'), null, 'Viewer cannot open speaker window')
   assert.equal(
-    await viewer.$eval('.fullscreen-slides', (n) => n.textContent.includes('Cloud-only editor talking points')),
+    await viewer.$eval('.fullscreen-slides', (n) =>
+      n.textContent.includes('Introduce the roadmap and explain the three priorities.'),
+    ),
     false,
   )
   await viewer.keyboard.press('Escape')
@@ -187,6 +229,8 @@ try {
     page.on('request', injectSharingTimeout)
     await page.reload()
   }
+  await owner.waitForSelector('.slides-toggle')
+  if (!(await owner.$('.slides-panel'))) await owner.click('.slides-toggle')
   await owner.waitForFunction(() => document.querySelectorAll('.slide-card').length === 2)
   assert(await owner.evaluate(() => window.__boardReadTimeouts > 0), 'Owner actually encountered the read timeout')
   assert.equal(await owner.$('.access-denied-title'), null, 'Owner opens the local copy without Retry')
@@ -206,9 +250,11 @@ try {
   assert(await owner.$('[aria-label="Duplicate slide"]'), 'Owner retains editing controls')
   await owner.click('[aria-label="Sync status and board details"]')
   await owner.waitForSelector('.sync-simple-desc')
-  assert.equal(
-    await owner.$eval('.sync-simple-desc', (node) => node.textContent),
-    'Saved to this device. Syncing to cloud.',
+  assert(
+    ['Saved to this device. Syncing to cloud.', 'Synced to cloud and this device.'].includes(
+      await owner.$eval('.sync-simple-desc', (node) => node.textContent),
+    ),
+    'A signed-in owner reports cloud status, whether the pending write already completed or not',
   )
   await owner.keyboard.press('Escape')
   await owner.screenshot({ path: '.system_generated/slides/owner-local-timeout-recovery.png' })
@@ -224,8 +270,179 @@ try {
     await page.setRequestInterception(false)
   }
   await viewer.click('.access-denied-card button')
+  await viewer.waitForSelector('.slides-toggle')
+  if (!(await viewer.$('.slides-panel'))) await viewer.click('.slides-toggle')
   await viewer.waitForFunction(() => document.querySelectorAll('.slide-card').length === 2)
   assert.equal(await viewer.$('[aria-label="Duplicate slide"]'), null, 'Retry restores authorized viewer access only')
+  // Publish using the actual Slides header and Share dialog, then open as a fresh audience.
+  await owner.reload()
+  await owner.waitForSelector('.slides-toggle')
+  if (!(await owner.$('.slides-panel'))) await owner.click('.slides-toggle')
+  assert.equal(await owner.$eval('.board-sidebar-header', (node) => node.textContent.includes('Slides ·')), false)
+  await owner.waitForFunction(() => document.querySelectorAll('.slide-card img').length === 2)
+  await owner.screenshot({ path: '.system_generated/slides/shared-presentation-header.png' })
+  await owner.bringToFront()
+  await ownerContext.overridePermissions(base, ['clipboard-read', 'clipboard-write', 'clipboard-sanitized-write'])
+  await owner.click('.slides-share-presentation')
+  await owner.waitForSelector('.google-share-copy-btn:not(:disabled)')
+  await owner.evaluate(() => {
+    window.__shareDialogRemovals = 0
+    new MutationObserver((changes) => {
+      for (const change of changes)
+        for (const node of change.removedNodes)
+          if (
+            node.nodeType === 1 &&
+            (node.matches('.google-share-dialog') || node.querySelector('.google-share-dialog'))
+          )
+            window.__shareDialogRemovals++
+    }).observe(document.body, { childList: true, subtree: true })
+  })
+  await owner.click('[aria-label="General access role"]')
+  const presentationOption = await owner.evaluateHandle(() =>
+    [...document.querySelectorAll('[role="menuitem"]')].find((n) => n.textContent.trim() === 'Present'),
+  )
+  await presentationOption.asElement().click()
+  await owner.waitForFunction(() => !document.querySelector('.google-share-copy-btn').disabled)
+  await owner.click('.google-share-copy-btn')
+  await owner.waitForFunction(
+    () =>
+      document.querySelector('.google-share-copy-btn')?.textContent.includes('Link copied') ||
+      document.querySelector('.google-share-dialog [role="alert"]'),
+    { timeout: 60000 },
+  )
+  assert.equal(
+    await owner.$eval('.google-share-dialog', (n) => n.querySelector('[role="alert"]')?.textContent ?? ''),
+    '',
+  )
+  assert.equal(await owner.evaluate(() => window.__shareDialogRemovals), 0, 'Publishing keeps the Share dialog mounted')
+  assert.equal(await owner.evaluate(() => navigator.clipboard.readText()), `${base}/boards/${id}`)
+  await owner.evaluate(() =>
+    Promise.all(
+      document
+        .querySelector('.google-share-dialog')
+        .getAnimations({ subtree: true })
+        .map((animation) => animation.finished.catch(() => {})),
+    ),
+  )
+  await owner.screenshot({ path: '.system_generated/slides/shared-presentation-share-dialog.png' })
+  const audienceContext = await browser.createBrowserContext()
+  const audience = await audienceContext.newPage()
+  await audience.setViewport({ width: 1400, height: 900 })
+  await audience.evaluateOnNewDocument(() => localStorage.setItem('agentic-whiteboard:theme:v1', 'light'))
+  await audience.goto(`${base}/boards/${id}`)
+  await audience.waitForSelector('.shared-presentation-landing button:not(:disabled)')
+  assert(
+    await audience.$eval('.shared-presentation-start', (node) => {
+      const box = node.getBoundingClientRect()
+      return Math.abs(box.left + box.width / 2 - innerWidth / 2) < 2
+    }),
+    'Start button is centered across the full browser viewport',
+  )
+  assert.equal(
+    await audience.$('.shared-presentation-host.theme--dark'),
+    null,
+    'White board uses Excalidraw light theme',
+  )
+  await audience.click('.shared-slideshow-start')
+  await audience.waitForSelector('.shared-presentation nav')
+  assert.equal(await audience.$('.presenter-notes'), null, 'Slideshow has no notes')
+  await audience.click('[aria-label="Next slide"]')
+  await audience.waitForFunction(() =>
+    document.querySelector('.shared-presentation nav span')?.textContent.includes('2 / 2'),
+  )
+  await audience.click('[aria-label="End presentation"]')
+  await audience.waitForSelector('.shared-slideshow-start')
+  await audience.screenshot({ path: '.system_generated/slides/shared-presentation-landing.png' })
+  assert.equal(await audience.$('.presenter-notes'), null, 'Landing never exposes notes before starting')
+  assert.equal(await audience.$('header.app-header'), null)
+  await audience.evaluate(() => {
+    window.__realOpen = window.open
+    window.open = () => null
+  })
+  await audience.click('[aria-label="Presentation options"]')
+  await audience.waitForSelector('[role="menuitem"]')
+  await audience.evaluate(() =>
+    [...document.querySelectorAll('[role="menuitem"]')]
+      .find((node) => node.textContent.includes('Presenter View'))
+      .click(),
+  )
+  await audience.waitForFunction(() => document.querySelector('[role="alert"]')?.textContent.includes('Allow popups'))
+  await audience.evaluate(() => {
+    window.open = window.__realOpen
+    delete window.__realOpen
+  })
+  const sharedSpeakerTarget = browser.waitForTarget((target) => target.opener() === audience.target())
+  await audience.click('[aria-label="Presentation options"]')
+  await audience.waitForSelector('[role="menuitem"]')
+  await audience.evaluate(() =>
+    [...document.querySelectorAll('[role="menuitem"]')]
+      .find((node) => node.textContent.includes('Presenter View'))
+      .click(),
+  )
+  const sharedSpeaker = await (await sharedSpeakerTarget).page()
+  await sharedSpeaker.setViewport({ width: 1400, height: 900 })
+  await audience.waitForSelector('.shared-presentation img')
+  assert.equal(await audience.$('.excalidraw-container canvas'), null, 'Presentation receives no board editor')
+  assert.equal(await audience.$('.presenter-notes'), null, 'Notes exist only in the speaker window')
+  assert.equal(await audience.$('nav'), null, 'Navigation controls exist only in the speaker window')
+  await sharedSpeaker.waitForSelector('.shared-presenter .speaker-view-preview img')
+  await sharedSpeaker.click('[aria-label="Next slide"]')
+  await sharedSpeaker.waitForFunction(() =>
+    document.querySelector('.shared-presenter nav span')?.textContent.includes('2 / 2'),
+  )
+  await sharedSpeaker.waitForFunction(() => {
+    const image = document.querySelector('.shared-presenter .speaker-view-preview img')
+    return image?.alt === 'Slide 2' && image.complete && image.naturalWidth > 0
+  })
+  await sharedSpeaker.waitForFunction(
+    () =>
+      document.querySelector('#shared-presenter-notes')?.value ===
+      'Introduce the roadmap and explain the three priorities.',
+  )
+  assert.equal(await sharedSpeaker.$eval('#shared-presenter-notes', (node) => node.readOnly), true)
+  await sharedSpeaker.click('#shared-presenter-notes')
+  await sharedSpeaker.keyboard.type('Cannot change published notes')
+  assert.equal(
+    await sharedSpeaker.$eval('#shared-presenter-notes', (node) => node.value),
+    'Introduce the roadmap and explain the three priorities.',
+  )
+  await sharedSpeaker.waitForFunction(() => document.querySelectorAll('.speaker-filmstrip img').length === 2)
+  await sharedSpeaker.click('[aria-label="Pause timer"]')
+  await sharedSpeaker.click('[aria-label="Reset timer"]')
+  assert.equal(await sharedSpeaker.$eval('[aria-label="Presentation timer"]', (node) => node.textContent), '00:00:00')
+  await sharedSpeaker.screenshot({ path: '.system_generated/slides/shared-presentation-speaker-view.png' })
+  await sharedSpeaker.click('[aria-label="Go to slide 1"]')
+  await sharedSpeaker.waitForFunction(
+    () =>
+      document.querySelector('.speaker-view-preview img')?.alt === 'Slide 1' &&
+      document.querySelector('#shared-presenter-notes')?.value === '',
+  )
+  await sharedSpeaker.click('[aria-label="Go to slide 2"]')
+  await sharedSpeaker.waitForFunction(
+    () =>
+      document.querySelector('#shared-presenter-notes')?.value ===
+      'Introduce the roadmap and explain the three priorities.',
+  )
+  await sharedSpeaker.click('[aria-label="Increase notes text size"]')
+  assert.equal(await sharedSpeaker.$eval('.presenter-notes', (node) => getComputedStyle(node).fontSize), '22px')
+  await audience.waitForFunction(() => document.querySelector('.fullscreen-slide-content img')?.alt === 'Slide 2')
+  await audience.bringToFront()
+  if (!(await audience.evaluate(() => Boolean(document.fullscreenElement)))) {
+    await audience.click('[aria-label="Fullscreen presentation"]')
+  }
+  await audience.waitForFunction(() => Boolean(document.fullscreenElement))
+  await audience.screenshot({ path: '.system_generated/slides/shared-presentation-audience.png' })
+  await sharedSpeaker.click('[aria-label="End presentation"]')
+  await audience.waitForSelector('.shared-presentation-landing button')
+  assert.equal(await audience.evaluate(() => Boolean(document.fullscreenElement)), false)
+  await audience.goto(`${base}/boards/${id}`)
+  await audience.waitForSelector('.shared-presentation-landing button:not(:disabled)')
+  assert.equal(
+    await audience.$('.excalidraw-container'),
+    null,
+    'Presentation role opens the start screen without editor controls',
+  )
+  await audienceContext.close()
   // Firebase also creates anonymous identities for guest visitors. A private
   // local workspace must still use local notes, never that cloud identity.
   const guest = await viewer.evaluate(async (scene) => {
@@ -254,11 +471,15 @@ try {
     await dialog.accept()
   })
   await viewer.goto(`${base}/boards/${guest.boardId}`)
+  await viewer.waitForSelector('.slides-toggle')
+  if (!(await viewer.$('.slides-panel'))) await viewer.click('.slides-toggle')
   await viewer.waitForSelector('.slide-card')
   await viewer.click('[aria-label="Sync status and board details"]')
   await viewer.waitForSelector('.sync-simple-desc')
   assert.equal(await viewer.$eval('.sync-simple-desc', (node) => node.textContent), 'Saved to this device only.')
   await viewer.keyboard.press('Escape')
+  if (!(await viewer.$('.slides-panel'))) await viewer.click('.slides-toggle')
+  await viewer.waitForSelector('.slide-actions button:last-child')
   await viewer.click('.slide-actions button:last-child')
   await viewer.waitForFunction(() => document.querySelector('#slide-notes-input')?.disabled === false)
   await viewer.type('#slide-notes-input', 'Guest notes stay on this device')
@@ -271,12 +492,26 @@ try {
     guest,
   )
   await viewer.reload()
+  await viewer.waitForSelector('.slides-toggle')
+  if (!(await viewer.$('.slides-panel'))) await viewer.click('.slides-toggle')
   await viewer.waitForSelector('.slide-card')
+  await viewer.waitForSelector('.slide-actions button:last-child')
   await viewer.click('.slide-actions button:last-child')
   await viewer.waitForFunction(
     () => document.querySelector('#slide-notes-input')?.value === 'Guest notes stay on this device',
   )
+  await viewer.bringToFront()
+  assert.equal(
+    await viewer.evaluate(() => window.__excalidrawAPI.getAppState().defaultSidebarDockedPreference),
+    false,
+    'Guest presenter flow exercises the unpinned sidebar',
+  )
   await viewer.click('[aria-label="Presentation options"]')
+  await viewer.waitForSelector('.slides-presentation-menu [role="menuitem"]', { visible: true })
+  assert.equal(
+    await viewer.$$eval('.slides-presentation-menu [role="menuitem"]', (items) => items.at(-1)?.textContent.trim()),
+    'Presenter view',
+  )
   const speakerTarget = browser.waitForTarget((target) => target.opener() === viewer.target())
   await viewer.click('.slides-presentation-menu [role="menuitem"]:last-child')
   const guestSpeaker = await (await speakerTarget).page()
@@ -289,8 +524,41 @@ try {
   await viewer.waitForSelector('.fullscreen-slides', { hidden: true })
   viewer.off('request', countGuestNotes)
   console.log(
-    'PASS shared viewer slide updates, remote reorder without camera movement, editor cloud notes/reload, audience privacy, owner-local timeout recovery, cached-viewer access protection and anonymous guest-local notes/reload/presenter view',
+    'PASS shared viewer slide updates, remote reorder without camera movement, editor cloud notes/reload, live read-only speaker notes/controls, presentation access, owner-local timeout recovery, cached-viewer access protection and anonymous guest-local notes/reload/presenter view',
   )
+} catch (error) {
+  console.error('Shared slides error', error)
+  console.error(
+    'Shared slides failure state',
+    await owner.evaluate(() => ({
+      dialog: document.querySelector('.google-share-dialog')?.textContent,
+      dialogRemovals: window.__shareDialogRemovals,
+      boardLoading: document.querySelector('.workspace-loading')?.textContent,
+      accessDenied: document.querySelector('.access-denied-title')?.textContent,
+      focus: document.hasFocus(),
+    })),
+  )
+  console.error(
+    'Guest failure state',
+    await viewer
+      .evaluate(async () => {
+        const { workspaceApi } = await import('/src/features/workspace/workspace-api.ts')
+        const details = await workspaceApi.loadBoardWithProject(location.pathname.split('/').pop())
+        return {
+          viewMode: window.__excalidrawAPI?.getAppState().viewModeEnabled,
+          collab: window.__lazyCollab,
+          status: details?.document.syncStatus,
+          owner: details?.project.ownerId,
+          cards: document.querySelectorAll('.slide-card').length,
+          actions: document.querySelectorAll('.slide-actions button').length,
+          text: document.body.textContent.slice(-1600),
+        }
+      })
+      .catch((diagnosticError) => ({ diagnosticError: String(diagnosticError) })),
+  )
+  await viewer.screenshot({ path: '.system_generated/slides/shared-guest-failure.png' })
+  await owner.screenshot({ path: '.system_generated/slides/shared-presentation-failure.png' })
+  throw error
 } finally {
   await browser.close()
 }

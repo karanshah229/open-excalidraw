@@ -78,7 +78,8 @@ const browser = await puppeteer.launch({
 const base = 'http://127.0.0.1:15186',
   requests = [],
   failures = [],
-  results = []
+  results = [],
+  sharingAudit = []
 const out = fileURLToPath(new URL('../logs/projects-e2e/', import.meta.url))
 await mkdir(out, { recursive: true })
 async function page(role, path = '') {
@@ -92,6 +93,14 @@ async function page(role, path = '') {
     if (/127\.0\.0\.1:(25001|28080|29099|29199)/.test(response.url()))
       requests.push({
         role,
+        operation: (() => {
+          try {
+            const d = JSON.parse(response.request().postData() || '{}').data
+            return d?.action || d?.operation || null
+          } catch {
+            return null
+          }
+        })(),
         status: response.status(),
         method: response.request().method(),
         url: response.url(),
@@ -170,7 +179,10 @@ async function until(check, label) {
   throw new Error(`Timed out: ${label}`)
 }
 async function record(name, fn) {
+  const start = requests.length,
+    started = Date.now()
   await fn()
+  sharingAudit.push({ name, durationMs: Date.now() - started, requests: requests.slice(start) })
   results.push(name)
   console.log(`PASS: ${name}`)
 }
@@ -500,6 +512,100 @@ try {
     await owner.waitForSelector('[aria-label="Project actions for Project Beta"]')
     assert.equal((await project.ref.get()).data().name, 'Project Beta')
   })
+  if (process.env.SHARING_FLOW_AUDIT === '1')
+    await record('Project Share modal action-by-action request audit', async () => {
+      await menu(owner, 'Project Beta', 'Share')
+      await owner.waitForFunction(() => !document.querySelector('.google-share-copy-btn')?.disabled)
+      const action = async (name, fn) => {
+        const start = requests.length,
+          started = Date.now()
+        await fn()
+        await owner.waitForFunction(() => !document.querySelector('.google-share-copy-btn')?.disabled)
+        await new Promise((resolve) => setTimeout(resolve, 150))
+        const committed = (await db.doc(`projectShares/${project.id}`).get()).data()
+        const calls = requests
+          .slice(start)
+          .filter((request) => request.method === 'POST' && request.url.includes(':25001/'))
+        assert.ok(calls.length <= 1, `${name} should make at most one callable request`)
+        assert.ok(
+          calls.every((request) => request.url.endsWith('/manageProject')),
+          `${name} must not reload project lists or publish snapshots`,
+        )
+        if (['Copy link', 'Invalid email', 'Duplicate invitation', 'Done'].includes(name))
+          assert.equal(calls.length, 0, `${name} should make zero callable requests`)
+        sharingAudit.push({
+          name: `Project modal: ${name}`,
+          durationMs: Date.now() - started,
+          requests: requests.slice(start),
+          state: {
+            generalAccess: committed.generalAccess,
+            generalRole: committed.generalRole,
+            invitedCount: committed.invitedEmails.length,
+            auditInviteRole: committed.collaborators?.['audit@example.test']?.role ?? null,
+          },
+        })
+      }
+      const choice = async (label, text) => {
+        await owner.click(`[aria-label="${label}"]`)
+        await clickText(owner, text, '[role="menuitem"]')
+      }
+      for (const access of ['Anyone with the link'])
+        await action(access, () => choice('General access setting', access))
+      await owner.click('[aria-label="General access role"]')
+      sharingAudit.push({
+        name: 'Project general role options',
+        options: await owner.$$eval('[role="menuitem"]', (nodes) => nodes.map((n) => n.textContent.trim())),
+        requests: [],
+      })
+      await clickText(owner, 'Viewer', '[role="menuitem"]')
+      for (const role of ['Viewer', 'Editor', 'Viewer'])
+        await action(`General ${role}`, () => choice('General access role', role))
+      for (const access of ['Restricted', 'Restricted'])
+        await action(access, () => choice('General access setting', access))
+      await owner
+        .browserContext()
+        .overridePermissions(base, ['clipboard-read', 'clipboard-write', 'clipboard-sanitized-write'])
+      await action('Copy link', () => owner.click('.google-share-copy-btn'))
+      await action('Invalid email', async () => {
+        await owner.type('#share-email-input', 'invalid')
+        await owner.click('.google-share-add-btn')
+      })
+      await owner.$eval('#share-email-input', (input) => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, '')
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      await action('Add viewer', async () => {
+        await owner.type('#share-email-input', 'audit@example.test')
+        await owner.click('.google-share-add-btn')
+      })
+      await action('Duplicate invitation', async () => {
+        await owner.type('#share-email-input', 'audit@example.test')
+        await owner.click('.google-share-add-btn')
+      })
+      const person = async (text) => {
+        const handle = await owner.evaluateHandle(() =>
+          [...document.querySelectorAll('.google-share-user-row')]
+            .find((n) => n.textContent.includes('audit@example.test'))
+            .querySelector('[aria-label="Change permission"]'),
+        )
+        await handle.asElement().click()
+        await clickText(owner, text, '[role="menuitem"]')
+      }
+      for (const role of ['Viewer', 'Editor', 'Present', 'Viewer', 'Remove access'])
+        await action(`Person ${role}`, () => person(role))
+      await action('Done', () => owner.click('.google-share-done-btn'))
+      const duplicate = sharingAudit.find((f) => f.name === 'Project modal: Duplicate invitation')
+      assert.equal(
+        duplicate.requests.filter((r) => r.method === 'POST' && r.url.endsWith('/manageProject')).length,
+        0,
+        'Duplicate invitation should make zero permission calls',
+      )
+      assert.equal(
+        (await db.doc(`projectShares/${project.id}`).get()).data().collaborators?.['audit@example.test'],
+        undefined,
+        'Removed invitation must remain removed',
+      )
+    })
   await record('Project sharing provisions existing boards; verified email membership', async () => {
     await menu(owner, 'Project Beta', 'Share')
     assert.equal(
@@ -1084,6 +1190,26 @@ try {
     assert.equal(new URL(anonymous.url()).pathname, '/')
     assert.equal(new URL(anonymous.url()).searchParams.get('projectId'), project.id)
   })
+  await record('Project Presentation access opens every inherited board without editing controls', async () => {
+    await menu(owner, 'Project Beta', 'Share')
+    await owner.click('[aria-label="General access role"]')
+    await clickText(owner, 'Present', '[role="menuitem"]')
+    await owner.waitForFunction(() => !document.querySelector('.google-share-done-btn').disabled)
+    await clickText(owner, 'Done')
+    await owner.waitForSelector('.google-share-dialog', { hidden: true })
+    for (const id of [boardId, createdByEditor.id ?? createdByEditor]) {
+      if (typeof id !== 'string') continue
+      await anonymous.goto(`${base}/boards/${id}`)
+      await anonymous.waitForSelector('.shared-presentation-landing')
+      assert.equal(await anonymous.$('.excalidraw-container'), null)
+    }
+    await menu(owner, 'Project Beta', 'Share')
+    await owner.click('[aria-label="General access role"]')
+    await clickText(owner, 'Viewer', '[role="menuitem"]')
+    await owner.waitForFunction(() => !document.querySelector('.google-share-done-btn').disabled)
+    await clickText(owner, 'Done')
+    await owner.waitForSelector('.google-share-dialog', { hidden: true })
+  })
   await record('Anyone-with-link project editors receive the full menu and board editing', async () => {
     const policy = (await db.doc(`projectShares/${project.id}`).get()).data()
     policy.generalRole = 'editor'
@@ -1631,6 +1757,7 @@ try {
     },
   )
   await record('Soft delete blocks direct links and stale scene saves; data retained', async () => {
+    await editor.bringToFront()
     await editor.goto(base)
     await editor.waitForSelector('[aria-label="Project actions for Project Beta"]')
     await menu(editor, 'Project Beta', 'Delete')
@@ -1651,7 +1778,23 @@ try {
     assert.equal(await editor.$eval('.project-delete-dialog', (node) => node.offsetWidth), 400)
     assert.equal(await editor.$eval('.project-delete-btn', (node) => getComputedStyle(node).paddingLeft), '16px')
     await editor.screenshot({ path: `${out}/delete-project-compact.png` })
-    await clickText(editor, 'Delete project')
+    const deletion = editor.waitForResponse(
+      (response) => {
+        const request = response.request()
+        return (
+          request.method() === 'POST' &&
+          response.url().endsWith('/manageProject') &&
+          JSON.parse(request.postData() || '{}').data?.action === 'delete'
+        )
+      },
+      { timeout: 60000 },
+    )
+    await editor.click('.project-delete-btn')
+    assert.equal(
+      (await deletion).status(),
+      200,
+      'Project deletion must finish successfully before checking its tombstone',
+    )
     await editor.waitForFunction(() => !document.querySelector('[role="dialog"]'), { timeout: 60000 })
     assert.ok((await project.ref.get()).data().deletedAt)
     assert.equal((await project.ref.collection('boards').get()).size, 2)
@@ -1705,11 +1848,15 @@ try {
   assert.deepEqual(failures, [], 'No uncaught browser errors')
   console.log(`PASS: ${results.length} browser/network scenarios; Firebase rules and Functions exercised`)
 } catch (error) {
+  console.error('Original project test failure:', error.stack)
   if (anonymous) {
     await anonymous.screenshot({ path: `${out}/anonymous-failure.png`, fullPage: true })
     await writeFile(`${out}/anonymous-failure.html`, await anonymous.content())
     console.log('Anonymous URL:', anonymous.url())
-    console.log('Anonymous body:', await anonymous.$eval('body', (node) => node.textContent.slice(0, 2000)))
+    console.log(
+      'Anonymous body:',
+      await anonymous.$eval('body', (node) => node.textContent.slice(0, 2000)).catch(() => 'Navigation in progress'),
+    )
   }
   if (editor) await editor.screenshot({ path: `${out}/editor-failure.png`, fullPage: true })
   if (viewer) await viewer.screenshot({ path: `${out}/viewer-failure.png`, fullPage: true })
@@ -1719,7 +1866,7 @@ try {
   }
   throw error
 } finally {
-  await writeFile(`${out}/results.json`, JSON.stringify({ results, requests, failures }, null, 2))
+  await writeFile(`${out}/results.json`, JSON.stringify({ results, requests, failures, sharingAudit }, null, 2))
   await browser.close()
   await server.close()
   await db.terminate()

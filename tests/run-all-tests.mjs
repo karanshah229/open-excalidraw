@@ -9,8 +9,10 @@ const output = resolve(root, '.system_generated/all-tests')
 await mkdir(output, { recursive: true })
 const results = []
 const imageCloud = process.argv.includes('--image-cloud')
+const selectedStages = process.env.E2E_TEST_STAGES?.split(',')
 
 async function run(name, command, args) {
+  if (selectedStages && !selectedStages.includes(name)) return true
   const start = Date.now()
   const logPath = resolve(output, `${name}.log`)
   const log = createWriteStream(logPath)
@@ -40,6 +42,7 @@ if (imageCloud) {
     throw new Error('Cloud image tests require local demo-image-persistence emulators.')
   await run('images-cloud-persistence', process.execPath, ['tests/image-persistence.test.mjs', '--cloud'])
   await run('images-cloud-formats', process.execPath, ['tests/image-formats.test.mjs', '--cloud'])
+  await run('presentation-access', process.execPath, ['tests/presentation-access.test.mjs'])
   await run('slide-notes-access', process.execPath, ['tests/slide-notes-access.test.mjs'])
   await run('deleted-project-sync', process.execPath, ['tests/deleted-project-sync.test.mjs'])
 } else {

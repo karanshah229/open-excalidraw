@@ -1,5 +1,11 @@
+import {
+  createSlideDataHandler,
+  slideDataOperations,
+  describeSlides,
+} from '../features/mcp-bridge/slide-data-operations'
+import { PresentationView } from './presentation'
 import { AccessDenied } from '../components/access-denied'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { doc, getDoc, updateDoc } from 'firebase/firestore'
 import { createPortal } from 'react-dom'
 import { Link, useNavigate, useParams, useBlocker } from '@tanstack/react-router'
@@ -27,7 +33,7 @@ import { BoardInfoDropdown } from '../components/board-info-dropdown'
 import { SyncStatusDropdown } from '../components/sync-status-dropdown'
 import { ShareModal } from '../components/share-modal'
 import { restoreSceneAssets } from '../features/assets/scene-assets'
-import { sharingService } from '../features/sharing/sharing-service'
+import { sharingService, type BoardShareConfig } from '../features/sharing/sharing-service'
 import { resolveBoardSharing } from '../features/workspace/board-loading'
 import {
   readSharedSceneDraft,
@@ -45,8 +51,14 @@ import { reconcileElementsLWW } from '../features/collaboration/reconcile'
 import { getFirebaseAuth, getFirestoreDb, isFirebaseConfigured } from '../lib/firebase'
 import { createSceneSession } from '../features/scene/scene-session'
 import { getSlides, newSlideData, slideLabel, slideMetadata } from '../features/slides/slide-model'
-import { commitSlideCommand, duplicateSlide, normalizeDuplicatedSlides } from '../features/slides/slide-commands'
+import {
+  commitSlideCommand,
+  createSlide,
+  duplicateSlide,
+  normalizeDuplicatedSlides,
+} from '../features/slides/slide-commands'
 import { copySlideNotes } from '../features/slides/notes-store'
+import { readSidebarPinned } from '../features/sidebar/sidebar-preferences'
 import { SlidesPanel } from '../features/slides/slides-panel'
 
 const slideFrameTool = { label: 'Slide', createCustomData: newSlideData }
@@ -295,8 +307,14 @@ export function BoardEditor() {
     }
     checkAndZoom()
   }, [zoomToContentWithPadding])
+  const slideDataHandler = useMemo(createSlideDataHandler, [boardId, authUser?.uid])
+  useEffect(() => () => slideDataHandler.clear(), [slideDataHandler])
   const [isReadOnly, setIsReadOnly] = useState(false)
+  const [presentationConfig, setPresentationConfig] = useState<BoardShareConfig | undefined>()
   const [isSharedBoard, setIsSharedBoard] = useState(false)
+  const ownedSyncBlockedRef = useRef(false)
+  const isSharedBoardRef = useRef(isSharedBoard)
+  isSharedBoardRef.current = isSharedBoard
   const [accessDenied, setAccessDenied] = useState(false)
   const accessDeniedRef = useRef(accessDenied)
   accessDeniedRef.current = accessDenied
@@ -310,7 +328,7 @@ export function BoardEditor() {
 
   // Task 1: Register active session when board is open (1 write on open, 1 on close)
   useEffect(() => {
-    if (!boardId || !isSharedBoard || accessDenied || boardNotFound) return
+    if (!boardId || !isSharedBoard || accessDenied || boardNotFound || presentationConfig) return
     let cancelled = false
     let cleanupSession: (() => void) | undefined
     void (async () => {
@@ -325,18 +343,18 @@ export function BoardEditor() {
       cancelled = true
       if (cleanupSession) cleanupSession()
     }
-  }, [boardId, isSharedBoard, authUser?.uid, accessDenied, boardNotFound])
+  }, [boardId, isSharedBoard, authUser?.uid, accessDenied, boardNotFound, Boolean(presentationConfig)])
 
   // Task 1: Subscribe to active sessions on the board
   useEffect(() => {
-    if (!boardId || !isSharedBoard || accessDenied || boardNotFound) {
+    if (!boardId || !isSharedBoard || accessDenied || boardNotFound || presentationConfig) {
       setActiveSessions([])
       return
     }
     return sharingService.subscribeToActiveSessions(boardId, (sessions) => {
       setActiveSessions(sessions)
     })
-  }, [boardId, isSharedBoard, accessDenied, boardNotFound])
+  }, [boardId, isSharedBoard, accessDenied, boardNotFound, Boolean(presentationConfig)])
 
   // Lazy collab triggers when 2 or more active editor sessions are detected on the board
   const isLazyCollabActive = Boolean(activeSessions.length >= 2)
@@ -346,7 +364,13 @@ export function BoardEditor() {
   const { activeCollaborators, onPointerUpdate, broadcastChanges, isSpectator } = useCollaboration({
     boardId,
     enabled: Boolean(
-      isFirebaseConfigured && isSharedBoard && boardId && !accessDenied && !boardNotFound && isLazyCollabActive,
+      isFirebaseConfigured &&
+      isSharedBoard &&
+      boardId &&
+      !accessDenied &&
+      !boardNotFound &&
+      !presentationConfig &&
+      isLazyCollabActive,
     ),
     sessionId: sessionIdRef.current,
     authUser,
@@ -509,6 +533,8 @@ export function BoardEditor() {
     setRecoveredSharedScene(null)
     documentRef.current = null
     setIsSharedBoard(false)
+    ownedSyncBlockedRef.current = false
+    setPresentationConfig(undefined)
     setAccessDenied(false)
     setBoardNotFound(false)
     setBoardLoadFailed(false)
@@ -543,6 +569,7 @@ export function BoardEditor() {
         // Case 1: Board exists in Firebase (authoritative single source of truth)
         if (shared.status === 'allowed' && shared.config) {
           const config = shared.config
+          setPresentationConfig(config.effectiveRole === 'presentation' ? config : undefined)
           const db = getFirestoreDb()
           const parent =
             config.projectId && db ? await getDoc(doc(db, 'projectShares', config.projectId)).catch(() => null) : null
@@ -588,7 +615,8 @@ export function BoardEditor() {
             ? config.effectiveRole === 'owner' || config.effectiveRole === 'editor'
             : isOwner || isGeneralEditor || isCollabEditor
 
-          setIsReadOnly(!canEdit)
+          ownedSyncBlockedRef.current = details?.document?.syncStatus === 'sync-blocked'
+          setIsReadOnly(ownedSyncBlockedRef.current || !canEdit)
           if (draft) setRecoveredSharedScene(finalScene)
           awaitingInitialSceneRef.current = true
           savedSignature.current = getSceneSignature(finalScene)
@@ -598,8 +626,8 @@ export function BoardEditor() {
           appStateRef.current = finalScene.appState
 
           // Update local IndexedDB with authoritative cloud/merged state
-          if (details?.document) {
-            documentRef.current = details.document
+          documentRef.current = details?.document ?? null
+          if (details?.document && !ownedSyncBlockedRef.current) {
             saveChainRef.current = saveChainRef.current
               .then(async () => {
                 const latest = await workspaceApi.loadBoard(details.document.id)
@@ -636,7 +664,7 @@ export function BoardEditor() {
             libraryItems: Promise.resolve(libraryItems),
           })
           triggerAutoCenter()
-          setState(draft ? 'Saving' : 'Synced')
+          setState(ownedSyncBlockedRef.current ? 'Project deleted' : draft ? 'Saving' : 'Synced')
           return
         }
 
@@ -723,6 +751,7 @@ export function BoardEditor() {
     const unsubscribe = sharingService.subscribeToSharedBoard(
       boardId,
       (updatedConfig) => {
+        setPresentationConfig(updatedConfig.effectiveRole === 'presentation' ? updatedConfig : undefined)
         const recoveringAccess = accessDeniedRef.current
         const userEmail = authUser?.email?.trim().toLowerCase()
         const userUid = authUser?.uid
@@ -744,7 +773,7 @@ export function BoardEditor() {
         const canEdit = updatedConfig.effectiveRole
           ? updatedConfig.effectiveRole === 'owner' || updatedConfig.effectiveRole === 'editor'
           : isOwner || isGeneralEditor || isCollabEditor
-        setIsReadOnly(!canEdit)
+        setIsReadOnly(ownedSyncBlockedRef.current || !canEdit)
 
         setBoardMeta((prev) =>
           prev
@@ -811,22 +840,25 @@ export function BoardEditor() {
   }, [boardId, isSharedBoard, authUser?.email, authUser?.uid])
 
   useEffect(() => {
-    if (isSharedBoard) return
     return workspaceApi.subscribeToBoardSyncStatus(boardId, (status) => {
+      // Registered owned boards also have shared scenes. Their private project
+      // lifecycle still blocks edits and retains pending bytes until restoration.
+      if (isSharedBoard && status !== 'sync-blocked' && !ownedSyncBlockedRef.current) return
+      ownedSyncBlockedRef.current = status === 'sync-blocked'
       setState(statusLabel(status))
-      setIsReadOnly(status === 'sync-blocked')
+      setIsReadOnly(ownedSyncBlockedRef.current)
     })
   }, [boardId, isSharedBoard])
 
   const sendScene = useCallback(
     (elements = elementsRef.current, operationId?: string, result?: unknown) => {
-      if (isReadOnly) return
       if (socketRef.current?.readyState !== WebSocket.OPEN) return
       const selected = appStateRef.current?.selectedElementIds as Record<string, boolean> | undefined
       const selectionIds = selected ? Object.keys(selected).filter((id) => selected[id]) : []
       socketRef.current.send(
         JSON.stringify({
           type: 'scene',
+          boardId,
           operationId,
           scene: { elements, appState: appStateRef.current },
           selectionIds,
@@ -834,7 +866,7 @@ export function BoardEditor() {
         }),
       )
     },
-    [isReadOnly],
+    [boardId],
   )
 
   const sendOperationResult = useCallback((operationId: string, ok: boolean, data?: unknown, error?: string) => {
@@ -851,7 +883,7 @@ export function BoardEditor() {
   }, [])
 
   useEffect(() => {
-    if (isReadOnly) return
+    if (presentationConfig || accessDenied || boardNotFound || !initialData) return
     let disposed = false
     let retryId: number | undefined
     let retryDelay = 5_000
@@ -869,9 +901,63 @@ export function BoardEditor() {
       }
       socket.onmessage = async ({ data }) => {
         const message = JSON.parse(data) as { type?: string; operation?: any }
-        if (message.type !== 'operation' || !apiRef.current) return
-        userHasInteractedRef.current = true
+        if (message.type !== 'operation') return
         const operation = message.operation
+        if (slideDataOperations.has(operation.type)) {
+          try {
+            const data = await slideDataHandler.handle(operation, {
+              boardId,
+              projectId: boardMeta?.projectId ?? '',
+              identity: authUser?.uid ?? 'local-user',
+              role: isReadOnly
+                ? 'viewer'
+                : !isSharedBoardRef.current || boardMeta?.projectOwnerId === authUser?.uid
+                  ? 'owner'
+                  : 'editor',
+              local: !isFirebaseConfigured || (!isSharedBoardRef.current && (!authUser || authUser.isAnonymous)),
+              scene: {
+                elements: elementsRef.current,
+                files: apiRef.current?.getFiles() ?? {},
+                background: String(appStateRef.current.viewBackgroundColor ?? '#ffffff'),
+                theme: resolvedTheme,
+              },
+            })
+            const sharedCurrentBoard =
+              operation.type === 'share_board' && (!operation.boardId || operation.boardId === boardId)
+            if (sharedCurrentBoard && !isSharedBoardRef.current) {
+              // A board opened before its share registration completed still uses
+              // private saves. Publish its current scene once, then use live shared saves.
+              await sharingService.updateSharedScene(boardId, {
+                elements: elementsRef.current,
+                files: apiRef.current?.getFiles() ?? {},
+                appState: {
+                  theme: resolvedTheme,
+                  viewBackgroundColor: appStateRef.current.viewBackgroundColor,
+                  gridModeEnabled: appStateRef.current.gridModeEnabled,
+                  objectsSnapModeEnabled: appStateRef.current.objectsSnapModeEnabled,
+                },
+              })
+            }
+            sendOperationResult(operation.id, true, data)
+            if (sharedCurrentBoard) {
+              isSharedBoardRef.current = true
+              setIsSharedBoard(true)
+            }
+          } catch (error) {
+            sendOperationResult(operation.id, false, undefined, error instanceof Error ? error.message : String(error))
+          }
+          return
+        }
+        if (isReadOnly || !apiRef.current) {
+          sendOperationResult(
+            operation.id,
+            false,
+            undefined,
+            'Canvas mutations require editor access and a mounted editor.',
+          )
+          return
+        }
+        userHasInteractedRef.current = true
         operationRef.current = operation.id
         const wasEmpty = elementsRef.current.length === 0
         let next = elementsRef.current
@@ -894,17 +980,20 @@ export function BoardEditor() {
           elementsRef.current = next
           apiRef.current.updateScene({ elements: next })
           sendScene(next, operation.id)
-        } else if (operation.type === 'get_slides') {
-          sendOperationResult(operation.id, true, {
-            slides: getSlides(apiRef.current.getSceneElements()).map((slide, index) => ({
-              id: slide.id,
-              number: index + 1,
-              x: slide.x,
-              y: slide.y,
-              width: slide.width,
-              height: slide.height,
-            })),
-          })
+        } else if (operation.type === 'create_slide') {
+          try {
+            const slideId = createSlide(apiRef.current, operation)
+            const elements = [...apiRef.current.getSceneElementsIncludingDeleted()]
+            elementsRef.current = elements
+            sendScene(elements, operation.id, {
+              boardId,
+              slide: describeSlides({ elements, files: {}, background: '#ffffff', theme: resolvedTheme }).find(
+                (slide) => slide.id === slideId,
+              ),
+            })
+          } catch (error) {
+            sendOperationResult(operation.id, false, undefined, error instanceof Error ? error.message : String(error))
+          }
         } else if (operation.type === 'slide_command') {
           const slide = getSlides(apiRef.current.getSceneElements()).find((entry) => entry.id === operation.slideId)
           if (!slide) sendOperationResult(operation.id, false, null, 'Slide not found.')
@@ -917,7 +1006,9 @@ export function BoardEditor() {
                     identity: authUser?.uid || 'local-user',
                     boardId,
                     projectId: boardMeta?.projectId || '',
-                    cloud: Boolean(isFirebaseConfigured && authUser),
+                    cloud: Boolean(
+                      isFirebaseConfigured && (isSharedBoardRef.current || (authUser && !authUser.isAnonymous)),
+                    ),
                   },
                   slide.id,
                   copiedId,
@@ -927,6 +1018,18 @@ export function BoardEditor() {
                 type: 'move',
                 id: slide.id,
                 offset: operation.action === 'earlier' ? -1 : 1,
+              })
+            } else if (operation.action === 'move_before' || operation.action === 'move_after') {
+              if (!getSlides(apiRef.current.getSceneElements()).some((entry) => entry.id === operation.targetSlideId)) {
+                sendOperationResult(operation.id, false, undefined, 'Target slide not found.')
+                operationRef.current = null
+                return
+              }
+              commitSlideCommand(apiRef.current, {
+                type: 'place',
+                id: slide.id,
+                targetId: operation.targetSlideId,
+                after: operation.action === 'move_after',
               })
             } else if (operation.action === 'remove')
               commitSlideCommand(apiRef.current, { type: 'remove', id: slide.id })
@@ -1208,67 +1311,6 @@ export function BoardEditor() {
           } catch (err: any) {
             sendOperationResult(operation.id, false, null, err?.message || 'Failed to switch board')
           }
-        } else if (operation.type === 'get_share_info') {
-          try {
-            const targetBoardId = (operation.boardId as string) || boardId
-            const config = await sharingService.getShareConfig(targetBoardId, {
-              boardName: boardMeta?.boardName,
-              ownerId: boardMeta?.projectOwnerId,
-            })
-            const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:5173'
-            sendOperationResult(operation.id, true, {
-              ok: true,
-              boardId: targetBoardId,
-              boardName: config.boardName,
-              shareUrl: `${origin}/boards/${targetBoardId}`,
-              generalAccess: config.generalAccess,
-              generalRole: config.generalRole,
-              invitedEmails: config.invitedEmails,
-              collaborators: config.collaborators,
-            })
-          } catch (err: any) {
-            sendOperationResult(operation.id, false, null, err?.message || 'Failed to get share info')
-          }
-        } else if (operation.type === 'share_board') {
-          try {
-            const targetBoardId = (operation.boardId as string) || boardId
-            const currentConfig = await sharingService.getShareConfig(targetBoardId, {
-              boardName: boardMeta?.boardName,
-              ownerId: boardMeta?.projectOwnerId,
-            })
-            const updated = {
-              ...currentConfig,
-              generalAccess: operation.generalAccess ?? currentConfig.generalAccess,
-              generalRole: operation.generalRole ?? currentConfig.generalRole,
-            }
-            if (operation.inviteEmail) {
-              const email = String(operation.inviteEmail).trim().toLowerCase()
-              if (!updated.invitedEmails.includes(email)) {
-                updated.invitedEmails = [...updated.invitedEmails, email]
-              }
-              updated.collaborators = {
-                ...updated.collaborators,
-                [email]: {
-                  email,
-                  role: operation.inviteRole || 'editor',
-                  addedAt: new Date().toISOString(),
-                },
-              }
-            }
-            await sharingService.saveShareConfig(updated)
-            const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:5173'
-            sendOperationResult(operation.id, true, {
-              ok: true,
-              boardId: targetBoardId,
-              shareUrl: `${origin}/boards/${targetBoardId}`,
-              generalAccess: updated.generalAccess,
-              generalRole: updated.generalRole,
-              invitedEmails: updated.invitedEmails,
-              collaborators: updated.collaborators,
-            })
-          } catch (err: any) {
-            sendOperationResult(operation.id, false, null, err?.message || 'Failed to update sharing')
-          }
         }
         operationRef.current = null
       }
@@ -1287,6 +1329,8 @@ export function BoardEditor() {
         failedAttempts = 0
         retryDelay = 5_000
         void connect()
+      } else {
+        sendScene()
       }
     }
 
@@ -1299,7 +1343,19 @@ export function BoardEditor() {
       if (retryId) window.clearTimeout(retryId)
       socketRef.current?.close()
     }
-  }, [isReadOnly, sendScene, authUser, boardId, boardMeta?.projectId])
+  }, [
+    isReadOnly,
+    sendScene,
+    authUser,
+    boardId,
+    boardMeta?.projectId,
+    Boolean(presentationConfig),
+    accessDenied,
+    boardNotFound,
+    Boolean(initialData),
+    slideDataHandler,
+    resolvedTheme,
+  ])
 
   /**
    * Saves use optimistic revisions, so concurrent writes with the same stale
@@ -1586,12 +1642,15 @@ export function BoardEditor() {
   )
 
   const hasUnsavedChanges =
-    state === 'Saving' ||
-    state === 'Sync failed' ||
-    state === 'Local save failed' ||
-    state === 'Conflict' ||
-    pendingSceneRef.current !== null ||
-    (!isSharedBoard && Boolean(authUser && !authUser.isAnonymous) && state === 'Synced locally')
+    !isReadOnly &&
+    !presentationConfig &&
+    !accessDenied &&
+    (state === 'Saving' ||
+      state === 'Sync failed' ||
+      state === 'Local save failed' ||
+      state === 'Conflict' ||
+      pendingSceneRef.current !== null ||
+      (!isSharedBoard && Boolean(authUser && !authUser.isAnonymous) && state === 'Synced locally'))
 
   const hasUnsavedChangesRef = useRef(hasUnsavedChanges)
   hasUnsavedChangesRef.current = hasUnsavedChanges
@@ -1603,6 +1662,7 @@ export function BoardEditor() {
   }, [initialData, triggerAutoCenter])
 
   useEffect(() => {
+    if (isReadOnly || presentationConfig || accessDenied) return
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
       void flushSave()
       if (hasUnsavedChangesRef.current) {
@@ -1624,7 +1684,7 @@ export function BoardEditor() {
       window.removeEventListener('beforeunload', handleBeforeUnload)
       document.removeEventListener('visibilitychange', handleVisibilityChange)
     }
-  }, [flushSave])
+  }, [flushSave, isReadOnly, Boolean(presentationConfig), accessDenied])
 
   const handleMakeCopy = useCallback(async () => {
     if (!authUser) {
@@ -1670,23 +1730,44 @@ export function BoardEditor() {
     disabled: isReadOnly || !hasUnsavedChanges || accessDenied,
   })
 
+  // Header and Slides share one board-access dialog.
+  const shareDialog = boardMeta && (
+    <ShareModal
+      open={isShareModalOpen && !boardNotFound && (!accessDenied || boardMeta.projectOwnerId === authUser?.uid)}
+      onOpenChange={setIsShareModalOpen}
+      onShareConfigSaved={() => setIsSharedBoard(true)}
+      boardId={boardId}
+      boardName={boardMeta.boardName}
+      ownerId={boardMeta.projectOwnerId}
+      scene={{ elements: elementsRef.current, appState: appStateRef.current, files: filesRef.current }}
+    />
+  )
+  const withShareDialog = (content: ReactNode) => (
+    <>
+      {content}
+      {shareDialog}
+    </>
+  )
+
+  if (presentationConfig && !accessDenied) return <PresentationView boardId={boardId} config={presentationConfig} />
+
   if (accessDenied) {
     const isUserSignedIn = Boolean((authUser && !authUser.isAnonymous) || isSwitchingAccount)
     const displayEmail = isSwitchingAccount ? (lastUserEmailRef.current ?? authUser?.email) : authUser?.email
 
-    return (
+    return withShareDialog(
       <AccessDenied
         email={displayEmail}
         signedIn={isUserSignedIn}
         busy={isSigningIn || isSwitchingAccount}
         onSignIn={handleSignIn}
         onSwitchAccount={handleSwitchAccount}
-      />
+      />,
     )
   }
 
   if (boardNotFound) {
-    return (
+    return withShareDialog(
       <div className="access-denied-container">
         <div className="access-denied-card animate-scale-in">
           <h2 className="access-denied-title">Board not found</h2>
@@ -1695,12 +1776,12 @@ export function BoardEditor() {
             Go to workspace
           </Link>
         </div>
-      </div>
+      </div>,
     )
   }
 
   if (!initialData && boardLoadFailed) {
-    return (
+    return withShareDialog(
       <div className="access-denied-container">
         <div className="access-denied-card">
           <h2 className="access-denied-title">Could not load board</h2>
@@ -1709,11 +1790,12 @@ export function BoardEditor() {
             Retry
           </button>
         </div>
-      </div>
+      </div>,
     )
   }
-  if (!initialData) return <div className="workspace-loading">Loading board…</div>
-  return (
+  if (!initialData) return withShareDialog(<div className="workspace-loading">Loading board…</div>)
+
+  return withShareDialog(
     <main ref={editorShellRef} className="editor-shell">
       {currentNavSlot &&
         createPortal(
@@ -1953,135 +2035,128 @@ export function BoardEditor() {
           <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
         </div>
       ) : (
-        <Excalidraw
-          key={boardId}
-          theme={resolvedTheme}
-          initialData={initialData}
-          onChange={onChange}
-          onPointerUpdate={onPointerUpdate}
-          frameTool={slideFrameTool}
-          getFrameLabel={slideLabel}
-          onDuplicate={(next, previous) => {
-            const known = new Set(previous.map((element) => element.id))
-            for (const copy of getSlides(next).filter((slide) => !known.has(slide.id))) {
-              const source = getSlides(previous).find(
-                (slide) => slideMetadata(slide)!.orderKey === slideMetadata(copy)!.orderKey,
-              )
-              if (source)
-                void copySlideNotes(
-                  {
-                    identity: authUser?.uid || 'local-user',
-                    boardId,
-                    projectId: boardMeta?.projectId || '',
-                    cloud: Boolean(isFirebaseConfigured && authUser),
-                  },
-                  source.id,
-                  copy.id,
-                ).catch(console.error)
-            }
-            return normalizeDuplicatedSlides(next, previous)
-          }}
-          viewModeEnabled={isReadOnly || isSpectator || isTransitioningCollab}
-          detectScroll
-          autoFocus={!isShareModalOpen}
-          handleKeyboardGlobally={!isShareModalOpen && !isSlideStageOpen}
-          objectsSnapModeEnabled
-          aiEnabled={false}
-          validateEmbeddable={(url) => {
-            try {
-              return new URL(url).protocol === 'https:'
-            } catch {
-              return false
-            }
-          }}
-          UIOptions={{
-            tools: { image: true },
-            canvasActions: {
-              changeViewBackgroundColor: !isReadOnly && !isSpectator && !isTransitioningCollab,
-              clearCanvas: !isReadOnly && !isSpectator,
-              export: { saveFileToDisk: true },
-              loadScene: !isReadOnly && !isSpectator,
-              saveToActiveFile: !isReadOnly && !isSpectator,
-              saveAsImage: true,
-              toggleTheme: false,
-            },
-          }}
-          excalidrawAPI={(api) => {
-            apiRef.current = api
-            if (import.meta.env.DEV) {
-              ;(window as any).__excalidrawAPI = api
-              ;(window as any).__centerBoardContent = () => {
-                hasAutoZoomedRef.current = false
-                triggerAutoCenter()
+        <div className="board-canvas">
+          <Excalidraw
+            key={boardId}
+            theme={resolvedTheme}
+            initialData={{
+              ...initialData,
+              appState: { ...initialData.appState, defaultSidebarDockedPreference: readSidebarPinned() },
+            }}
+            onChange={onChange}
+            onPointerUpdate={onPointerUpdate}
+            frameTool={slideFrameTool}
+            getFrameLabel={slideLabel}
+            onDuplicate={(next, previous) => {
+              const known = new Set(previous.map((element) => element.id))
+              for (const copy of getSlides(next).filter((slide) => !known.has(slide.id))) {
+                const source = getSlides(previous).find(
+                  (slide) => slideMetadata(slide)!.orderKey === slideMetadata(copy)!.orderKey,
+                )
+                if (source)
+                  void copySlideNotes(
+                    {
+                      identity: authUser?.uid || 'local-user',
+                      boardId,
+                      projectId: boardMeta?.projectId || '',
+                      cloud: Boolean(isFirebaseConfigured && (isSharedBoard || (authUser && !authUser.isAnonymous))),
+                    },
+                    source.id,
+                    copy.id,
+                  ).catch(console.error)
               }
-              ;(window as any).__setUserInteracted = () => {
-                userHasInteractedRef.current = true
+              return normalizeDuplicatedSlides(next, previous)
+            }}
+            viewModeEnabled={isReadOnly || isSpectator || isTransitioningCollab}
+            detectScroll
+            autoFocus={!isShareModalOpen}
+            handleKeyboardGlobally={!isShareModalOpen && !isSlideStageOpen}
+            objectsSnapModeEnabled
+            aiEnabled={false}
+            validateEmbeddable={(url) => {
+              try {
+                return new URL(url).protocol === 'https:'
+              } catch {
+                return false
               }
-              ;(window as any).__hasUnsavedChanges = () => hasUnsavedChangesRef.current
-              ;(window as any).__pendingScene = () => pendingSceneRef.current
-              ;(window as any).__triggerSceneChange = (elements: any[]) => {
-                userHasInteractedRef.current = true
-                onChange(elements, api.getAppState())
+            }}
+            UIOptions={{
+              tools: { image: true },
+              canvasActions: {
+                changeViewBackgroundColor: !isReadOnly && !isSpectator && !isTransitioningCollab,
+                clearCanvas: !isReadOnly && !isSpectator,
+                export: { saveFileToDisk: true },
+                loadScene: !isReadOnly && !isSpectator,
+                saveToActiveFile: !isReadOnly && !isSpectator,
+                saveAsImage: true,
+                toggleTheme: false,
+              },
+            }}
+            excalidrawAPI={(api) => {
+              apiRef.current = api
+              if (import.meta.env.DEV) {
+                ;(window as any).__excalidrawAPI = api
+                ;(window as any).__centerBoardContent = () => {
+                  hasAutoZoomedRef.current = false
+                  triggerAutoCenter()
+                }
+                ;(window as any).__setUserInteracted = () => {
+                  userHasInteractedRef.current = true
+                }
+                ;(window as any).__hasUnsavedChanges = () => hasUnsavedChangesRef.current
+                ;(window as any).__pendingScene = () => pendingSceneRef.current
+                ;(window as any).__triggerSceneChange = (elements: any[]) => {
+                  userHasInteractedRef.current = true
+                  onChange(elements, api.getAppState())
+                }
               }
-            }
-            sendScene()
-            triggerAutoCenter()
-          }}
-          onLibraryChange={(items) => {
-            try {
-              localStorage.setItem(LIBRARY_STORAGE_KEY, JSON.stringify(items))
-            } catch {
-              /* storage may be unavailable */
-            }
-          }}
-        >
-          <MainMenu>
-            {!isReadOnly && !isSpectator && <MainMenu.DefaultItems.LoadScene />}
-            {!isReadOnly && !isSpectator && <MainMenu.DefaultItems.SaveToActiveFile />}
-            <MainMenu.DefaultItems.Export />
-            <MainMenu.DefaultItems.SaveAsImage />
-            <MainMenu.DefaultItems.SearchMenu />
-            <MainMenu.DefaultItems.Help />
-            {!isReadOnly && !isSpectator && <MainMenu.DefaultItems.ClearCanvas />}
-            {!isReadOnly && !isSpectator && <MainMenu.Separator />}
-            {!isReadOnly && !isSpectator && <MainMenu.DefaultItems.ChangeCanvasBackground />}
-          </MainMenu>
-        </Excalidraw>
+              sendScene()
+              triggerAutoCenter()
+            }}
+            onLibraryChange={(items) => {
+              try {
+                localStorage.setItem(LIBRARY_STORAGE_KEY, JSON.stringify(items))
+              } catch {
+                /* storage may be unavailable */
+              }
+            }}
+          >
+            <MainMenu>
+              {!isReadOnly && !isSpectator && <MainMenu.DefaultItems.LoadScene />}
+              {!isReadOnly && !isSpectator && <MainMenu.DefaultItems.SaveToActiveFile />}
+              <MainMenu.DefaultItems.Export />
+              <MainMenu.DefaultItems.SaveAsImage />
+              <MainMenu.DefaultItems.SearchMenu />
+              <MainMenu.DefaultItems.Help />
+              {!isReadOnly && !isSpectator && <MainMenu.DefaultItems.ClearCanvas />}
+              {!isReadOnly && !isSpectator && <MainMenu.Separator />}
+              {!isReadOnly && !isSpectator && <MainMenu.DefaultItems.ChangeCanvasBackground />}
+            </MainMenu>
+            <SlidesPanel
+              onSharePresentation={() => setIsShareModalOpen(true)}
+              key={`slides-${boardId}`}
+              session={sceneSession}
+              containerRef={editorShellRef}
+              apiRef={apiRef}
+              boardId={boardId}
+              projectId={boardMeta?.projectId || ''}
+              identity={
+                boardMeta?.projectOwnerId === 'local-user'
+                  ? 'local-user'
+                  : authUser?.uid || getFirebaseAuth()?.currentUser?.uid || 'local-user'
+              }
+              cloud={Boolean(
+                isFirebaseConfigured &&
+                boardMeta?.projectOwnerId !== 'local-user' &&
+                (authUser || getFirebaseAuth()?.currentUser),
+              )}
+              canEdit={!isReadOnly && !isSpectator && !isTransitioningCollab && !accessDenied}
+              onInteraction={markSlideInteraction}
+              onStageChange={setIsSlideStageOpen}
+            />
+          </Excalidraw>
+        </div>
       )}
-
-      <SlidesPanel
-        key={`slides-${boardId}`}
-        session={sceneSession}
-        containerRef={editorShellRef}
-        apiRef={apiRef}
-        boardId={boardId}
-        projectId={boardMeta?.projectId || ''}
-        identity={
-          boardMeta?.projectOwnerId === 'local-user'
-            ? 'local-user'
-            : authUser?.uid || getFirebaseAuth()?.currentUser?.uid || 'local-user'
-        }
-        cloud={Boolean(
-          isFirebaseConfigured &&
-          boardMeta?.projectOwnerId !== 'local-user' &&
-          (authUser || getFirebaseAuth()?.currentUser),
-        )}
-        canEdit={!isReadOnly && !isSpectator && !isTransitioningCollab && !accessDenied}
-        onInteraction={markSlideInteraction}
-        onStageChange={setIsSlideStageOpen}
-      />
-
-      {boardMeta && (
-        <ShareModal
-          open={isShareModalOpen}
-          onOpenChange={setIsShareModalOpen}
-          onShareConfigSaved={() => setIsSharedBoard(true)}
-          boardId={boardId}
-          boardName={boardMeta.boardName}
-          ownerId={boardMeta.projectOwnerId}
-          scene={{ elements: elementsRef.current, appState: appStateRef.current, files: filesRef.current }}
-        />
-      )}
-    </main>
+    </main>,
   )
 }

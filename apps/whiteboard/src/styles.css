@@ -3438,7 +3438,8 @@ button {
   border: none;
   font-size: 13.5px;
   color: var(--text-primary);
-  padding: 4px 8px;
+  min-height: 32px;
+  padding: 6px 10px;
   border-radius: 6px;
   cursor: pointer;
   transition: background 0.15s ease;
@@ -3494,8 +3495,9 @@ button {
   font-size: 14px;
   font-weight: 600;
   color: var(--text-primary);
-  padding: 2px 6px;
-  margin-left: -6px;
+  min-height: 32px;
+  padding: 6px 10px;
+  margin-left: -10px;
   border-radius: 6px;
   cursor: pointer;
   transition: background 0.15s ease;
@@ -4299,46 +4301,99 @@ button {
 }
 
 /* Slides are board objects; the panel never replaces or disables the canvas. */
-.slides-controls {
-  position: absolute;
-  right: 16px;
-  top: 70px;
-  z-index: 5;
-  display: flex;
-  gap: 8px;
-  font-family: var(--ui-font);
+.board-canvas {
+  height: 100%;
+  width: calc(100% - 48px);
 }
-.slides-controls-sidebar-open {
-  right: calc(var(--right-sidebar-width, 300px) + 16px);
+.board-canvas .excalidraw {
+  --right-sidebar-width: min(340px, calc(100% - 16px)) !important;
 }
-.slides-panel {
+/* Keep editor chrome anchored to the canvas when the native panel docks. */
+.board-canvas .excalidraw .layer-ui__wrapper {
+  width: 100% !important;
+}
+.board-canvas .excalidraw .help-icon {
+  display: none;
+}
+.board-panel-rail .board-panel-help {
+  margin-top: auto;
+  margin-bottom: 12px;
+}
+.board-canvas .sidebar-trigger__label-element:has(.default-sidebar-trigger) {
+  display: none;
+}
+.board-panel-rail.excalidraw {
   position: absolute;
-  right: 12px;
-  top: 70px;
-  bottom: 18px;
-  width: 280px;
-  z-index: 6;
+  left: auto;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 48px;
+  height: 100%;
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--sidebar-border-color);
-  border-radius: var(--border-radius-lg);
-  background: var(--island-bg-color);
-  color: var(--color-on-surface);
-  box-shadow: var(--shadow-island);
-  overflow: auto;
-  font-family: var(--ui-font);
-  font-size: 0.875rem;
-}
-.slides-panel header {
-  display: flex;
-  justify-content: space-between;
   align-items: center;
   gap: 8px;
-  padding: 10px;
-  border-bottom: 1px solid var(--sidebar-border-color);
+  padding-top: 12px;
+  box-sizing: border-box;
+  background: var(--island-bg-color);
+  border-left: 1px solid var(--sidebar-border-color);
+  z-index: 5;
 }
-.slides-panel header svg {
-  stroke-width: 1.25;
+.board-panel-rail .board-panel-button {
+  width: 36px;
+  height: 36px;
+  padding: 8px;
+  border: 0;
+  box-shadow: none;
+  border-radius: var(--border-radius-lg);
+  color: var(--color-on-surface);
+  background: transparent;
+}
+.board-panel-rail .board-panel-button:hover {
+  background: var(--color-surface-high);
+}
+.board-panel-rail .board-panel-button[aria-pressed='true'] {
+  background: var(--color-primary);
+  color: var(--color-icon-white);
+}
+.board-panel-rail .board-panel-button:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+.board-sidebar .sidebar-tabs-root {
+  min-height: 0;
+  padding: 0;
+}
+.board-sidebar .sidebar-tabs-root > [role='tabpanel'] {
+  min-height: 0;
+  overflow: hidden;
+}
+/* Native Library footer relies on tab padding, removed by the shared layout. */
+.board-sidebar .library-menu-control-buttons--at-bottom {
+  padding-bottom: max(12px, env(safe-area-inset-bottom)) !important;
+}
+.board-sidebar .sidebar-tabs-root > .board-sidebar-header {
+  padding: 12px 10px;
+  gap: 8px;
+}
+.board-sidebar-header strong {
+  margin-right: auto;
+  font-size: 0.875rem;
+  white-space: nowrap;
+}
+.board-sidebar-header .sidebar__header__buttons {
+  gap: 2px;
+}
+.slides-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  font-family: var(--ui-font);
+  font-size: 0.875rem;
 }
 .slides-present-split {
   display: flex;
@@ -4347,17 +4402,17 @@ button {
   border-radius: var(--border-radius-lg);
   box-shadow: 0 0 0 1px var(--color-surface-lowest);
 }
-.slides-panel .slides-present-split button {
+.board-sidebar .slides-present-split button {
   border-radius: 0;
   box-shadow: none;
   padding: 0 8px;
   gap: 6px;
 }
-.slides-panel .slides-present-options {
+.board-sidebar .slides-present-options {
   border-left: 1px solid var(--sidebar-border-color);
   padding: 0 5px;
 }
-.slides-panel .slides-present-options svg {
+.board-sidebar .slides-present-options svg {
   width: 14px;
   height: 14px;
 }
@@ -4414,10 +4469,34 @@ button {
   cursor: default;
 }
 .slides-empty {
-  font-size: 13px;
-  line-height: 1.7;
-  padding: 20px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 24px;
+  text-align: center;
+}
+.slides-empty h2 {
+  margin: 0;
+  font-size: 1.125rem;
+  color: var(--color-on-surface);
+}
+.slides-empty p {
+  margin: 0;
+  font-size: 0.875rem;
+  line-height: 1.5;
   color: var(--color-gray-60);
+}
+.slides-panel .slides-create {
+  padding: 10px 16px;
+  background: var(--color-primary);
+  color: var(--color-surface-lowest);
+  font-weight: 500;
+}
+.slides-panel .slides-create:hover {
+  background: var(--color-primary-darker);
 }
 .slide-navigation {
   display: flex;
@@ -4625,31 +4704,12 @@ button {
   stroke-width: 1.25;
 }
 @media (max-width: 600px) {
-  .slides-panel {
-    width: min(280px, calc(100vw - 24px));
-    top: 65px;
-    bottom: 65px;
-  }
-  .slides-controls {
-    right: 12px;
-    top: 65px;
-  }
-  .slides-controls.slides-controls-sidebar-open {
-    display: none;
-  }
   .fullscreen-slides {
     padding: 10px;
   }
   .fullscreen-slides nav span {
     max-width: 90px;
   }
-}
-
-.slides-controls svg {
-  stroke-width: 1.25;
-}
-.slides-controls .slides-toggle[aria-expanded='true'] {
-  background: var(--color-surface-high);
 }
 
 .presentation-body {
@@ -4870,4 +4930,139 @@ button {
   box-shadow: none;
   padding-left: 0;
   padding-right: 0;
+}
+
+.board-sidebar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: auto;
+}
+.shared-presentation {
+  background: #111;
+  color: #fff;
+}
+
+/* Audience controls use app tokens without mounting a drawing editor. */
+.shared-presentation {
+  --sidebar-border-color: var(--border-color);
+  --border-radius-lg: var(--radius);
+  --island-bg-color: var(--bg-surface);
+  --color-on-surface: var(--text-primary);
+  --ui-font: inherit;
+  --default-button-size: 32px;
+  --default-icon-size: 18px;
+  --button-hover-bg: var(--bg-surface-hover);
+  --button-active-bg: var(--accent-subtle);
+  --color-primary: var(--accent);
+}
+.shared-presentation .fullscreen-slide-content img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.shared-presenter {
+  display: flex;
+  height: 100dvh;
+  overflow: hidden;
+}
+.shared-presenter .speaker-view-layout {
+  flex: 1;
+  min-height: 0;
+}
+.shared-presenter .speaker-view-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.shared-presenter .speaker-view-preview > img,
+.shared-presenter .speaker-filmstrip img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.shared-presentation-host {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  height: 100dvh;
+  background: var(--color-surface-lowest);
+  color: var(--color-on-surface);
+  outline: none;
+}
+.shared-presentation-landing {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 24px;
+  text-align: center;
+}
+.shared-presentation-landing h1 {
+  font-size: 26px;
+  margin: 0;
+}
+.shared-presentation-landing p {
+  max-width: 420px;
+  margin: 0;
+  color: var(--color-gray-60);
+  font-size: 14px;
+  line-height: 1.6;
+}
+.shared-presentation-start button,
+.shared-fullscreen-button {
+  border: 1px solid var(--sidebar-border-color);
+  border-radius: var(--border-radius-lg);
+  background: var(--color-primary);
+  color: var(--color-surface-lowest);
+  padding: 12px 18px;
+  cursor: pointer;
+  font: inherit;
+}
+.shared-presentation-start button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.shared-fullscreen-button {
+  position: absolute;
+  bottom: 16px;
+  right: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--island-bg-color);
+  color: var(--color-on-surface);
+  z-index: 1;
+}
+
+.shared-presentation-start {
+  display: inline-flex;
+  overflow: hidden;
+  border-radius: var(--border-radius-lg);
+}
+.shared-presentation-start button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 42px;
+  border: 0;
+  border-radius: 0;
+}
+.shared-presentation-start button + button {
+  border-left: 1px solid var(--color-surface-lowest);
+  padding: 12px;
+}
+.shared-presentation-start button:hover:not(:disabled) {
+  background: var(--color-primary-darker);
+}
+.shared-presentation-start button:focus-visible {
+  outline: 2px solid var(--color-on-surface);
+  outline-offset: -3px;
 }

@@ -7,8 +7,8 @@ service cloud.firestore {
       return signedIn() && request.auth.token.email_verified == true && request.auth.token.email != null
         && request.auth.token.email in data.get('invitedEmails', []);
     }
-    function live(data) { return data.get('deletedAt', null) == null && data.get('pending', false) == false; }
-    function readPolicy(data) { return live(data) && (owner(data) || data.generalAccess == 'anyone_with_link' || invited(data)); }
+    function live(data) { return data.get('deletedAt', null) == null && (data.get('pending', false) == false || owner(data)); }
+    function readPolicy(data) { return live(data) && (owner(data) || (data.generalAccess == 'anyone_with_link') || invited(data)); }
     function editPolicy(data) { return live(data) && (owner(data)
       || (data.generalAccess == 'anyone_with_link' && data.generalRole == 'editor')
       || (invited(data) && data.collaborators[request.auth.token.email].role == 'editor')); }

@@ -109,7 +109,9 @@ async function runUserSTRVerification() {
     await page1.click('.google-share-dropdown-item:last-child')
     await page1.waitForFunction(() => !document.querySelector('.google-share-done-btn').disabled)
     await page1.click('[aria-label="General access role"]')
-    await page1.click('.google-share-dropdown-item:last-child')
+    await page1.evaluate(() =>
+      [...document.querySelectorAll('[role="menuitem"]')].find((item) => item.textContent.trim() === 'Editor').click(),
+    )
     await page1.waitForFunction(() => !document.querySelector('.google-share-done-btn').disabled)
     // Policy mutation temporarily blocks reads; wait for the dialog to recover.
     await page1.waitForFunction(() => {

@@ -96,3 +96,22 @@ export async function copySlideNotes(
     await acknowledgeNote(draft, saved)
   }
 }
+
+/** Compare-and-swap protects typing performed while another client awaits a note write. */
+export async function replaceNoteDraft(key: string, expectedMutationId: string | undefined, next: NoteDraft) {
+  const db = await openDatabase()
+  return new Promise<boolean>((resolve, reject) => {
+    const transaction = db.transaction('notes', 'readwrite'),
+      store = transaction.objectStore('notes')
+    let replaced = false
+    const request = store.get(key)
+    request.onsuccess = () => {
+      const current = request.result as NoteDraft | undefined
+      if (current?.mutationId !== expectedMutationId) return
+      store.put(next)
+      replaced = true
+    }
+    transaction.oncomplete = () => resolve(replaced)
+    transaction.onerror = transaction.onabort = () => reject(transaction.error)
+  })
+}

@@ -42,6 +42,8 @@ async function undo(redo = false) {
   await page.keyboard.up('Meta')
 }
 try {
+  // Do not retain the injected load-failure module across reload tests.
+  await page.setCacheEnabled(false)
   await page.goto(base)
   const id = await page.evaluate(async () => {
     const { isFirebaseConfigured } = await import('/src/lib/firebase.ts')
@@ -84,71 +86,68 @@ try {
   await page.setRequestInterception(false)
   page.off('request', injectLoadFailure)
   assert.equal(await page.$('.slides-controls'), null, 'No slide controls on a board without slides')
+  await page.click('.board-panel-rail [aria-label="Library"]')
+  await page.waitForSelector('.board-sidebar')
+  assert.equal(await page.$('.sidebar--docked'), null, 'Sidebar starts unpinned')
+  for (const pinned of [true, false, true]) {
+    await page.click('[data-testid="sidebar-dock"]')
+    await page.waitForFunction(
+      (expected) => window.__excalidrawAPI.getAppState().defaultSidebarDockedPreference === expected,
+      {},
+      pinned,
+    )
+    await page.waitForFunction(() => !window.__hasUnsavedChanges())
+    await page.reload()
+    await page.waitForFunction(() => !!window.__excalidrawAPI)
+    await page.waitForSelector('.board-panel-rail')
+    assert.equal(await page.$('.sidebar'), null, 'Reload keeps panels closed')
+    await page.click('.board-panel-rail [aria-label="Library"]')
+    await page.waitForSelector('.board-sidebar')
+    assert.equal(
+      await page.evaluate(() => window.__excalidrawAPI.getAppState().defaultSidebarDockedPreference),
+      pinned,
+      'Pin and unpin preferences survive reload',
+    )
+    assert.equal(await page.$$eval('.sidebar--docked', (nodes) => nodes.length), pinned ? 1 : 0)
+  }
+  await page.click('[data-testid="sidebar-close"]')
+  await page.waitForSelector('.sidebar', { hidden: true })
+
   await page.click('[data-testid="toolbar-rectangle"]')
   await draw(350, 260, 500, 360)
   await page.waitForFunction(() => window.__excalidrawAPI.getSceneElements().length === 1)
   const rectangle = await page.evaluate(() => window.__excalidrawAPI.getSceneElements()[0])
-  await tool('slide')
+  await page.waitForSelector('.slides-toggle')
+  await page.click('.slides-toggle')
+  await page.waitForSelector('.slides-create')
+  assert.equal(await page.$('.slides-present'), null, 'Empty Slides has no presentation controls')
+  assert.equal(await page.$('.slides-share-presentation'), null, 'Empty Slides has no sharing controls')
+  await page.screenshot({ path: `${out}/slides-empty.png` })
+  await page.click('.slides-create')
+  await page.waitForFunction(() => {
+    const tool = window.__excalidrawAPI.getAppState().activeTool
+    return tool.type === 'frame'
+  })
+  await page.click('[data-testid="sidebar-close"]')
   await draw(300, 210, 560, 420)
   await page.waitForSelector('.slides-toggle')
   assert.equal(await page.$('.slides-panel'), null, 'Discovering slides does not automatically open the panel')
+  const toolbarBeforeSidebar = await page.$eval('.shapes-section', (node) => node.getBoundingClientRect().x)
   await page.click('.slides-toggle')
   await page.waitForSelector('.slide-card')
-  assert.equal(await page.$('[aria-label="Fullscreen slides"]'), null, 'Only Present is exposed on the board')
-  assert.equal(await page.$('.slides-panel header strong'), null, 'Expanded header has no duplicate title/count')
-  assert.equal(await page.$('.slides-controls'), null, 'Expanded panel has one header')
-  assert(await page.$('.slides-panel header [aria-label="Present slides"]'), 'Present is inside the header')
-  await page.waitForSelector('.slide-card img')
-  await page.screenshot({ path: `${out}/slides-expanded-header.png` })
-  await page.click('[aria-label="Close slides"]')
-  await page.waitForSelector('.slides-toggle')
-  await page.mouse.move(700, 500)
-  assert.equal(await page.$('.slides-present'), null, 'Collapsed Slides has no Present button')
-  assert.equal(await page.$eval('.slides-toggle', (node) => node.textContent.trim()), 'Slides · 1')
-  await page.screenshot({ path: `${out}/slides-collapsed-header.png` })
-  const chromeStyles = await page.evaluate(() => {
-    const library = [...document.querySelectorAll('.default-sidebar-trigger')].find(
-      (node) => node.getBoundingClientRect().width > 0,
-    )
-    const properties = ['backgroundColor', 'borderRadius', 'fontFamily', 'fontSize', 'height', 'padding', 'boxShadow']
-    const styles = (node) => Object.fromEntries(properties.map((name) => [name, getComputedStyle(node)[name]]))
-    return { library: styles(library), toggle: styles(document.querySelector('.slides-toggle')) }
-  })
-  assert.deepEqual(chromeStyles.toggle, chromeStyles.library, 'Slides must match the native Library button styling')
-
-  await page.click('.slides-toggle')
-  await page.waitForSelector('.slides-panel')
-
-  // Library and Slides share the right side of the board and must never overlap.
-  for (const trigger of await page.$$('.default-sidebar-trigger')) {
-    if ((await trigger.boundingBox())?.width) {
-      await trigger.click()
-      break
-    }
-  }
-  await page.waitForFunction(() => window.__excalidrawAPI.getAppState().openSidebar?.name === 'default')
-  await page.waitForSelector('.slides-panel', { hidden: true })
-  assert.equal(await page.$('.slides-panel'), null, 'Opening Library closes Slides')
-  await page.waitForSelector('.sidebar', { visible: true })
+  const toolbarAfterSidebar = await page.$eval('.shapes-section', (node) => node.getBoundingClientRect().x)
+  assert.equal(toolbarAfterSidebar, toolbarBeforeSidebar, 'Opening Slides leaves the main toolbar fixed')
+  await page.click('.board-panel-rail [aria-label="Help"]')
+  await page.waitForSelector('.HelpDialog')
+  await page.waitForFunction(() => !!document.activeElement?.closest('.HelpDialog'))
   assert.equal(
-    await page.evaluate(() => {
-      const controls = document.querySelector('.slides-controls').getBoundingClientRect()
-      const library = document.querySelector('.sidebar').getBoundingClientRect()
-      return controls.right <= library.left
-    }),
-    true,
-    'Slide controls stay outside Library',
+    await page.$eval('.board-canvas .help-icon', (node) => getComputedStyle(node).display),
+    'none',
+    'Canvas Help is replaced by the rail action',
   )
-  await page.screenshot({ path: `${out}/library-without-slides-overlap.png` })
-  await page.setViewport({ width: 540, height: 900 })
-  await page.waitForFunction(() => getComputedStyle(document.querySelector('.slides-controls')).display === 'none')
-  assert.equal(await page.$('.slides-panel'), null, 'Library stays unobstructed on narrow screens')
-  await page.setViewport({ width: 1400, height: 900 })
-  await page.waitForSelector('.slides-toggle', { visible: true })
-  await page.click('.slides-toggle')
-  await page.waitForSelector('.slides-panel', { visible: true })
-  await page.waitForFunction(() => window.__excalidrawAPI.getAppState().openSidebar === null)
-  assert.equal(await page.$('.sidebar'), null, 'Opening Slides closes Library')
+  await page.keyboard.press('Escape')
+  await page.waitForSelector('.HelpDialog', { hidden: true })
+
   const first = await page.evaluate(() =>
     window.__excalidrawAPI.getSceneElements().find((e) => e.customData?.agenticWhiteboard?.slide),
   )
@@ -169,9 +168,66 @@ try {
     1,
   )
   await undo(true)
+  await page.waitForSelector('.slides-toggle')
+  if (!(await page.$('.slides-panel'))) await page.click('.slides-toggle')
   await page.waitForFunction(() =>
     window.__excalidrawAPI.getSceneElements().some((e) => e.customData?.agenticWhiteboard?.slide),
   )
+  assert.equal(await page.$('[aria-label="Fullscreen slides"]'), null, 'Only Present is exposed on the board')
+  assert.equal(await page.$$eval('.sidebar', (nodes) => nodes.length), 1)
+  assert(await page.$('.board-sidebar-header [aria-label="Present slides"]'), 'One native header contains Present')
+  await page.waitForSelector('.slide-card img')
+  await page.screenshot({ path: `${out}/shared-sidebar-slides.png` })
+  await page.click('[data-testid="sidebar-close"]')
+  await page.waitForSelector('.sidebar', { hidden: true })
+  assert.equal(await page.$('.slides-present'), null)
+  assert(await page.$('.board-panel-rail .slides-toggle'), 'Rail stays mounted on collapse')
+  await page.click('.slides-toggle')
+  await page.waitForSelector('.slides-panel')
+  await page.click('.board-panel-rail [aria-label="Library"]')
+  await page.waitForSelector('[data-testid="library"][data-state="active"]')
+  assert.equal(
+    await page.$eval('.shapes-section', (node) => node.getBoundingClientRect().x),
+    toolbarBeforeSidebar,
+    'Library also leaves the toolbar fixed',
+  )
+  assert.equal(await page.$('.slides-panel'), null, 'Library replaces Slides in the same sidebar')
+  assert.equal(await page.$$eval('.sidebar', (nodes) => nodes.length), 1)
+  assert.equal(
+    await page.evaluate(() => {
+      const sidebar = document.querySelector('.sidebar').getBoundingClientRect()
+      const rail = document.querySelector('.board-panel-rail').getBoundingClientRect()
+      return sidebar.right <= rail.left
+    }),
+    true,
+    'Rail and sidebar have distinct layout space',
+  )
+  await page.screenshot({ path: `${out}/shared-sidebar-library.png` })
+  await page.click('.board-panel-rail [aria-label="Search"]')
+  await page.waitForSelector('[data-testid="search"][data-state="active"]')
+  await page.click('.slides-toggle')
+  await page.waitForSelector('.slides-panel')
+  await page.setViewport({ width: 540, height: 900 })
+  await page.waitForSelector('.excalidraw--mobile')
+  await new Promise((resolve) => setTimeout(resolve, 500))
+  assert.equal(
+    await page.$$eval('.sidebar', (nodes) => nodes.length),
+    1,
+    'Responsive fallback never duplicates sidebar',
+  )
+  await page.waitForSelector('.slide-card img')
+  await page.screenshot({ path: `${out}/shared-sidebar-mobile.png` })
+  await page.mouse.click(30, 600)
+  await page.waitForSelector('.sidebar', { hidden: true })
+  await page.click('.slides-toggle')
+  await page.waitForSelector('.slides-panel')
+  await page.setViewport({ width: 1400, height: 900 })
+  await page.waitForSelector('.sidebar--docked')
+  assert.equal(await page.$$eval('.sidebar', (nodes) => nodes.length), 1)
+  await page.click('.slides-toggle')
+  await page.waitForSelector('.sidebar', { hidden: true })
+  await page.click('.slides-toggle')
+  await page.waitForSelector('.slides-panel')
   await tool('frame')
   await draw(700, 250, 850, 400)
   const ordinary = await page.evaluate(
@@ -250,6 +306,19 @@ try {
     {},
     { boardId: id, slideId: duplicated.ids[1] },
   )
+  const selectedBeforeSwitch = await page.$eval('.slide-card[aria-current="true"]', (node) =>
+    node.getAttribute('aria-label'),
+  )
+  await page.click('.board-panel-rail [aria-label="Library"]')
+  await page.waitForFunction(() => !document.querySelector('.slides-panel'))
+  await page.click('.slides-toggle')
+  await page.waitForFunction(
+    () => document.querySelector('#slide-notes-input')?.value === 'Audience-private talking points',
+  )
+  assert.equal(
+    await page.$eval('.slide-card[aria-current="true"]', (node) => node.getAttribute('aria-label')),
+    selectedBeforeSwitch,
+  )
   // A network acknowledgement must preserve newer local typing.
   await page.evaluate(async () => {
     const { writeNoteDraft, acknowledgeNote, readNoteDraft } = await import('/src/features/slides/notes-store.ts')
@@ -290,7 +359,7 @@ try {
       } else window.__originalPreviewToBlob.call(this, callback, ...args)
     }
   })
-  await page.click('[aria-label="Close slides"]')
+  await page.click('[data-testid="sidebar-close"]')
   await page.click('.slides-toggle')
   await page.waitForFunction(() =>
     [...document.querySelectorAll('.slide-card')].every((card) => card.querySelector('img')),
@@ -545,12 +614,14 @@ try {
     await page.click('[aria-label="Remove slide boundary, keep drawings"]')
     await page.waitForFunction((count) => document.querySelectorAll('.slide-card').length === count, {}, remaining - 1)
   }
-  assert.equal(await page.$('.slides-controls'), null, 'Last slide removal hides both controls')
-  assert.equal(await page.$('.slides-panel'), null, 'No empty panel remains after the last slide')
+  await page.waitForSelector('.slides-create')
+  assert(await page.$('.slides-toggle'), 'Last slide removal keeps Slides available')
+  assert.equal(await page.$('.slides-present'), null, 'Last slide removal restores the empty state')
   await undo()
+  await page.waitForSelector('.slide-card')
   await page.waitForSelector('.slides-present')
   // Warm thumbnails below the viewport after opening, without having to scroll.
-  await page.click('[aria-label="Close slides"]')
+  await page.click('[data-testid="sidebar-close"]')
   await page.evaluate(() => {
     const api = window.__excalidrawAPI
     const elements = api.getSceneElements()
@@ -585,9 +656,21 @@ try {
     false,
     'Offscreen thumbnail is ready when scrolled into view',
   )
-  await page.click('[aria-label="Close slides"]')
+  const scrolledPosition = await page.$eval('.slides-list', (node) => node.scrollTop)
+  await page.click('.board-panel-rail [aria-label="Library"]')
+  await page.waitForFunction(() => !document.querySelector('.slides-panel'))
   await page.click('.slides-toggle')
   await page.waitForSelector('.slide-card:last-child img')
+  assert.equal(
+    await page.$eval('.slides-list', (node) => node.scrollTop),
+    scrolledPosition,
+    'Switching tabs restores scroll position',
+  )
+  assert.equal(
+    await page.$eval('.slides-list', (node) => node.textContent.includes('Loading preview')),
+    false,
+    'Switching tabs reuses warmed previews',
+  )
   await page.evaluate(() => window.__excalidrawAPI.updateScene({ elements: window.__beforeWarmup }))
   // A wide slide must fit and center in the canvas left of the open Slides panel.
   await page.evaluate(() => {
