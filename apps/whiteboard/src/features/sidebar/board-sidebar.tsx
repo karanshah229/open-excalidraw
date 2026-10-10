@@ -45,9 +45,6 @@ export function BoardSidebar({
     update()
     return api.onChange(update)
   }, [api, observe])
-  useEffect(() => {
-    if (!slideCount && active?.name === 'default' && active.tab === 'slides') api?.toggleSidebar({ name: null })
-  }, [api, active, slideCount])
   const selected = active?.name === 'default' ? active.tab : null
   const title = panels.find((panel) => panel.id === selected)?.label ?? 'Library'
   return (
@@ -74,23 +71,21 @@ export function BoardSidebar({
             className={`board-panel-rail excalidraw${theme === 'dark' ? ' theme--dark' : ''}`}
             aria-label="Board panels"
           >
-            {panels
-              .filter((panel) => panel.id !== 'slides' || slideCount > 0)
-              .map((panel) => (
-                <button
-                  key={panel.id}
-                  className={`sidebar-trigger board-panel-button${panel.id === 'slides' ? ' slides-toggle' : ''}`}
-                  aria-label={panel.label}
-                  title={panel.id === 'slides' ? `Slides · ${slideCount}` : panel.label}
-                  aria-pressed={selected === panel.id}
-                  onClick={() => {
-                    api?.toggleSidebar({ name: 'default', tab: panel.id })
-                    containerRef.current?.querySelector<HTMLElement>('.excalidraw-container')?.focus()
-                  }}
-                >
-                  <panel.icon size={19} />
-                </button>
-              ))}
+            {panels.map((panel) => (
+              <button
+                key={panel.id}
+                className={`sidebar-trigger board-panel-button${panel.id === 'slides' ? ' slides-toggle' : ''}`}
+                aria-label={panel.label}
+                title={panel.id === 'slides' ? `Slides · ${slideCount}` : panel.label}
+                aria-pressed={selected === panel.id}
+                onClick={() => {
+                  api?.toggleSidebar({ name: 'default', tab: panel.id })
+                  containerRef.current?.querySelector<HTMLElement>('.excalidraw-container')?.focus()
+                }}
+              >
+                <panel.icon size={19} />
+              </button>
+            ))}
             <button
               className="sidebar-trigger board-panel-button board-panel-help"
               aria-label="Help"

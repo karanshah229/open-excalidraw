@@ -117,7 +117,18 @@ try {
   await draw(350, 260, 500, 360)
   await page.waitForFunction(() => window.__excalidrawAPI.getSceneElements().length === 1)
   const rectangle = await page.evaluate(() => window.__excalidrawAPI.getSceneElements()[0])
-  await tool('slide')
+  await page.waitForSelector('.slides-toggle')
+  await page.click('.slides-toggle')
+  await page.waitForSelector('.slides-create')
+  assert.equal(await page.$('.slides-present'), null, 'Empty Slides has no presentation controls')
+  assert.equal(await page.$('.slides-share-presentation'), null, 'Empty Slides has no sharing controls')
+  await page.screenshot({ path: `${out}/slides-empty.png` })
+  await page.click('.slides-create')
+  await page.waitForFunction(() => {
+    const tool = window.__excalidrawAPI.getAppState().activeTool
+    return tool.type === 'frame'
+  })
+  await page.click('[data-testid="sidebar-close"]')
   await draw(300, 210, 560, 420)
   await page.waitForSelector('.slides-toggle')
   assert.equal(await page.$('.slides-panel'), null, 'Discovering slides does not automatically open the panel')
@@ -603,14 +614,11 @@ try {
     await page.click('[aria-label="Remove slide boundary, keep drawings"]')
     await page.waitForFunction((count) => document.querySelectorAll('.slide-card').length === count, {}, remaining - 1)
   }
-  await page.waitForFunction(
-    () => !document.querySelector('.slides-toggle') && !document.querySelector('.slides-panel'),
-  )
-  assert.equal(await page.$('.slides-toggle'), null, 'Last slide removal hides the Slides rail button')
-  assert.equal(await page.$('.slides-panel'), null, 'No empty panel remains after the last slide')
+  await page.waitForSelector('.slides-create')
+  assert(await page.$('.slides-toggle'), 'Last slide removal keeps Slides available')
+  assert.equal(await page.$('.slides-present'), null, 'Last slide removal restores the empty state')
   await undo()
-  await page.waitForSelector('.slides-toggle')
-  await page.click('.slides-toggle')
+  await page.waitForSelector('.slide-card')
   await page.waitForSelector('.slides-present')
   // Warm thumbnails below the viewport after opening, without having to scroll.
   await page.click('[data-testid="sidebar-close"]')

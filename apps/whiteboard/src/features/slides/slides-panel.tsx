@@ -187,62 +187,77 @@ export function SlidesPanel({
         theme={scene.theme}
         onSlidesVisibilityChange={setOpen}
         slidesHeader={
-          <>
-            <div className="slides-present-split">
-              <button
-                className="slides-present sidebar-trigger"
-                aria-label="Present slides"
-                title="Start fullscreen slideshow"
-                onClick={() => openStage()}
-              >
-                Slideshow
-              </button>
-              <DropdownMenu.Root open={presentationMenu} onOpenChange={setPresentationMenu}>
-                <DropdownMenu.Trigger asChild>
-                  <button className="slides-present-options sidebar-trigger" aria-label="Presentation options">
-                    <ChevronDown size={14} />
-                  </button>
-                </DropdownMenu.Trigger>
-                <DropdownMenu.Portal container={container}>
-                  <DropdownMenu.Content
-                    className="slides-presentation-menu"
-                    data-prevent-outside-click
-                    align="end"
-                    sideOffset={6}
-                    onCloseAutoFocus={(event) => {
-                      if (stageRef.current) event.preventDefault()
-                    }}
-                  >
-                    <DropdownMenu.Item onSelect={() => openStage()}>
-                      <Presentation size={17} /> Slideshow
-                    </DropdownMenu.Item>
-                    {canEdit && (
-                      <DropdownMenu.Item onSelect={() => openStage(true)}>
-                        <PanelRightClose size={17} /> Presenter view
+          slides.length ? (
+            <>
+              <div className="slides-present-split">
+                <button
+                  className="slides-present sidebar-trigger"
+                  aria-label="Present slides"
+                  title="Start fullscreen slideshow"
+                  onClick={() => openStage()}
+                >
+                  Slideshow
+                </button>
+                <DropdownMenu.Root open={presentationMenu} onOpenChange={setPresentationMenu}>
+                  <DropdownMenu.Trigger asChild>
+                    <button className="slides-present-options sidebar-trigger" aria-label="Presentation options">
+                      <ChevronDown size={14} />
+                    </button>
+                  </DropdownMenu.Trigger>
+                  <DropdownMenu.Portal container={container}>
+                    <DropdownMenu.Content
+                      className="slides-presentation-menu"
+                      data-prevent-outside-click
+                      align="end"
+                      sideOffset={6}
+                      onCloseAutoFocus={(event) => {
+                        if (stageRef.current) event.preventDefault()
+                      }}
+                    >
+                      <DropdownMenu.Item onSelect={() => openStage()}>
+                        <Presentation size={17} /> Slideshow
                       </DropdownMenu.Item>
-                    )}
-                  </DropdownMenu.Content>
-                </DropdownMenu.Portal>
-              </DropdownMenu.Root>
-            </div>
-            {canEdit && (
-              <button
-                className="sidebar-trigger slides-share-presentation"
-                aria-label="Share board"
-                title="Share board"
-                onClick={onSharePresentation}
-              >
-                <Share2 size={18} />
-              </button>
-            )}
-          </>
+                      {canEdit && (
+                        <DropdownMenu.Item onSelect={() => openStage(true)}>
+                          <PanelRightClose size={17} /> Presenter view
+                        </DropdownMenu.Item>
+                      )}
+                    </DropdownMenu.Content>
+                  </DropdownMenu.Portal>
+                </DropdownMenu.Root>
+              </div>
+              {canEdit && (
+                <button
+                  className="sidebar-trigger slides-share-presentation"
+                  aria-label="Share board"
+                  title="Share board"
+                  onClick={onSharePresentation}
+                >
+                  <Share2 size={18} />
+                </button>
+              )}
+            </>
+          ) : null
         }
       >
         <SlidesTab panelRef={panelRef} scrollPosition={scrollPosition}>
           {!slides.length ? (
-            <p className="slides-empty">
-              Choose <strong>Components → Slide</strong> in the toolbar, then draw around your content.
-            </p>
+            <div className="slides-empty">
+              <h2>Slides</h2>
+              <p>Turn any part of your board into a presentation.</p>
+              <button
+                className="slides-create"
+                disabled={!canEdit}
+                onClick={() => {
+                  onInteraction()
+                  const tool = { type: 'frame', frameVariant: 'slide' } as const
+                  api?.setActiveTool(tool)
+                  container.querySelector<HTMLElement>('.excalidraw-container')?.focus()
+                }}
+              >
+                Create slide
+              </button>
+            </div>
           ) : (
             <>
               <div

@@ -4469,10 +4469,34 @@ button {
   cursor: default;
 }
 .slides-empty {
-  font-size: 13px;
-  line-height: 1.7;
-  padding: 20px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 24px;
+  text-align: center;
+}
+.slides-empty h2 {
+  margin: 0;
+  font-size: 1.125rem;
+  color: var(--color-on-surface);
+}
+.slides-empty p {
+  margin: 0;
+  font-size: 0.875rem;
+  line-height: 1.5;
   color: var(--color-gray-60);
+}
+.slides-panel .slides-create {
+  padding: 10px 16px;
+  background: var(--color-primary);
+  color: var(--color-surface-lowest);
+  font-weight: 500;
+}
+.slides-panel .slides-create:hover {
+  background: var(--color-primary-darker);
 }
 .slide-navigation {
   display: flex;
