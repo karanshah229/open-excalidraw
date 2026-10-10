@@ -1,3 +1,4 @@
+import { pruneCheckpointedRecords } from './scene-compaction-cleanup.js'
 import { initializeApp } from 'firebase-admin/app'
 import { getDatabase } from 'firebase-admin/database'
 import { getFirestore } from 'firebase-admin/firestore'
@@ -5,6 +6,8 @@ import { onValueDeleted } from 'firebase-functions/v2/database'
 import { onDocumentWritten } from 'firebase-functions/v2/firestore'
 import { HttpsError, onCall } from 'firebase-functions/v2/https'
 import { defineString } from 'firebase-functions/params'
+import { checkpointScene, ensureScene, loadSceneRevision } from './board-scenes.js'
+export { ensureBoardScene, commitBoardScene } from './board-scenes.js'
 import { mirrorCurrentPolicy } from './project-access.js'
 export {
   manageProject,
@@ -88,9 +91,10 @@ export const compactAbandonedCollaborationRoom = onValueDeleted(
     if ((await presenceRef.get()).exists()) return
 
     const lockRef = rtdb.ref(`system/compactionLocks/${boardId}`)
+    const lockToken = `${event.id}-${Date.now()}`
     const lock = await lockRef.transaction((current) => {
       if (current && Date.now() - Number(current.startedAt ?? 0) < COMPACTION_LOCK_MS) return
-      return { startedAt: Date.now() }
+      return { startedAt: Date.now(), token: lockToken }
     })
     if (!lock.committed) return
 
@@ -101,37 +105,31 @@ export const compactAbandonedCollaborationRoom = onValueDeleted(
 
       const records = Object.values((deltaSnapshot.val() ?? {}) as Record<string, ElementDeltaRecord>)
 
-      const compacted = await firestore.runTransaction(async (transaction) => {
-        const boardRef = firestore.doc(`boardShares/${boardId}`)
-        const current = await transaction.get(boardRef)
-        if (!current.exists) return false
-        const currentData = current.data() ?? {}
-        if (currentData.deletedAt || currentData.pending) return false
-        if (currentData.projectId) {
-          const parent = await transaction.get(firestore.doc(`projectShares/${currentData.projectId}`))
-          if (parent.data()?.deletedAt || parent.data()?.pending) return false
+      const share = (await firestore.doc(`boardShares/${boardId}`).get()).data()
+      if (!share || share.deletedAt || share.pending) return
+      const actor = { uid: share.ownerId, trusted: true }
+      await ensureScene(boardId, actor, share.projectId)
+      let compacted = false
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const head = (await firestore.doc(`boardScenes/${boardId}`).get()).data()!
+        // Generation 1 accepts legacy rooms; future restore generations require explicit room identity.
+        const room = (await rtdb.ref(`boards/${boardId}/generation`).get()).val()
+        if ((room == null && head.generation !== 1) || (room != null && room !== head.generation)) return
+        const { scene } = await loadSceneRevision(boardId, head)
+        try {
+          await checkpointScene(boardId, { ...scene, elements: mergeDeltas(scene.elements, records) }, head, actor)
+          compacted = true
+          break
+        } catch (error) {
+          if ((error as { code?: string }).code !== 'aborted') throw error
         }
-        const revision = Number(currentData.snapshotRevision ?? 0) + 1
-        const scene = {
-          ...(currentData.scene ?? {}),
-          elements: mergeDeltas(currentData.scene?.elements ?? [], records),
-        }
-        const updatedAt = new Date().toISOString()
-        transaction.update(boardRef, { scene, snapshotRevision: revision, updatedAt })
-        transaction.set(firestore.doc(`boardShares/${boardId}/history/${String(revision).padStart(12, '0')}`), {
-          revision,
-          scene,
-          reason: 'abandoned-room-compaction',
-          createdAt: updatedAt,
-        })
-        return true
-      })
-
-      // A reconnect after the grace period must retain its live data. A newly
-      // connected client also seeds full elements, so skipping this prune is safe.
-      if (compacted && !(await presenceRef.get()).exists()) await elementsRef.remove()
+      }
+      // Delete only the records actually checkpointed. A replacement under the same ID survives.
+      if (compacted && !(await presenceRef.get()).exists()) {
+        await pruneCheckpointedRecords(elementsRef, presenceRef, deltaSnapshot.val())
+      }
     } finally {
-      await lockRef.remove()
+      await lockRef.transaction((current) => (current?.token === lockToken ? null : undefined))
     }
   },
 )

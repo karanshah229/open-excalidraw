@@ -26,7 +26,9 @@ export async function inspectDeletedProject(boardId: string) {
   const board = (await workspaceApi.loadBoard(boardId))!
   const projectRef = doc(getFirestoreDb()!, 'users', getFirebaseAuth()!.currentUser!.uid, 'projects', board.projectId)
   const project = await getDoc(projectRef)
-  const remote = project.data()?.deletedAt ? undefined : await getDoc(doc(projectRef, 'boards', boardId))
+  const remote = project.data()?.deletedAt
+    ? undefined
+    : await (await import('./image-cloud-fixture')).persistedScene(boardId)
   return {
     status: board.syncStatus,
     retry: board.nextSyncAt,
@@ -34,7 +36,7 @@ export async function inspectDeletedProject(boardId: string) {
     localImage: board.scene.files?.asset?.dataURL,
     pendingImage: board.scene.files?.pending?.dataURL,
     projectDeletedAt: project.data()?.deletedAt,
-    remoteX: remote?.data()?.scene?.elements[0]?.x,
-    remotePendingPath: remote?.data()?.scene?.files?.pending?.storagePath,
+    remoteX: remote?.elements[0]?.x,
+    remotePendingPath: remote?.files?.pending?.storagePath,
   }
 }

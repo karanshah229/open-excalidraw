@@ -7,17 +7,19 @@ import { UserProvider } from './lib/user-context'
 import { UserDropdown } from './components/user-dropdown'
 import { SignInScreen } from './components/sign-in-screen'
 import { AuthProvider, useAuth } from './lib/auth-context'
-import { WorkspaceLoading } from './components/workspace-loading'
+import { GlobalLoadingProvider, WorkspaceLoading } from './components/workspace-loading'
 import { workspaceApi } from './features/workspace/workspace-api'
 
 export function AppShell() {
   return (
     <ThemeProvider>
-      <AuthProvider>
-        <AppChromeProvider>
-          <AuthenticatedApp />
-        </AppChromeProvider>
-      </AuthProvider>
+      <GlobalLoadingProvider>
+        <AuthProvider>
+          <AppChromeProvider>
+            <AuthenticatedApp />
+          </AppChromeProvider>
+        </AuthProvider>
+      </GlobalLoadingProvider>
     </ThemeProvider>
   )
 }
@@ -49,7 +51,12 @@ function AuthenticatedApp() {
       .catch((error) => console.error('Workspace activation failed:', error))
   }, [user, isPresentation])
 
-  if (isLoading) return <WorkspaceLoading />
+  if (isLoading)
+    return (
+      <WorkspaceLoading
+        message={isBoard ? 'Loading board…' : isPresentation ? 'Loading presentation…' : 'Loading boards…'}
+      />
+    )
   if (
     (!user || user.isAnonymous) &&
     !localWorkspace &&

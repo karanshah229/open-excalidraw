@@ -18,7 +18,7 @@ Object.assign(process.env, {
 })
 const server = await createServer({
   root: fileURLToPath(new URL('../apps/whiteboard', import.meta.url)),
-  server: { host: '127.0.0.1', port: 15188, strictPort: true },
+  server: { host: '127.0.0.1', port: 15188, strictPort: true, hmr: false },
 })
 const dataURL =
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aOioAAAAASUVORK5CYII='
@@ -84,7 +84,19 @@ try {
   assert.equal(blocked.pendingImage, dataURL)
   assert.equal(calls.length - beforeBlockedSave, 0, 'Blocked saves must not call the image gateway')
   await page.reload({ waitUntil: 'domcontentloaded' })
-  await page.waitForFunction(() => document.body.innerText.includes('Project deleted'))
+  try {
+    await page.waitForFunction(() => document.body.innerText.includes('Project deleted'), { polling: 200 })
+  } catch (error) {
+    console.log(
+      'DELETED REOPEN DIAGNOSTIC',
+      JSON.stringify({
+        url: page.url(),
+        body: await page.evaluate(() => document.body.innerText),
+        local: await inspect(),
+      }),
+    )
+    throw error
+  }
   assert.equal((await inspect()).pendingImage, dataURL, 'Pending bytes must survive reload')
   await page.evaluate(async (boardId) => {
     const { tombstoneProject } = await import('/tests/deleted-project-sync-fixture.ts')

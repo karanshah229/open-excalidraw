@@ -2103,6 +2103,8 @@ button {
   min-height: 100vh;
 }
 
+
+
 .sign-in-shell {
   min-height: 100vh;
   display: grid;
@@ -4278,6 +4280,9 @@ button {
   background: var(--bg-page);
   color: var(--text-secondary);
   font-size: 14px;
+}
+.workspace-startup-loader[hidden] {
+  display: none;
 }
 .workspace-startup-loader p {
   margin: 0;

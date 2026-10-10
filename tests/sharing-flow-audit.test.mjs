@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import puppeteer from 'puppeteer-core'
-import { writeFile } from 'node:fs/promises'
+import { writeFile, mkdir } from 'node:fs/promises'
 if (process.env.GCLOUD_PROJECT !== 'demo-regression') throw new Error('Requires isolated regression emulators')
+await mkdir('.system_generated/slides', { recursive: true })
 const base = process.env.E2E_BASE_URL || 'http://127.0.0.1:15190'
 const browser = await puppeteer.launch({
   executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
@@ -184,6 +185,23 @@ try {
     auditCalls.filter((c) => c.phase === auditPhase).length,
     1,
     'Presentation permission change makes one callable request',
+  )
+  // Permission snapshots can drain earlier drawing work. Establish durable
+  // quiescence before attributing requests to the clipboard-only action.
+  await owner.evaluate(async () => {
+    const { workspaceApi } = await import('/src/features/workspace/workspace-api.ts')
+    await workspaceApi.flushCloud()
+  })
+  await owner.waitForFunction(
+    async (id) => {
+      const { workspaceApi } = await import('/src/features/workspace/workspace-api.ts')
+      const { sceneService } = await import('/src/features/scenes/scene-service.ts')
+      const local = await workspaceApi.loadBoard(id)
+      const cloud = await sceneService.load(id)
+      return !window.__pendingScene?.() && local?.syncStatus === 'synced' && local.cloudRevisionId === cloud?.revisionId
+    },
+    { polling: 200 },
+    id,
   )
   auditPhase = 'copy-existing-presentation'
   await owner.click('.google-share-copy-btn')

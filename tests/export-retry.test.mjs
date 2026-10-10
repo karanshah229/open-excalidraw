@@ -40,6 +40,9 @@ try {
       },
     }
     await sharingService.updateSharedScene(board.id, scene)
+    const { sceneService } = await import('/src/features/scenes/scene-service.ts')
+    const committed = await sceneService.load(board.id)
+    await workspaceStore.applyCloudBoardScene(board.id, committed.scene, committed.revisionId, committed.generation)
     await workspaceStore.saveBoard({ ...(await workspaceStore.loadBoard(board.id)), scene })
     const failed = await exportBoards({ projectId: project.id, formats: ['excalidraw'] })
     const local = await workspaceStore.loadBoard(board.id)
@@ -49,6 +52,7 @@ try {
     const retried = await exportBoards({ projectId: project.id, formats: ['excalidraw'], previous: failed })
     return { failed: failed.failures, files: retried.fileNames, failures: retried.failures }
   })
+  console.log('EXPORT RETRY DIAGNOSTIC', JSON.stringify(result))
   assert.equal(result.failed.length, 1, 'Missing cloud bytes must fail the initial export')
   assert.equal(result.files.length, 1, 'Retry must use the restored local bytes')
   assert.deepEqual(result.failures, [])

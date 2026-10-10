@@ -47,7 +47,11 @@
     "test": "node tests/run-all-tests.mjs",
     "test:slides": "pnpm dlx tsx tests/slides-model.test.ts && node tests/run-slides-tests.mjs",
     "test:slides:prod": "pnpm --filter @agentic-whiteboard/whiteboard exec vite build --mode e2e && node tests/slides-production.test.mjs",
-    "test:slides:notes": "pnpm --filter @agentic-whiteboard/functions build && firebase emulators:exec --only auth,firestore,storage,database,functions --project demo-image-persistence --config image-persistence.firebase.json 'node tests/slide-notes-access.test.mjs'"
+    "test:slides:notes": "pnpm --filter @agentic-whiteboard/functions build && firebase emulators:exec --only auth,firestore,storage,database,functions --project demo-image-persistence --config image-persistence.firebase.json 'node tests/slide-notes-access.test.mjs'",
+    "test:scenes": "node packages/mcp/node_modules/tsx/dist/cli.mjs tests/scene-codec.test.ts && node packages/mcp/node_modules/tsx/dist/cli.mjs tests/import-scene.test.ts",
+    "test:e2e:scenes": "node tests/run-regression-tests.mjs --test=chunked-scenes.test.mjs",
+    "test:e2e:scenes:five-chunks": "node tests/run-regression-tests.mjs --test=five-chunk-scene.test.mjs",
+    "test:scenes:backend": "pnpm --filter @agentic-whiteboard/functions build && firebase emulators:exec --only firestore,database --project demo-regression --config regression.firebase.json 'node tests/scene-backend.test.mjs && node tests/scene-rtdb-cleanup.test.mjs'"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

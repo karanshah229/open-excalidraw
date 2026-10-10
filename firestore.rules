@@ -40,7 +40,10 @@ service cloud.firestore {
         allow read: if signedIn() && request.auth.uid == userId && privateParentLive(userId, projectId);
         allow create: if signedIn() && request.auth.uid == userId && privateParentLive(userId, projectId);
         allow update: if signedIn() && request.auth.uid == userId && privateParentLive(userId, projectId)
-          && resource.data.active == true && request.resource.data.projectId == projectId;
+          && resource.data.active == true && request.resource.data.projectId == projectId
+          && (!exists(/databases/$(database)/documents/boardScenes/$(boardId))
+            || get(/databases/$(database)/documents/boardScenes/$(boardId)).data.headRevisionId == null
+            || !request.resource.data.diff(resource.data).affectedKeys().hasAny(['scene', 'sceneId']));
         allow delete: if false;
       }
     }
@@ -54,6 +57,9 @@ service cloud.firestore {
       allow list: if owner(resource.data) && readBoard(resource.data);
       allow create, delete: if false;
       allow update: if editBoard(resource.data)
+        && (!exists(/databases/$(database)/documents/boardScenes/$(boardId))
+          || get(/databases/$(database)/documents/boardScenes/$(boardId)).data.headRevisionId == null
+          || !request.resource.data.diff(resource.data).affectedKeys().hasAny(['scene', 'sceneId']))
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['scene', 'updatedAt', 'boardName']);
       match /activeSessions/{sessionId} {
         allow read: if readBoard(get(/databases/$(database)/documents/boardShares/$(boardId)).data);
@@ -62,6 +68,86 @@ service cloud.firestore {
       match /history/{revisionId} {
         allow read: if readBoard(get(/databases/$(database)/documents/boardShares/$(boardId)).data);
         allow write: if false;
+      }
+    }
+    function sceneBinding(boardId) { return get(/databases/$(database)/documents/boardScenes/$(boardId)).data; }
+    function sceneLive(boardId) {
+      let binding = sceneBinding(boardId);
+      return binding.get('projectId', null) == null ||
+        (privateParentLive(binding.ownerId, binding.projectId)
+          && get(/databases/$(database)/documents/users/$(binding.ownerId)/projects/$(binding.projectId)).data.ownerId == binding.ownerId
+          && (!exists(/databases/$(database)/documents/projectShares/$(binding.projectId))
+            || get(/databases/$(database)/documents/projectShares/$(binding.projectId)).data.ownerId == binding.ownerId)
+          && exists(/databases/$(database)/documents/users/$(binding.ownerId)/projects/$(binding.projectId)/boards/$(boardId))
+          && get(/databases/$(database)/documents/users/$(binding.ownerId)/projects/$(binding.projectId)/boards/$(boardId)).data.get('active', false));
+    }
+    function sceneAccess(boardId, editing) {
+      let binding = sceneBinding(boardId);
+      let sharePath = /databases/$(database)/documents/boardShares/$(boardId);
+      return sceneLive(boardId) && (exists(sharePath)
+        ? (get(sharePath).data.ownerId == binding.ownerId
+          && get(sharePath).data.get('projectId', null) == binding.get('projectId', null)
+          && (editing ? editBoard(get(sharePath).data) : readBoard(get(sharePath).data)))
+        : owner(binding));
+    }
+    function validUpload(boardId, commitId) {
+      let upload = get(/databases/$(database)/documents/boardScenes/$(boardId)/uploads/$(commitId)).data;
+      return signedIn() && sceneAccess(boardId, true) && sceneBinding(boardId).headRevisionId != null && upload.uploaderUid == request.auth.uid
+        && upload.generation == sceneBinding(boardId).generation && upload.expiresAt > request.time
+        && upload.get('status', '') != 'committed';
+    }
+    match /boardScenes/{boardId} {
+      allow get: if !exists(/databases/$(database)/documents/boardScenes/$(boardId)) || sceneAccess(boardId, false);
+      allow list, write: if false;
+      match /revisions/{revisionId} {
+        allow read: if sceneAccess(boardId, false);
+        allow write: if false;
+        match /pages/{pageId} {
+          allow read: if sceneAccess(boardId, false);
+          allow write: if false;
+        }
+      }
+      match /versions/{versionId} {
+        allow read: if sceneAccess(boardId, false);
+        allow write: if false;
+      }
+      match /uploads/{commitId} {
+        allow read: if sceneAccess(boardId, false);
+        allow create: if signedIn() && sceneAccess(boardId, true) && sceneBinding(boardId).headRevisionId != null
+          && request.resource.data.keys().hasOnly(['uploaderUid', 'expectedHeadRevisionId', 'generation', 'sceneFormatVersion', 'pageCount', 'chunkCount', 'newChunkCount', 'candidateDigest', 'createdAt', 'expiresAt'])
+          && request.resource.data.uploaderUid == request.auth.uid
+          && request.resource.data.generation == sceneBinding(boardId).generation
+          && request.resource.data.expectedHeadRevisionId == sceneBinding(boardId).headRevisionId
+          && request.resource.data.sceneFormatVersion == 1
+          && request.resource.data.pageCount is int && request.resource.data.pageCount > 0 && request.resource.data.pageCount <= 6
+          && request.resource.data.chunkCount is int && request.resource.data.chunkCount > 0 && request.resource.data.chunkCount <= 512
+          && request.resource.data.newChunkCount is int && request.resource.data.newChunkCount >= 0 && request.resource.data.newChunkCount <= request.resource.data.chunkCount
+          && request.resource.data.candidateDigest is string && request.resource.data.candidateDigest.size() == 64
+          && request.resource.data.createdAt is timestamp && request.resource.data.expiresAt is timestamp
+          && request.resource.data.createdAt <= request.time && request.resource.data.createdAt >= request.time - duration.value(5, 'm')
+          && request.resource.data.expiresAt > request.time && request.resource.data.expiresAt <= request.time + duration.value(24, 'h');
+        allow update, delete: if false;
+        match /pages/{pageId} {
+          allow read: if sceneAccess(boardId, false);
+          allow create: if validUpload(boardId, commitId)
+            && request.resource.data.keys().hasOnly(['references'])
+            && request.resource.data.references is list && request.resource.data.references.size() > 0 && request.resource.data.references.size() <= 100
+            && pageId.matches('^[0-9]{6}$') && int(pageId) < get(/databases/$(database)/documents/boardScenes/$(boardId)/uploads/$(commitId)).data.pageCount;
+          allow update, delete: if false;
+        }
+      }
+      match /chunks/{chunkId} {
+        allow read: if sceneAccess(boardId, false);
+        allow create: if validUpload(boardId, request.resource.data.uploadId)
+          && request.resource.data.keys().hasOnly(['payload', 'digest', 'uploadId', 'slot', 'uploaderUid', 'generation', 'kind'])
+          && request.resource.data.payload is string && request.resource.data.payload.size() <= 524288
+          && request.resource.data.digest is string && request.resource.data.digest.size() == 64
+          && request.resource.data.uploaderUid == request.auth.uid
+          && request.resource.data.generation == sceneBinding(boardId).generation
+          && request.resource.data.kind == 'records'
+          && request.resource.data.slot is int && request.resource.data.slot >= 0
+          && request.resource.data.slot < get(/databases/$(database)/documents/boardScenes/$(boardId)/uploads/$(request.resource.data.uploadId)).data.newChunkCount;
+        allow update, delete: if false;
       }
     }
   }

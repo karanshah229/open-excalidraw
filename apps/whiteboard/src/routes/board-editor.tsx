@@ -5,6 +5,7 @@ import {
 } from '../features/mcp-bridge/slide-data-operations'
 import { PresentationView } from './presentation'
 import { AccessDenied } from '../components/access-denied'
+import { BoardLoading } from '../components/board-loading'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { doc, getDoc, updateDoc } from 'firebase/firestore'
 import { createPortal } from 'react-dom'
@@ -18,10 +19,14 @@ import {
   MainMenu,
   exportToSvg,
   newElementWith,
+  loadFromBlob,
+  CaptureUpdateAction,
 } from '@excalidraw/excalidraw'
 import type { BinaryFiles, ExcalidrawImperativeAPI } from '@excalidraw/excalidraw/types'
 import type { BoardDocument, BoardScene, BoardSyncStatus } from '@agentic-whiteboard/storage'
-import { workspaceApi } from '../features/workspace/workspace-api'
+import { workspaceApi, workspaceStore } from '../features/workspace/workspace-api'
+import { SceneGenerationError } from '../features/scenes/scene-service'
+import { replaceSceneElements } from '../features/scenes/import-scene'
 import {
   generateArchitecturalTemplate,
   computeAutoLayout,
@@ -80,6 +85,8 @@ type EditorStatus =
   | 'Conflict'
   | 'Local save failed'
   | 'Project deleted'
+
+class BoardContextChangedError extends Error {}
 const statusLabel = (status: BoardSyncStatus): EditorStatus => {
   if (status === 'local-only') return 'Synced locally'
   if (status === 'synced') return 'Synced'
@@ -199,6 +206,9 @@ export function BoardEditor() {
   const { resolvedTheme } = useTheme()
   const { user: authUser, isLoading: isAuthLoading, signInWithGoogle, signOutUser } = useAuth()
   const apiRef = useRef<ExcalidrawImperativeAPI | null>(null)
+  const importInputRef = useRef<HTMLInputElement | null>(null)
+  const importRequestRef = useRef(0)
+  const [importError, setImportError] = useState<string | null>(null)
   const editorShellRef = useRef<HTMLElement | null>(null)
   const sceneSession = useMemo(createSceneSession, [boardId])
   const [isSlideStageOpen, setIsSlideStageOpen] = useState(false)
@@ -219,6 +229,9 @@ export function BoardEditor() {
   const savedSignature = useRef<string>()
   const committedSignatureRef = useRef<string>()
   const pendingSceneRef = useRef<BoardScene | null>(null)
+  const sceneGenerationRef = useRef<number>()
+  const boardEpochRef = useRef(0)
+  const generationConflictRef = useRef(false)
   const awaitingInitialSceneRef = useRef(true)
   const hasAutoZoomedRef = useRef(false)
   const userHasInteractedRef = useRef(false)
@@ -476,7 +489,9 @@ export function BoardEditor() {
       if (saved) {
         documentRef.current = saved
         setBoardMeta((prev) => (prev ? { ...prev, updatedAt: saved.updatedAt } : prev))
-        void sharingService.syncBoardSceneToShare(boardId, saved.scene, trimmed).catch(console.error)
+        void sharingService
+          .syncBoardSceneToShare(boardId, saved.scene, trimmed, sceneGenerationRef.current)
+          .catch(console.error)
       } else {
         const db = getFirestoreDb()
         if (!db) throw new Error('Cloud board is unavailable.')
@@ -529,7 +544,10 @@ export function BoardEditor() {
   } | null>(null)
 
   useEffect(() => {
+    boardEpochRef.current++
     hasAutoZoomedRef.current = false
+    sceneGenerationRef.current = undefined
+    generationConflictRef.current = false
     setInitialData(null)
     setRecoveredSharedScene(null)
     documentRef.current = null
@@ -544,11 +562,14 @@ export function BoardEditor() {
     const localDetails = workspaceApi.loadBoardWithProject(boardId)
     Promise.all([
       localDetails,
-      localDetails.then((details) =>
-        resolveBoardSharing(details?.project.ownerId, authUser?.uid, () =>
+      localDetails.then((details) => {
+        // A deleted project's scene reads are intentionally denied. Its retained
+        // owner draft must still mount in the explicit read-only recovery view.
+        if (details?.document.syncStatus === 'sync-blocked') return { status: 'not-found' as const }
+        return resolveBoardSharing(details?.project.ownerId, authUser?.uid, () =>
           sharingService.getSharedBoard(boardId, authUser?.email, authUser?.uid),
-        ),
-      ),
+        )
+      }),
       loadLibraryItems(),
     ])
       .then(async ([details, shared, libraryItems]) => {
@@ -582,7 +603,14 @@ export function BoardEditor() {
 
           // If local edits also exist, reconcile elements via LWW
           let finalScene = cloudScene
-          if (details?.document?.scene?.elements?.length) {
+          const ownedGenerationConflict = Boolean(
+            details?.document &&
+            (details.document.syncStatus === 'conflict' ||
+              (config.sceneGeneration !== undefined &&
+                (details.document.cloudGeneration ?? 1) !== config.sceneGeneration &&
+                details.document.syncStatus !== 'synced')),
+          )
+          if (!ownedGenerationConflict && details?.document?.scene?.elements?.length) {
             const mergedElements = reconcileElementsLWW(details.document.scene.elements, cloudScene.elements ?? [])
             finalScene = {
               ...cloudScene,
@@ -595,7 +623,11 @@ export function BoardEditor() {
           const uid = getFirebaseAuth()?.currentUser?.uid
           const draft = !details?.document && uid ? await readSharedSceneDraft(boardId, uid) : undefined
           if (!active) return
-          if (draft) {
+          const draftConflict = Boolean(
+            draft && config.sceneGeneration !== undefined && (draft.generation ?? 1) !== config.sceneGeneration,
+          )
+          generationConflictRef.current = draftConflict || ownedGenerationConflict
+          if (draft && !draftConflict) {
             finalScene = {
               ...finalScene,
               elements: reconcileElementsLWW(finalScene.elements, draft.scene.elements),
@@ -617,8 +649,8 @@ export function BoardEditor() {
             : isOwner || isGeneralEditor || isCollabEditor
 
           ownedSyncBlockedRef.current = details?.document?.syncStatus === 'sync-blocked'
-          setIsReadOnly(ownedSyncBlockedRef.current || !canEdit)
-          if (draft) setRecoveredSharedScene(finalScene)
+          setIsReadOnly(ownedSyncBlockedRef.current || !canEdit || generationConflictRef.current)
+          if (draft && !draftConflict) setRecoveredSharedScene(finalScene)
           awaitingInitialSceneRef.current = true
           savedSignature.current = getSceneSignature(finalScene)
           committedSignatureRef.current = savedSignature.current
@@ -628,15 +660,24 @@ export function BoardEditor() {
 
           // Update local IndexedDB with authoritative cloud/merged state
           documentRef.current = details?.document ?? null
-          if (details?.document && !ownedSyncBlockedRef.current) {
+          sceneGenerationRef.current = config.sceneGeneration
+          if (
+            details?.document &&
+            !ownedSyncBlockedRef.current &&
+            !ownedGenerationConflict &&
+            config.sceneRevisionId &&
+            config.sceneGeneration !== undefined
+          ) {
             saveChainRef.current = saveChainRef.current
               .then(async () => {
-                const latest = await workspaceApi.loadBoard(details.document.id)
-                const docToSave = latest
-                  ? { ...latest, name: details.document.name, scene: finalScene }
-                  : { ...details.document, scene: finalScene }
-                const saved = await workspaceApi.saveBoard(docToSave)
-                documentRef.current = saved
+                await workspaceStore.applyCloudBoardScene(
+                  details.document.id,
+                  finalScene,
+                  config.sceneRevisionId!,
+                  config.sceneGeneration!,
+                  { expectedCloudRevisionId: details.document.cloudRevisionId },
+                )
+                if (active) documentRef.current = await workspaceApi.loadBoard(details.document.id)
               })
               .catch((err) => {
                 console.error('Failed to update local board on mount:', err)
@@ -665,7 +706,15 @@ export function BoardEditor() {
             libraryItems: Promise.resolve(libraryItems),
           })
           triggerAutoCenter()
-          setState(ownedSyncBlockedRef.current ? 'Project deleted' : draft ? 'Saving' : 'Synced')
+          setState(
+            ownedSyncBlockedRef.current
+              ? 'Project deleted'
+              : generationConflictRef.current
+                ? 'Conflict'
+                : draft
+                  ? 'Saving'
+                  : 'Synced',
+          )
           return
         }
 
@@ -694,13 +743,16 @@ export function BoardEditor() {
               authUser?.uid ?? 'local-user',
             )
           documentRef.current = document
+          sceneGenerationRef.current = document.cloudGeneration
           filesRef.current = (document.scene.files ?? {}) as BinaryFiles
           elementsRef.current = document.scene.elements
           appStateRef.current = document.scene.appState
           savedSignature.current = getSceneSignature(document.scene)
           committedSignatureRef.current = savedSignature.current
           awaitingInitialSceneRef.current = true
-          setIsReadOnly(document.syncStatus === 'sync-blocked')
+          generationConflictRef.current = document.syncStatus === 'conflict'
+          ownedSyncBlockedRef.current = document.syncStatus === 'sync-blocked'
+          setIsReadOnly(document.syncStatus === 'sync-blocked' || generationConflictRef.current)
           setBoardMeta({
             boardName: document.name,
             projectId: project.id,
@@ -722,8 +774,16 @@ export function BoardEditor() {
           })
           triggerAutoCenter()
           setState(shared.status === 'unavailable' ? 'Synced locally' : statusLabel(document.syncStatus))
-          if (shared.status !== 'unavailable' && authUser && !authUser.isAnonymous)
-            void sharingService.syncBoardSceneToShare(boardId, document.scene, document.name).catch(console.error)
+          if (
+            shared.status !== 'unavailable' &&
+            authUser &&
+            !authUser.isAnonymous &&
+            !generationConflictRef.current &&
+            !ownedSyncBlockedRef.current
+          )
+            void sharingService
+              .syncBoardSceneToShare(boardId, document.scene, document.name, document.cloudGeneration)
+              .catch(console.error)
           return
         }
 
@@ -752,6 +812,17 @@ export function BoardEditor() {
     const unsubscribe = sharingService.subscribeToSharedBoard(
       boardId,
       (updatedConfig) => {
+        const generationChanged =
+          sceneGenerationRef.current !== undefined &&
+          updatedConfig.sceneGeneration !== undefined &&
+          updatedConfig.sceneGeneration !== sceneGenerationRef.current
+        if (generationChanged && (pendingSceneRef.current || isLazyCollabActiveRef.current)) {
+          generationConflictRef.current = true
+          setState('Conflict')
+          setIsReadOnly(true)
+          return
+        }
+        if (updatedConfig.sceneGeneration !== undefined) sceneGenerationRef.current = updatedConfig.sceneGeneration
         setPresentationConfig(updatedConfig.effectiveRole === 'presentation' ? updatedConfig : undefined)
         const recoveringAccess = accessDeniedRef.current
         const userEmail = authUser?.email?.trim().toLowerCase()
@@ -774,7 +845,7 @@ export function BoardEditor() {
         const canEdit = updatedConfig.effectiveRole
           ? updatedConfig.effectiveRole === 'owner' || updatedConfig.effectiveRole === 'editor'
           : isOwner || isGeneralEditor || isCollabEditor
-        setIsReadOnly(ownedSyncBlockedRef.current || !canEdit)
+        setIsReadOnly(ownedSyncBlockedRef.current || !canEdit || generationConflictRef.current)
 
         setBoardMeta((prev) =>
           prev
@@ -796,7 +867,9 @@ export function BoardEditor() {
         if (updatedConfig.scene && !pendingSceneRef.current && !isLazyCollabActiveRef.current) {
           // Firestore is a durable snapshot, not an authority allowed to roll
           // back newer local elements. Reconcile per element before rendering.
-          const reconciledElements = reconcileElementsLWW(elementsRef.current, updatedConfig.scene.elements ?? [])
+          const reconciledElements = generationChanged
+            ? (updatedConfig.scene.elements ?? [])
+            : reconcileElementsLWW(elementsRef.current, updatedConfig.scene.elements ?? [])
           const reconciledScene = {
             ...updatedConfig.scene,
             elements: reconciledElements,
@@ -841,13 +914,77 @@ export function BoardEditor() {
   }, [boardId, isSharedBoard, authUser?.email, authUser?.uid])
 
   useEffect(() => {
+    // Owned shared boards also need durable local hydration for offline reopen.
+    if (
+      !initialData ||
+      (isSharedBoard && !documentRef.current) ||
+      !authUser ||
+      authUser.isAnonymous ||
+      accessDenied ||
+      state === 'Project deleted' ||
+      boardNotFound
+    )
+      return
+    return workspaceApi.subscribeToCloudScene(
+      boardId,
+      (document) => {
+        documentRef.current = document
+        if (document.syncStatus === 'conflict') {
+          generationConflictRef.current = true
+          setState('Conflict')
+          setIsReadOnly(true)
+          return
+        }
+        const generationChanged =
+          sceneGenerationRef.current !== undefined &&
+          document.cloudGeneration !== undefined &&
+          sceneGenerationRef.current !== document.cloudGeneration
+        if (generationChanged && (pendingSceneRef.current || isLazyCollabActiveRef.current)) {
+          generationConflictRef.current = true
+          setState('Conflict')
+          setIsReadOnly(true)
+          return
+        }
+        sceneGenerationRef.current = document.cloudGeneration
+        if (isLazyCollabActiveRef.current) return
+        const elements = generationChanged
+          ? document.scene.elements
+          : reconcileElementsLWW(elementsRef.current, document.scene.elements)
+        elementsRef.current = elements
+        filesRef.current = { ...filesRef.current, ...document.scene.files } as BinaryFiles
+        apiRef.current?.addFiles(Object.values(filesRef.current))
+        apiRef.current?.updateScene({ elements: elements as any })
+        if (!pendingSceneRef.current && document.syncStatus === 'synced') {
+          savedSignature.current = getSceneSignature({ ...document.scene, elements, files: filesRef.current })
+          committedSignatureRef.current = savedSignature.current
+          setState('Synced')
+        }
+      },
+      (error) => {
+        if (ownedSyncBlockedRef.current) return
+        if ((error as { code?: string })?.code === 'permission-denied') setAccessDenied(true)
+        else console.error('Failed to refresh board scene:', error)
+      },
+    )
+  }, [
+    boardId,
+    Boolean(initialData),
+    isSharedBoard,
+    authUser?.uid,
+    accessDenied,
+    boardNotFound,
+    state === 'Project deleted',
+  ])
+
+  useEffect(() => {
     return workspaceApi.subscribeToBoardSyncStatus(boardId, (status) => {
       // Registered owned boards also have shared scenes. Their private project
       // lifecycle still blocks edits and retains pending bytes until restoration.
       if (isSharedBoard && status !== 'sync-blocked' && !ownedSyncBlockedRef.current) return
       ownedSyncBlockedRef.current = status === 'sync-blocked'
+      if (status === 'conflict') generationConflictRef.current = true
       setState(statusLabel(status))
-      setIsReadOnly(ownedSyncBlockedRef.current)
+      setIsReadOnly(ownedSyncBlockedRef.current || generationConflictRef.current)
     })
   }, [boardId, isSharedBoard])
 
@@ -928,16 +1065,20 @@ export function BoardEditor() {
             if (sharedCurrentBoard && !isSharedBoardRef.current) {
               // A board opened before its share registration completed still uses
               // private saves. Publish its current scene once, then use live shared saves.
-              await sharingService.updateSharedScene(boardId, {
-                elements: elementsRef.current,
-                files: apiRef.current?.getFiles() ?? {},
-                appState: {
-                  theme: resolvedTheme,
-                  viewBackgroundColor: appStateRef.current.viewBackgroundColor,
-                  gridModeEnabled: appStateRef.current.gridModeEnabled,
-                  objectsSnapModeEnabled: appStateRef.current.objectsSnapModeEnabled,
+              await sharingService.updateSharedScene(
+                boardId,
+                {
+                  elements: elementsRef.current,
+                  files: apiRef.current?.getFiles() ?? {},
+                  appState: {
+                    theme: resolvedTheme,
+                    viewBackgroundColor: appStateRef.current.viewBackgroundColor,
+                    gridModeEnabled: appStateRef.current.gridModeEnabled,
+                    objectsSnapModeEnabled: appStateRef.current.objectsSnapModeEnabled,
+                  },
                 },
-              })
+                sceneGenerationRef.current,
+              )
             }
             sendOperationResult(operation.id, true, data)
             if (sharedCurrentBoard) {
@@ -1358,45 +1499,70 @@ export function BoardEditor() {
     resolvedTheme,
   ])
 
-  /**
-   * Saves use optimistic revisions, so concurrent writes with the same stale
-   * revision are treated as conflicts by the store. Queue them and read the
-   * document ref inside the queued task, after the preceding save has updated it.
-   */
+  /** Queue persistence for the captured board; late completions cannot mutate another editor. */
   const enqueueSceneSave = useCallback(
     (scene: BoardScene) => {
-      const task = saveChainRef.current.then(async () => {
-        const document = documentRef.current
-        if (document) {
-          // If the document in local storage has been updated (e.g. by background sync or initial mount),
-          // refresh its revision so we don't hit a false revision conflict.
-          const latest = await workspaceApi.loadBoard(document.id)
-          const docToSave = latest ? { ...latest, name: document.name, scene } : { ...document, scene }
-          const saved = await workspaceApi.saveBoard(docToSave)
-          documentRef.current = saved
-          committedSignatureRef.current = getSceneSignature(scene)
-          setBoardMeta((prev) => (prev ? { ...prev, updatedAt: saved.updatedAt } : prev))
-          // The loaded board already established whether a share exists.
-          // Avoid an extra Firestore existence read on every drag/save.
-          if (isSharedBoard) await sharingService.updateSharedScene(boardId, scene)
-          queryClient.invalidateQueries({ queryKey: ['workspace'] })
-          setState(isSharedBoard ? 'Synced' : statusLabel(saved.syncStatus))
-          return
-        }
+      const expectedGeneration = sceneGenerationRef.current
+      const queuedDocument = documentRef.current
+      const epoch = boardEpochRef.current
+      const queuedUid = getFirebaseAuth()?.currentUser?.uid
+      const interacted = userHasInteractedRef.current
+      const checkIdentity = () => {
+        if (getFirebaseAuth()?.currentUser?.uid !== queuedUid) throw new BoardContextChangedError()
+      }
+      const task = saveChainRef.current
+        .then(async () => {
+          checkIdentity()
+          const document = queuedDocument
+          if (document) {
+            if (document.id !== boardId) throw new BoardContextChangedError()
+            const latest = await workspaceApi.loadBoard(boardId)
+            checkIdentity()
+            if (latest?.cloudGeneration !== undefined && (expectedGeneration ?? 1) !== latest.cloudGeneration)
+              throw new SceneGenerationError()
+            const docToSave = {
+              ...(latest ?? document),
+              scene,
+              revision: document.revision,
+              cloudGeneration: expectedGeneration ?? document.cloudGeneration,
+            }
+            const saved = await workspaceApi.saveBoard(docToSave)
+            checkIdentity()
+            if (epoch === boardEpochRef.current) {
+              documentRef.current = saved
+              committedSignatureRef.current = getSceneSignature(saved.scene)
+              setBoardMeta((prev) => (prev ? { ...prev, updatedAt: saved.updatedAt } : prev))
+            }
+            // The loaded board already established whether a share exists.
+            // Avoid an extra Firestore existence read on every drag/save.
+            if (isSharedBoard) await sharingService.updateSharedScene(boardId, scene, expectedGeneration)
+            queryClient.invalidateQueries({ queryKey: ['workspace'] })
+            if (epoch === boardEpochRef.current) setState(isSharedBoard ? 'Synced' : statusLabel(saved.syncStatus))
+            return
+          }
 
-        if (!userHasInteractedRef.current && scene.elements.length === 0) {
-          return
-        }
+          if (!interacted && scene.elements.length === 0) {
+            return
+          }
 
-        const uid = getFirebaseAuth()?.currentUser?.uid
-        if (!uid) throw new Error('Shared edits require an authenticated guest session.')
-        await draftChainRef.current
-        const draft = await saveSharedSceneDraft(boardId, uid, scene)
-        await sharingService.updateSharedScene(boardId, draft.scene)
-        await acknowledgeSharedSceneDraft(draft)
-        committedSignatureRef.current = getSceneSignature(draft.scene)
-        setState('Synced')
-      })
+          const uid = getFirebaseAuth()?.currentUser?.uid
+          if (!uid) throw new Error('Shared edits require an authenticated guest session.')
+          await draftChainRef.current
+          checkIdentity()
+          const draft = await saveSharedSceneDraft(boardId, uid, scene, expectedGeneration)
+          checkIdentity()
+          await sharingService.updateSharedScene(boardId, draft.scene, draft.generation)
+          await acknowledgeSharedSceneDraft(draft)
+          if (epoch === boardEpochRef.current) {
+            committedSignatureRef.current = getSceneSignature(draft.scene)
+            setState('Synced')
+          }
+        })
+        .catch((error) => {
+          if (epoch !== boardEpochRef.current || getFirebaseAuth()?.currentUser?.uid !== queuedUid)
+            throw new BoardContextChangedError()
+          throw error
+        })
 
       // Keep the queue live after an error while preserving that error for the caller.
       saveChainRef.current = task.catch(() => {})
@@ -1406,8 +1572,18 @@ export function BoardEditor() {
   )
 
   const handleSaveFailure = useCallback((scene: BoardScene, error: unknown) => {
+    if (error instanceof BoardContextChangedError) return
     pendingSceneRef.current ??= scene
     console.error('Failed to save scene:', error)
+    if (
+      error instanceof SceneGenerationError ||
+      (error instanceof Error && error.message === 'BOARD_GENERATION_CONFLICT')
+    ) {
+      generationConflictRef.current = true
+      setState('Conflict')
+      setIsReadOnly(true)
+      return
+    }
     setState(documentRef.current ? 'Local save failed' : 'Sync failed')
   }, [])
 
@@ -1527,10 +1703,11 @@ export function BoardEditor() {
       pendingSceneRef.current = scene
       // Journal bytes immediately; the network save remains debounced.
       const uid = getFirebaseAuth()?.currentUser?.uid
+      const generation = sceneGenerationRef.current
       if (!documentRef.current && uid) {
         draftChainRef.current = draftChainRef.current
           .catch(() => {})
-          .then(() => saveSharedSceneDraft(boardId, uid, scene))
+          .then(() => saveSharedSceneDraft(boardId, uid, scene, generation))
         void draftChainRef.current.catch((error) => handleSaveFailure(scene, error))
       }
       if (saveTimer.current) window.clearTimeout(saveTimer.current)
@@ -1646,6 +1823,74 @@ export function BoardEditor() {
       sceneSession,
     ],
   )
+
+  const canImportRef = useRef(false)
+  canImportRef.current = Boolean(
+    initialData &&
+    !isReadOnly &&
+    !isSpectator &&
+    !isTransitioningCollab &&
+    !accessDenied &&
+    !presentationConfig &&
+    !boardNotFound,
+  )
+  const importSceneFile = useCallback(
+    async (file: File) => {
+      const api = apiRef.current
+      if (!api || !canImportRef.current) return
+      const epoch = boardEpochRef.current
+      const request = ++importRequestRef.current
+      const uid = getFirebaseAuth()?.currentUser?.uid
+      const generation = sceneGenerationRef.current
+      setImportError(null)
+      try {
+        // Passing no local elements keeps the file's bindings and dependencies intact.
+        // Replacement versions are derived from the latest canvas after parsing.
+        const imported = await loadFromBlob(file, api.getAppState(), null)
+        if (
+          epoch !== boardEpochRef.current ||
+          request !== importRequestRef.current ||
+          uid !== getFirebaseAuth()?.currentUser?.uid ||
+          generation !== sceneGenerationRef.current ||
+          !canImportRef.current ||
+          api !== apiRef.current
+        )
+          return
+        const elements = replaceSceneElements(api.getSceneElementsIncludingDeleted(), imported.elements ?? [])
+        const files = { ...api.getFiles(), ...imported.files }
+        userHasInteractedRef.current = true
+        awaitingInitialSceneRef.current = false
+        appStateRef.current = { ...appStateRef.current, ...imported.appState }
+        api.addFiles(Object.values(files))
+        api.updateScene({
+          elements,
+          appState: { ...imported.appState, theme: resolvedTheme },
+          captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+        })
+        onChange(elements, api.getAppState(), files)
+        api.scrollToContent(
+          elements.filter((element) => !element.isDeleted),
+          { fitToContent: true },
+        )
+      } catch (error) {
+        if (epoch === boardEpochRef.current && request === importRequestRef.current)
+          setImportError(error instanceof Error ? error.message : 'Could not open this board file.')
+      }
+    },
+    [onChange, resolvedTheme],
+  )
+
+  useEffect(() => {
+    const openFile = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'o' && canImportRef.current) {
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        importInputRef.current?.click()
+      }
+    }
+    window.addEventListener('keydown', openFile, { capture: true })
+    return () => window.removeEventListener('keydown', openFile, { capture: true })
+  }, [])
 
   const hasUnsavedChanges =
     !isReadOnly &&
@@ -1799,7 +2044,7 @@ export function BoardEditor() {
       </div>,
     )
   }
-  if (!initialData) return withShareDialog(<div className="workspace-loading">Loading board…</div>)
+  if (!initialData) return withShareDialog(<BoardLoading />)
 
   return withShareDialog(
     <main ref={editorShellRef} className="editor-shell">
@@ -2041,7 +2286,29 @@ export function BoardEditor() {
           <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
         </div>
       ) : (
-        <div className="board-canvas">
+        <div
+          className="board-canvas"
+          onDropCapture={(event) => {
+            const file = Array.from(event.dataTransfer.files).find((item) => /\.(excalidraw|json)$/i.test(item.name))
+            if (!file) return
+            event.preventDefault()
+            event.stopPropagation()
+            void importSceneFile(file)
+          }}
+        >
+          <input
+            ref={importInputRef}
+            type="file"
+            accept=".excalidraw,.json,.png,.svg"
+            aria-label="Import board file"
+            hidden
+            onChange={(event) => {
+              const file = event.currentTarget.files?.[0]
+              event.currentTarget.value = ''
+              if (file) void importSceneFile(file)
+            }}
+          />
+          {importError && <div role="alert">{importError}</div>}
           <Excalidraw
             key={boardId}
             theme={resolvedTheme}
@@ -2092,7 +2359,7 @@ export function BoardEditor() {
                 changeViewBackgroundColor: !isReadOnly && !isSpectator && !isTransitioningCollab,
                 clearCanvas: !isReadOnly && !isSpectator,
                 export: { saveFileToDisk: true },
-                loadScene: !isReadOnly && !isSpectator,
+                loadScene: false,
                 saveToActiveFile: !isReadOnly && !isSpectator,
                 saveAsImage: true,
                 toggleTheme: false,
@@ -2128,7 +2395,9 @@ export function BoardEditor() {
             }}
           >
             <MainMenu>
-              {!isReadOnly && !isSpectator && <MainMenu.DefaultItems.LoadScene />}
+              {!isReadOnly && !isSpectator && (
+                <MainMenu.Item onSelect={() => importInputRef.current?.click()}>Open file</MainMenu.Item>
+              )}
               {!isReadOnly && !isSpectator && <MainMenu.DefaultItems.SaveToActiveFile />}
               <MainMenu.DefaultItems.Export />
               <MainMenu.DefaultItems.SaveAsImage />

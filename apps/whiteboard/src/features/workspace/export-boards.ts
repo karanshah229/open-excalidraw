@@ -5,6 +5,7 @@ import { getFirebaseAuth, getFirebaseRtdb, getFirestoreDb } from '../../lib/fire
 import { workspaceApi, workspaceStore, workspaceValue, type WorkspaceBoard } from './workspace-api'
 import { projectCall, projectService, type VisibleProject } from '../sharing/project-service'
 import { sharingService } from '../sharing/sharing-service'
+import { sceneService } from '../scenes/scene-service'
 import { restoreSceneAssets } from '../assets/scene-assets'
 import { mergeDeltaRecordsOntoBase, reconcileElementsLWW } from '../collaboration/reconcile'
 
@@ -118,13 +119,14 @@ async function capture(board: ExportBoard): Promise<Capture> {
   const uid = getFirebaseAuth()?.currentUser?.uid
   const owned = board.project.ownerId === (uid ?? 'local-user')
   const local = owned ? await workspaceStore.loadBoard(board.id) : null
-  const localEdits = Boolean(local && local.syncStatus !== 'synced')
-  let scene = local?.scene ?? board.scene
+  const localEdits = Boolean(local && !local.cloudScenePending && local.syncStatus !== 'synced')
+  let scene = local?.cloudScenePending ? undefined : (local?.scene ?? board.scene)
   let remoteRevision: number | undefined
+  let remoteSceneRevision: string | undefined
   let cloudScene: BoardScene | undefined
   const db = getFirestoreDb()
   if (db && navigator.onLine) {
-    // The private document supplies revision evidence; the share scene supplies live collaborative edits.
+    // Private/share records authorize and locate the same canonical scene; RTDB overlays live collaborative edits.
     const remote =
       uid && owned && (board.cloudStored || local?.syncStatus !== 'local-only')
         ? await getDoc(doc(db, 'users', uid, 'projects', board.projectId, 'boards', board.id))
@@ -132,7 +134,10 @@ async function capture(board: ExportBoard): Promise<Capture> {
     if (remote && (!remote.exists() || remote.data()?.active === false)) throw new Error('Board was deleted.')
     if (remote?.exists()) {
       const data = workspaceValue(remote.data()) as WorkspaceBoard
-      cloudScene = data.scene
+      const canonical = await sceneService.load(board.id)
+      cloudScene =
+        canonical?.scene ?? ((data as WorkspaceBoard & { sceneId?: string }).sceneId ? undefined : data.scene)
+      remoteSceneRevision = canonical?.revisionId
       remoteRevision = data.revision
     }
     const shared = await sharingService.getSharedBoard(
@@ -180,7 +185,10 @@ async function capture(board: ExportBoard): Promise<Capture> {
   const conflict =
     localEdits &&
     local &&
-    (local.syncStatus === 'conflict' || (remoteRevision !== undefined && local.baseRevision !== remoteRevision))
+    (local.syncStatus === 'conflict' ||
+      (remoteSceneRevision
+        ? Boolean(local.cloudRevisionId && local.cloudRevisionId !== remoteSceneRevision)
+        : remoteRevision !== undefined && local.baseRevision !== remoteRevision))
   if (conflict) {
     if (!cloudScene) throw new Error('Connect to the internet to preserve both local and cloud conflict versions.')
     return {

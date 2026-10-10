@@ -2,7 +2,7 @@ import { initializeApp, deleteApp } from 'firebase/app'
 import { getFunctions, httpsCallable, connectFunctionsEmulator } from 'firebase/functions'
 import { convertToExcalidrawElements } from '@excalidraw/excalidraw'
 import { createUserWithEmailAndPassword, signOut, signInAnonymously } from 'firebase/auth'
-import { doc, getDoc, setDoc } from 'firebase/firestore'
+import { doc, getDoc } from 'firebase/firestore'
 import { getBytes, getDownloadURL, ref } from 'firebase/storage'
 import {
   getFirebaseAuth,
@@ -15,8 +15,46 @@ import { storeSceneAssets, restoreSceneAssets, requestBoardAsset } from '../src/
 import { patchEmulatorDocument } from './emulator-document-fixture'
 import { projectService } from '../src/features/sharing/project-service'
 import { sharingService } from '../src/features/sharing/sharing-service'
-import { workspaceApi, workspaceValue } from '../src/features/workspace/workspace-api'
+import { workspaceApi } from '../src/features/workspace/workspace-api'
 import type { BoardScene } from '@agentic-whiteboard/storage'
+
+/** Independent durable reader: image regressions must inspect stored descriptors, not hydrated bytes. */
+export async function persistedScene(boardId: string, legacy?: any): Promise<BoardScene> {
+  const db = getFirestoreDb()!
+  const head = (await getDoc(doc(db, 'boardScenes', boardId))).data()
+  if (!head?.headRevisionId) {
+    if (legacy) return legacy
+    throw new Error('Missing committed scene head')
+  }
+  const revision = (await getDoc(doc(db, 'boardScenes', boardId, 'revisions', head.headRevisionId))).data()!
+  const records: any[] = []
+  for (let page = 0; page < revision.pageCount; page++) {
+    const refs = (
+      await getDoc(
+        doc(db, 'boardScenes', boardId, 'revisions', head.headRevisionId, 'pages', String(page).padStart(6, '0')),
+      )
+    ).data()!.references
+    for (const reference of refs) {
+      const chunk = (await getDoc(doc(db, 'boardScenes', boardId, 'chunks', reference.chunkId))).data()!
+      const digest = Array.from(
+        new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(chunk.payload))),
+        (byte) => byte.toString(16).padStart(2, '0'),
+      ).join('')
+      if (digest !== reference.digest || chunk.digest !== digest) throw new Error('Corrupt persisted image scene')
+      records.push(...JSON.parse(chunk.payload))
+    }
+  }
+  const scene: BoardScene = {
+    elements: records
+      .filter((r) => r.kind === 'element')
+      .sort((a, b) => a.order - b.order)
+      .map((r) => r.value),
+    appState: records.find((r) => r.kind === 'appState').value,
+  }
+  if (records.find((r) => r.kind === 'header').value.hasFiles)
+    scene.files = Object.fromEntries(records.filter((r) => r.kind === 'file').map((r) => [r.value.id, r.value]))
+  return scene
+}
 
 export async function exerciseCloudAssets(dataURL: string, live?: string) {
   // Auth initializes first: this also verifies later Storage and Firestore emulator connections.
@@ -46,7 +84,7 @@ export async function exerciseCloudAssets(dataURL: string, live?: string) {
   for (let attempt = 0; attempt < 100; attempt++) {
     const snapshot = await getDoc(privateRef)
     if (snapshot.exists()) {
-      privateScene = (workspaceValue(snapshot.data()) as any).scene
+      privateScene = await persistedScene(board.id, snapshot.data().scene)
       if (privateScene?.files?.asset?.storagePath) break
     }
     await new Promise((resolve) => setTimeout(resolve, 100))
@@ -72,7 +110,7 @@ export async function exerciseCloudAssets(dataURL: string, live?: string) {
   })
   // Sharing an already-synced private board may receive metadata-only files.
   await sharingService.updateSharedScene(sharedId, privateScene)
-  const sharedSnapshot = (await getDoc(doc(db, 'boardShares', sharedId))).data()!
+  const sharedSnapshot = { scene: await persistedScene(sharedId) }
   // An upload error must reject instead of committing missing bytes.
   let missingFileRejected = false
   try {
@@ -129,12 +167,12 @@ export async function moveSharedImage(boardId: string) {
     scene.elements = scene.elements.map((element) => ({ ...element, x: move * 20, y: move * 10, version: move + 1 }))
     await sharingService.updateSharedScene(boardId, scene)
   }
-  const snap = (await getDoc(doc(getFirestoreDb()!, 'boardShares', boardId))).data()!
+  const snap = { scene: await persistedScene(boardId) }
   return { x: snap.scene.elements[0].x, fileId: snap.scene.elements[0].fileId }
 }
 
 export async function readSharedPosition(boardId: string) {
-  const scene = (await getDoc(doc(getFirestoreDb()!, 'boardShares', boardId))).data()!.scene
+  const scene = await persistedScene(boardId)
   return { x: scene.elements[0].x, y: scene.elements[0].y, dataURL: scene.files.asset.dataURL }
 }
 
@@ -168,8 +206,7 @@ export async function createPrivateImageBoard(dataURL: string) {
 }
 
 export async function readSharedImagePath(boardId: string) {
-  const snap = await getDoc(doc(getFirestoreDb()!, 'boardShares', boardId))
-  return snap.data()?.scene?.files?.asset?.storagePath
+  return (await persistedScene(boardId)).files?.asset?.storagePath
 }
 
 export async function persistMetadataOnlyLocalScene(boardId: string) {
@@ -191,7 +228,7 @@ export async function exerciseAssetLifecycle(boardId: string) {
   const projectRef = doc(db, 'users', auth.currentUser!.uid, 'projects', board.projectId)
   // Exercise the shared namespace separately: initial publication now reuses
   // its private receipt, whose uploads correctly remain owner-only.
-  const sourceScene = await restoreSceneAssets((await getDoc(shareRef)).data()!.scene)
+  const sourceScene = await restoreSceneAssets(await persistedScene(boardId))
   const lifecycleScene = await storeSceneAssets(
     {
       ...sourceScene,
@@ -245,14 +282,16 @@ export async function exerciseAssetLifecycle(boardId: string) {
   const revokedVisitorCannotRead = await visitorDenied('read')
   await deleteApp(visitorApp)
   const before = (await read(sharedPath)).dataURL
-  const originalScene = (await getDoc(shareRef)).data()!.scene
-  await setDoc(
-    shareRef,
-    { scene: { ...originalScene, elements: originalScene.elements.map((el: any) => ({ ...el, isDeleted: true })) } },
-    { merge: true },
-  )
+  const originalScene = await persistedScene(boardId)
+  await sharingService.updateSharedScene(boardId, {
+    ...originalScene,
+    elements: originalScene.elements.map((el: any) => ({ ...el, isDeleted: true, version: Number(el.version) + 1 })),
+  })
   const imageTombstoneRetainsBytes = (await read(sharedPath)).dataURL === before
-  await setDoc(shareRef, { scene: originalScene }, { merge: true })
+  await sharingService.updateSharedScene(boardId, {
+    ...originalScene,
+    elements: originalScene.elements.map((el: any) => ({ ...el, isDeleted: false, version: Number(el.version) + 2 })),
+  })
   const imageRestoreReusesBytes = (await read(sharedPath)).dataURL === before
   // Missing token metadata must not be regeneratable by a browser, even its owner.
   let directStorageDenied = false
