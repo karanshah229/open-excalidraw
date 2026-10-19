@@ -8,6 +8,8 @@ import { HttpsError, onCall } from 'firebase-functions/v2/https'
 import { defineString } from 'firebase-functions/params'
 import { checkpointScene, ensureScene, loadSceneRevision } from './board-scenes.js'
 export { ensureBoardScene, commitBoardScene } from './board-scenes.js'
+export { boardHistory, updateBoardContent, restoreBoardVersion, importBoardVersion } from './board-history.js'
+export { cleanupExpiredBoardHistory, recoverBoardRestores } from './board-history-cleanup.js'
 import { mirrorCurrentPolicy } from './project-access.js'
 export {
   manageProject,
@@ -83,6 +85,7 @@ export const compactAbandonedCollaborationRoom = onValueDeleted(
   async (event) => {
     const boardId = event.params.boardId
     const rtdb = getDatabase()
+    if ((await rtdb.ref(`boards/${boardId}/historyProtocolVersion`).get()).val() === 1) return
     const firestore = getFirestore()
     const presenceRef = rtdb.ref(`presence/${boardId}`)
 
@@ -130,6 +133,66 @@ export const compactAbandonedCollaborationRoom = onValueDeleted(
       }
     } finally {
       await lockRef.transaction((current) => (current?.token === lockToken ? null : undefined))
+    }
+  },
+)
+
+/** History rooms have an immutable generation path; abandoned old rooms cannot checkpoint the new universe. */
+export const compactAbandonedGenerationRoom = onValueDeleted(
+  { ref: '/presence/{boardId}/generations/{generation}/{sessionId}', region: rtdbFunctionRegion, timeoutSeconds: 120 },
+  async (event) => {
+    const boardId = event.params.boardId,
+      generation = Number(event.params.generation)
+    if (!Number.isSafeInteger(generation) || generation < 1) return
+    const rtdb = getDatabase(),
+      firestore = getFirestore()
+    const presenceRef = rtdb.ref(`presence/${boardId}/generations/${generation}`)
+    if ((await presenceRef.get()).exists()) return
+    await new Promise<void>((resolve) => setTimeout(resolve, GRACE_PERIOD_MS))
+    if ((await presenceRef.get()).exists()) return
+    const lockRef = rtdb.ref(`system/compactionLocks/${boardId}_${generation}`),
+      token = `${event.id}-${Date.now()}`
+    const lock = await lockRef.transaction((current) => {
+      if (current && Date.now() - Number(current.startedAt ?? 0) < COMPACTION_LOCK_MS) return
+      return { startedAt: Date.now(), token }
+    })
+    if (!lock.committed) return
+    const elementsRef = rtdb.ref(`boards/${boardId}/generations/${generation}/elements`)
+    try {
+      const deltas = await elementsRef.get()
+      if (!deltas.exists()) return
+      const head = (await firestore.doc(`boardScenes/${boardId}`).get()).data()
+      const room = (await rtdb.ref(`boards/${boardId}`).get()).val()
+      if (
+        !head ||
+        head.generation !== generation ||
+        head.restoreOperationId ||
+        room?.generation !== generation ||
+        room?.restoreOperationId
+      )
+        return
+      const share = (await firestore.doc(`boardShares/${boardId}`).get()).data()
+      if (!share || share.deletedAt || share.pending) return
+      const actor = { uid: share.ownerId, trusted: true },
+        { scene } = await loadSceneRevision(boardId, head)
+      try {
+        await checkpointScene(
+          boardId,
+          { ...scene, elements: mergeDeltas(scene.elements, Object.values(deltas.val())) },
+          head,
+          actor,
+        )
+      } catch (error) {
+        if ((error as { code?: string }).code === 'aborted' || (error as { code?: string }).code === 'unavailable')
+          return
+        throw error
+      }
+      // Recheck generation/barrier before pruning; checkpointing did not grant ownership of later records.
+      const latest = (await firestore.doc(`boardScenes/${boardId}`).get()).data()
+      if (latest?.generation === generation && !latest.restoreOperationId && !(await presenceRef.get()).exists())
+        await pruneCheckpointedRecords(elementsRef, presenceRef, deltas.val())
+    } finally {
+      await lockRef.transaction((current) => (current?.token === token ? null : undefined))
     }
   },
 )

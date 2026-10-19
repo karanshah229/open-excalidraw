@@ -6,12 +6,12 @@ import {
 import { PresentationView } from './presentation'
 import { AccessDenied } from '../components/access-denied'
 import { BoardLoading } from '../components/board-loading'
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { doc, getDoc, updateDoc } from 'firebase/firestore'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { doc, getDoc, getDocFromServer, onSnapshot, updateDoc } from 'firebase/firestore'
 import { createPortal } from 'react-dom'
 import { Link, useNavigate, useParams, useBlocker } from '@tanstack/react-router'
 import { useQueryClient } from '@tanstack/react-query'
-import { Check, Copy, Eye, Loader2, Pencil, Share2 } from 'lucide-react'
+import { Check, Copy, Eye, History, Loader2, Pencil, Share2 } from 'lucide-react'
 import {
   convertToExcalidrawElements,
   restoreElements,
@@ -24,8 +24,10 @@ import {
 } from '@excalidraw/excalidraw'
 import type { BinaryFiles, ExcalidrawImperativeAPI } from '@excalidraw/excalidraw/types'
 import type { BoardDocument, BoardScene, BoardSyncStatus } from '@agentic-whiteboard/storage'
+import { projectCall } from '../features/sharing/project-service'
 import { workspaceApi, workspaceStore } from '../features/workspace/workspace-api'
 import { SceneGenerationError } from '../features/scenes/scene-service'
+import { getSceneSignature } from '../features/scenes/scene-signature'
 import { replaceSceneElements } from '../features/scenes/import-scene'
 import {
   generateArchitecturalTemplate,
@@ -44,6 +46,7 @@ import {
   readSharedSceneDraft,
   saveSharedSceneDraft,
   acknowledgeSharedSceneDraft,
+  discardRestoredSharedSceneDraft,
 } from '../features/sharing/shared-scene-drafts'
 import {
   useCollaboration,
@@ -63,7 +66,22 @@ import {
   duplicateSlide,
   normalizeDuplicatedSlides,
 } from '../features/slides/slide-commands'
-import { copySlideNotes } from '../features/slides/notes-store'
+import { copySlideNotes, hasDirtyBoardNotes, replaceBoardNoteDrafts } from '../features/slides/notes-store'
+import { boardHistoryStore } from '@agentic-whiteboard/storage'
+import {
+  cloudHistorySource,
+  localHistorySource,
+  readHistorySnapshot,
+  recoverPendingCloudRestore,
+} from '../features/history/history-service'
+import {
+  assertHistoryMutationAllowed,
+  historyEditingState,
+  setHistoryEditingState,
+} from '../features/history/history-editing-gate'
+import type { HistorySource } from '../features/history/history-model'
+import { RestorationProgress } from '../features/history/restoration-progress'
+const HistoryDialog = lazy(() => import('../features/history/history-dialog'))
 import { readSidebarPinned } from '../features/sidebar/sidebar-preferences'
 import { SlidesPanel } from '../features/slides/slides-panel'
 
@@ -161,32 +179,6 @@ async function copyToClipboard(text: string): Promise<boolean> {
   }
 }
 
-function getSceneSignature(
-  scene?: { elements?: readonly any[]; appState?: any; files?: BoardScene['files'] } | null,
-): string {
-  if (!scene) return ''
-  const normalizedAppState = {
-    theme: scene.appState?.theme,
-    viewBackgroundColor: scene.appState?.viewBackgroundColor,
-    gridModeEnabled: scene.appState?.gridModeEnabled,
-    objectsSnapModeEnabled: scene.appState?.objectsSnapModeEnabled,
-  }
-  return JSON.stringify(
-    {
-      elements: scene.elements || [],
-      appState: normalizedAppState,
-      // File IDs identify immutable content; avoid serializing image bytes on every change.
-      files: Object.keys(scene.files ?? {})
-        .sort()
-        .map((id) => {
-          const file = scene.files![id]
-          return [id, file.mimeType, Boolean(file.dataURL)]
-        }),
-    },
-    (key, value) => (key === 'updated' || key === 'versionNonce' ? undefined : value),
-  )
-}
-
 function prepareInitialElements(elements: readonly any[] = []): any[] {
   // Persisted scenes contain native elements, not generation skeletons.
   // Restore preserves frameId membership, bindings, versions and tombstones.
@@ -204,6 +196,8 @@ export function BoardEditor() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const { resolvedTheme } = useTheme()
+  const resolvedThemeRef = useRef(resolvedTheme)
+  resolvedThemeRef.current = resolvedTheme
   const { user: authUser, isLoading: isAuthLoading, signInWithGoogle, signOutUser } = useAuth()
   const apiRef = useRef<ExcalidrawImperativeAPI | null>(null)
   const importInputRef = useRef<HTMLInputElement | null>(null)
@@ -228,10 +222,49 @@ export function BoardEditor() {
   const [recoveredSharedScene, setRecoveredSharedScene] = useState<BoardScene | null>(null)
   const savedSignature = useRef<string>()
   const committedSignatureRef = useRef<string>()
+  const applyingRemoteSceneRef = useRef(false)
   const pendingSceneRef = useRef<BoardScene | null>(null)
   const sceneGenerationRef = useRef<number>()
   const boardEpochRef = useRef(0)
   const generationConflictRef = useRef(false)
+  const historyProtocolRef = useRef(false)
+  const historyHeadRef = useRef<{
+    generation: number
+    restoreFence?: number
+    restoreOperationId?: string | null
+    currentVersionId?: string
+    headRevisionId?: string
+    nameRevision?: number
+  }>()
+  const restoreGateRef = useRef(false)
+  const restoreHydrateRef = useRef<() => Promise<void>>(async () => {})
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [historySource, setHistorySource] = useState<HistorySource>()
+  const [restorationBlocked, setRestorationBlocked] = useState(false)
+  const [restorationError, setRestorationError] = useState('')
+  const [canvasEpoch, setCanvasEpoch] = useState(0)
+  const [historyGeneration, setHistoryGeneration] = useState<number>()
+  const [historyFence, setHistoryFence] = useState<number>()
+  const hydrationInFlightRef = useRef<Promise<void>>()
+  const baselineInFlightRef = useRef<Promise<unknown>>()
+  const publishedHydrationGenerationRef = useRef<number>()
+  const setRestorationGate = useCallback(
+    (blocked: boolean) => {
+      restoreGateRef.current = blocked
+      const head = historyHeadRef.current
+      setHistoryEditingState(boardId, {
+        blocked,
+        ...(historyProtocolRef.current ? { generation: head?.generation, restoreFence: head?.restoreFence } : {}),
+      })
+      setRestorationBlocked(blocked)
+      if (blocked) {
+        if (saveTimer.current) window.clearTimeout(saveTimer.current)
+        saveTimer.current = undefined
+        ++importRequestRef.current
+      }
+    },
+    [boardId],
+  )
   const awaitingInitialSceneRef = useRef(true)
   const hasAutoZoomedRef = useRef(false)
   const userHasInteractedRef = useRef(false)
@@ -327,6 +360,7 @@ export function BoardEditor() {
   const [presentationConfig, setPresentationConfig] = useState<BoardShareConfig | undefined>()
   const [isSharedBoard, setIsSharedBoard] = useState(false)
   const ownedSyncBlockedRef = useRef(false)
+  const canEditBoardRef = useRef(false)
   const isSharedBoardRef = useRef(isSharedBoard)
   isSharedBoardRef.current = isSharedBoard
   const [accessDenied, setAccessDenied] = useState(false)
@@ -375,6 +409,23 @@ export function BoardEditor() {
   const isLazyCollabActiveRef = useRef(isLazyCollabActive)
   isLazyCollabActiveRef.current = isLazyCollabActive
   const [isTransitioningCollab, setIsTransitioningCollab] = useState(false)
+  const onRemoteSceneApply = useCallback((elements: readonly any[], phase: 'before' | 'after') => {
+    if (phase === 'before') {
+      applyingRemoteSceneRef.current = true
+      return
+    }
+    // Excalidraw may normalize an incoming element while updateScene runs.
+    // Read the post-update scene so remote normalization becomes the baseline,
+    // without turning it into a local save. Preserve any queued local snapshot,
+    // timer and committed signature.
+    const rendered = apiRef.current?.getSceneElementsIncludingDeleted?.() ?? elements
+    elementsRef.current = [...rendered]
+    filesRef.current = apiRef.current?.getFiles() ?? filesRef.current
+    const appState = apiRef.current?.getAppState() ?? appStateRef.current
+    appStateRef.current = { ...appStateRef.current, selectedElementIds: appState.selectedElementIds }
+    savedSignature.current = getSceneSignature({ elements: rendered, appState, files: filesRef.current })
+    applyingRemoteSceneRef.current = false
+  }, [])
   const { activeCollaborators, onPointerUpdate, broadcastChanges, isSpectator } = useCollaboration({
     boardId,
     enabled: Boolean(
@@ -389,10 +440,14 @@ export function BoardEditor() {
     sessionId: sessionIdRef.current,
     authUser,
     isAuthLoading,
-    isReadOnly: isReadOnly || isTransitioningCollab,
+    isReadOnly: isReadOnly || isTransitioningCollab || restorationBlocked,
+    generation: historyGeneration,
+    expectedFence: historyFence,
+    restorationBlocked,
     apiRef,
     elementsRef,
     appStateRef,
+    onRemoteSceneApply,
   })
 
   if (import.meta.env.DEV && typeof window !== 'undefined') {
@@ -465,7 +520,7 @@ export function BoardEditor() {
   )
 
   const startEditingName = useCallback(() => {
-    if (!boardMeta || isReadOnly) return
+    if (!boardMeta || isReadOnly || restoreGateRef.current) return
     setTempName(boardMeta.boardName)
     setIsEditingName(true)
     setTimeout(() => {
@@ -475,7 +530,7 @@ export function BoardEditor() {
   }, [boardMeta, isReadOnly])
 
   const finishEditingName = useCallback(async () => {
-    if (!isEditingName || !boardMeta || isReadOnly) return
+    if (!isEditingName || !boardMeta || isReadOnly || restoreGateRef.current) return
     setIsEditingName(false)
     const trimmed = tempName.trim() || 'Untitled'
     if (trimmed === boardMeta.boardName) return
@@ -484,8 +539,16 @@ export function BoardEditor() {
     if (documentRef.current) {
       documentRef.current = { ...documentRef.current, name: trimmed }
     }
+    const epoch = boardEpochRef.current
     try {
-      const saved = await workspaceApi.renameBoard(boardId, trimmed)
+      assertHistoryMutationAllowed(boardId)
+      const saved = documentRef.current
+        ? await workspaceApi.renameBoard(boardId, trimmed, {
+            nameRevision: historyHeadRef.current?.nameRevision,
+            expectedFence: historyHeadRef.current?.restoreFence,
+          })
+        : null
+      if (epoch !== boardEpochRef.current || restoreGateRef.current) return
       if (saved) {
         documentRef.current = saved
         setBoardMeta((prev) => (prev ? { ...prev, updatedAt: saved.updatedAt } : prev))
@@ -493,12 +556,72 @@ export function BoardEditor() {
           .syncBoardSceneToShare(boardId, saved.scene, trimmed, sceneGenerationRef.current)
           .catch(console.error)
       } else {
-        const db = getFirestoreDb()
-        if (!db) throw new Error('Cloud board is unavailable.')
-        await updateDoc(doc(db, 'boardShares', boardId), { boardName: trimmed, updatedAt: new Date().toISOString() })
+        if (historyProtocolRef.current) {
+          let current = await boardHistoryStore.getCommittedContent(boardId)
+          if (!current) {
+            // A shared editor may have no local history record until their
+            // first edit. Seed the version store from the authorized cloud
+            // snapshot so a rename preserves the board and speaker notes.
+            const cloud = await readHistorySnapshot(boardId, undefined, false, true)
+            const head = historyHeadRef.current
+            const document = documentRef.current ?? {
+              id: boardId,
+              projectId: boardMeta.projectId,
+              name: cloud.entry.name,
+              active: true,
+              createdAt: boardMeta.createdAt ?? cloud.entry.createdAt,
+              updatedAt: boardMeta.updatedAt ?? cloud.entry.createdAt,
+              syncStatus: 'synced' as const,
+              revision: 0,
+              baseRevision: 0,
+              syncAttempts: 0,
+              nextSyncAt: null,
+              lastSyncError: null,
+              formatVersion: 1 as const,
+              scene: cloud.scene,
+            }
+            current = await boardHistoryStore.initialize({
+              ...document,
+              name: cloud.entry.name,
+              syncStatus: 'synced',
+              cloudRevisionId: cloud.revisionId,
+              cloudGeneration: cloud.generation,
+              cloudVersionId: cloud.entry.id,
+              cloudRestoreFence: head?.restoreFence ?? 0,
+              cloudNameRevision: head?.nameRevision ?? 0,
+            }, cloud.notes)
+          }
+          if (!current) throw new Error('Load the complete board before renaming it.')
+          if (epoch !== boardEpochRef.current || restoreGateRef.current) return
+          const head = historyHeadRef.current
+          const capture = await boardHistoryStore.save(
+            { ...current.document, name: trimmed },
+            {
+              changedFields: { name: true },
+              fieldBases: { nameRevision: head?.nameRevision ?? 0 },
+              expectedFence: head?.restoreFence ?? 0,
+            },
+          )
+          window.dispatchEvent(new CustomEvent('board-history-local-save', { detail: { boardId } }))
+          if (navigator.onLine)
+            await projectCall('updateBoardContent', {
+              boardId,
+              name: trimmed,
+              mutationId: capture.version.localVersionId,
+              generation: head?.generation ?? 1,
+              expectedFence: head?.restoreFence ?? 0,
+              nameRevision: head?.nameRevision ?? 0,
+            })
+        } else {
+          const db = getFirestoreDb()
+          if (!db) throw new Error('Cloud board is unavailable.')
+          await updateDoc(doc(db, 'boardShares', boardId), { boardName: trimmed, updatedAt: new Date().toISOString() })
+        }
       }
       queryClient.invalidateQueries({ queryKey: ['workspace'] })
-    } catch {
+    } catch (error) {
+      console.error('Board rename failed:', error)
+      if (epoch !== boardEpochRef.current || restoreGateRef.current) return
       setBoardMeta((prev) => (prev ? { ...prev, boardName: boardMeta.boardName } : prev))
       if (documentRef.current) {
         documentRef.current = { ...documentRef.current, name: boardMeta.boardName }
@@ -543,8 +666,301 @@ export function BoardEditor() {
     scrollToContent?: boolean
   } | null>(null)
 
+  const historyIsLocal = boardMeta?.projectOwnerId === 'local-user' || !isFirebaseConfigured
+  const noteIdentity =
+    boardMeta?.projectOwnerId === 'local-user'
+      ? 'local-user'
+      : authUser?.uid || getFirebaseAuth()?.currentUser?.uid || 'local-user'
+  useEffect(() => {
+    if (
+      !boardMeta ||
+      accessDenied ||
+      presentationConfig ||
+      isReadOnly ||
+      (!historyIsLocal && historyGeneration === undefined)
+    )
+      return
+    let active = true
+    if (historyIsLocal)
+      void localHistorySource(boardId).then((source) => {
+        if (active) setHistorySource(source)
+      })
+    else
+      setHistorySource(
+        cloudHistorySource(boardId, () => historyHeadRef.current ?? { generation: sceneGenerationRef.current ?? 1 }),
+      )
+    return () => {
+      active = false
+      setHistorySource(undefined)
+    }
+  }, [
+    boardId,
+    Boolean(boardMeta),
+    historyIsLocal,
+    historyGeneration !== undefined,
+    authUser?.uid,
+    accessDenied,
+    Boolean(presentationConfig),
+    isReadOnly,
+  ])
+
+  restoreHydrateRef.current = () => {
+    if (hydrationInFlightRef.current) return hydrationInFlightRef.current
+    const epoch = ++boardEpochRef.current
+    const user = getFirebaseAuth()?.currentUser?.uid
+    setRestorationGate(true)
+    setRestorationError('')
+    ++importRequestRef.current
+    const task = (async () => {
+      let head = historyHeadRef.current
+      if (!historyIsLocal) {
+        const db = getFirestoreDb()
+        if (!db) throw new Error('Cloud board is unavailable.')
+        const fresh = await getDocFromServer(doc(db, 'boardScenes', boardId))
+        if (!fresh.exists()) throw new Error('This board is no longer available.')
+        head = fresh.data() as any
+        historyHeadRef.current = head
+        if (head?.restoreOperationId)
+          throw new Error('Restoration is still in progress. Waiting for the replacement to be published.')
+      }
+      const before = await boardHistoryStore.getCommittedContent(boardId)
+      if (!historyIsLocal && head) {
+        const generationAdvanced =
+          (sceneGenerationRef.current !== undefined && head.generation > sceneGenerationRef.current) ||
+          (before?.document.cloudGeneration !== undefined && head.generation > before.document.cloudGeneration)
+        if (generationAdvanced) publishedHydrationGenerationRef.current = head.generation
+        if (publishedHydrationGenerationRef.current !== head.generation) {
+          // No successful replacement: a failed same-generation restore must preserve every draft.
+          generationConflictRef.current = false
+          setIsReadOnly(ownedSyncBlockedRef.current || accessDeniedRef.current || !canEditBoardRef.current)
+          setRestorationGate(false)
+          window.dispatchEvent(
+            new CustomEvent('board-history-fence-refreshed', {
+              detail: { boardId, generation: head.generation, restoreFence: head.restoreFence ?? 0 },
+            }),
+          )
+          return
+        }
+      }
+      const local = historyIsLocal ? await boardHistoryStore.getCommittedContent(boardId) : undefined
+      const replacement = local
+        ? {
+            scene: local.document.scene,
+            notes: local.notes,
+            entry: { name: local.document.name },
+            generation: local.version.generation,
+            revisionId: '',
+            noteRevisions: {},
+          }
+        : await readHistorySnapshot(boardId, undefined, true, canEditBoardRef.current)
+      if (epoch !== boardEpochRef.current || user !== getFirebaseAuth()?.currentUser?.uid)
+        throw new BoardContextChangedError()
+      if (
+        !historyIsLocal &&
+        head &&
+        (replacement.generation !== head.generation ||
+          (historyHeadRef.current && historyHeadRef.current.generation !== replacement.generation))
+      )
+        throw new Error('A newer restoration is loading. Retry loading the board.')
+      const ownedDocument = documentRef.current
+      const nativeCurrent = await boardHistoryStore.getCommittedContent(boardId)
+      const documentBase = ownedDocument ?? nativeCurrent?.document
+      if (documentBase && !historyIsLocal && (documentBase.cloudGeneration ?? 1) < replacement.generation) {
+        const verified = await getDocFromServer(doc(getFirestoreDb()!, 'boardScenes', boardId))
+        const published = verified.data()
+        if (
+          !published ||
+          published.restoreOperationId ||
+          published.generation !== replacement.generation ||
+          published.restoreFence !== head?.restoreFence
+        )
+          throw new Error('A newer restoration is being published. Waiting to reload the board.')
+        const document = {
+          ...documentBase,
+          name: replacement.entry.name,
+          scene: replacement.scene,
+          cloudGeneration: replacement.generation,
+          cloudRevisionId: replacement.revisionId,
+          cloudVersionId: head?.currentVersionId,
+          cloudRestoreFence: head?.restoreFence ?? 0,
+          cloudNameRevision: head?.nameRevision ?? 0,
+          syncStatus: 'synced' as const,
+        }
+        const committed = await boardHistoryStore.applyCloudRestore(document, {
+          notes: replacement.notes,
+          restoreFence: head?.restoreFence ?? 0,
+          currentVersionId: head?.currentVersionId,
+        })
+        if (ownedDocument) documentRef.current = committed.document
+      } else if (ownedDocument && local) documentRef.current = local.document
+      if (user && !historyIsLocal) await discardRestoredSharedSceneDraft(boardId, user, replacement.generation)
+      await replaceBoardNoteDrafts(noteIdentity, boardId, replacement.notes, replacement.noteRevisions)
+      if (epoch !== boardEpochRef.current) throw new BoardContextChangedError()
+      pendingSceneRef.current = null
+      setRecoveredSharedScene(null)
+      setIsEditingName(false)
+      generationConflictRef.current = false
+      sceneGenerationRef.current = historyIsLocal ? local?.document.cloudGeneration : replacement.generation
+      elementsRef.current = prepareInitialElements(replacement.scene.elements)
+      filesRef.current = (replacement.scene.files ?? {}) as BinaryFiles
+      appStateRef.current = { ...replacement.scene.appState, theme: resolvedTheme }
+      savedSignature.current = getSceneSignature(replacement.scene)
+      committedSignatureRef.current = savedSignature.current
+      awaitingInitialSceneRef.current = true
+      userHasInteractedRef.current = false
+      hasAutoZoomedRef.current = false
+      apiRef.current?.history.clear()
+      apiRef.current = null
+      sceneSession.publish(elementsRef.current, appStateRef.current as any, filesRef.current)
+      setInitialData({
+        elements: elementsRef.current,
+        appState: appStateRef.current,
+        files: filesRef.current,
+        libraryItems: initialData?.libraryItems ?? Promise.resolve([]),
+        scrollToContent: true,
+      })
+      setBoardMeta((previous) => (previous ? { ...previous, boardName: replacement.entry.name } : previous))
+      setCanvasEpoch((value) => value + 1)
+      setHistoryOpen(false)
+      queryClient.invalidateQueries({ queryKey: ['workspace'] })
+      // Wait for the replacement canvas, not merely the network response, before enabling edits.
+      await new Promise<void>((resolve, reject) => {
+        const deadline = performance.now() + 15000
+        const ready = () => {
+          if (epoch !== boardEpochRef.current) {
+            reject(new BoardContextChangedError())
+            return
+          }
+          if (apiRef.current) {
+            resolve()
+            return
+          }
+          if (performance.now() > deadline) {
+            reject(new Error('The restored canvas did not finish loading. Retry loading it.'))
+            return
+          }
+          requestAnimationFrame(ready)
+        }
+        requestAnimationFrame(ready)
+      })
+      if (!historyIsLocal && historyHeadRef.current?.generation !== replacement.generation)
+        throw new Error('A newer restoration replaced this board. Retry loading it.')
+      if (!historyHeadRef.current?.restoreOperationId) {
+        publishedHydrationGenerationRef.current = undefined
+        setRestorationGate(false)
+        setIsReadOnly(ownedSyncBlockedRef.current || accessDeniedRef.current || !canEditBoardRef.current)
+        setState(historyIsLocal ? 'Synced locally' : 'Synced')
+      }
+    })()
+      .catch((error) => {
+        if (epoch === boardEpochRef.current && !(error instanceof BoardContextChangedError))
+          setRestorationError(error instanceof Error ? error.message : 'Could not load the restored board.')
+        throw error
+      })
+      .finally(() => {
+        if (hydrationInFlightRef.current === task) hydrationInFlightRef.current = undefined
+      })
+    hydrationInFlightRef.current = task
+    return task
+  }
+
+  useEffect(() => {
+    if (!initialData || historyIsLocal || accessDenied || presentationConfig) return
+    const db = getFirestoreDb()
+    if (!db) return
+    return onSnapshot(
+      doc(db, 'boardScenes', boardId),
+      { includeMetadataChanges: true },
+      (snapshot) => {
+        if (!snapshot.exists() || snapshot.metadata.fromCache) return
+        const head = snapshot.data()
+        if (head.historyProtocolVersion !== 1) return
+        historyProtocolRef.current = true
+        historyHeadRef.current = head as any
+        if (!isReadOnly && !head.restoreOperationId && !baselineInFlightRef.current) {
+          const baselineEpoch = boardEpochRef.current
+          const baselineUser = getFirebaseAuth()?.currentUser?.uid
+          const task = workspaceApi
+            .loadDeferredCloudNotes(boardId)
+            .then(() => {
+              if (baselineEpoch !== boardEpochRef.current || baselineUser !== getFirebaseAuth()?.currentUser?.uid ||
+                restoreGateRef.current) return
+            })
+            .catch((error) => console.error('Could not initialize complete board history:', error))
+            .finally(() => {
+              if (baselineInFlightRef.current === task) baselineInFlightRef.current = undefined
+            })
+          baselineInFlightRef.current = task
+        }
+        setHistoryGeneration(head.generation)
+        setHistoryFence(head.restoreFence ?? 0)
+        if (head.restoreOperationId) setRestorationGate(true)
+        else if (
+          (sceneGenerationRef.current !== undefined && sceneGenerationRef.current !== head.generation) ||
+          (documentRef.current?.cloudGeneration !== undefined &&
+            documentRef.current.cloudGeneration !== head.generation) ||
+          generationConflictRef.current
+        ) {
+          void restoreHydrateRef.current().catch(() => {})
+        } else if (restoreGateRef.current && !hydrationInFlightRef.current) {
+          // A same-generation abort retains drafts. Refresh the fence before producers resume.
+          generationConflictRef.current = false
+          setIsReadOnly(ownedSyncBlockedRef.current || accessDeniedRef.current || !canEditBoardRef.current)
+          setRestorationGate(false)
+          window.dispatchEvent(
+            new CustomEvent('board-history-fence-refreshed', {
+              detail: { boardId, generation: head.generation, restoreFence: head.restoreFence ?? 0 },
+            }),
+          )
+        } else
+          setHistoryEditingState(boardId, {
+            blocked: restoreGateRef.current,
+            generation: head.generation,
+            restoreFence: head.restoreFence ?? 0,
+          })
+      },
+      (error) => {
+        if ((error as { code?: string }).code === 'permission-denied')
+          void workspaceApi.loadBoardWithProject(boardId).then((local) => {
+            if (local?.document.syncStatus === 'sync-blocked') {
+              ownedSyncBlockedRef.current = true
+              setState('Project deleted')
+              setIsReadOnly(true)
+              setAccessDenied(false)
+            } else setAccessDenied(true)
+          }).catch(() => setAccessDenied(true))
+        else if (restoreGateRef.current)
+          setRestorationError('Connection lost while restoring. Waiting to verify the current board.')
+      },
+    )
+  }, [boardId, Boolean(initialData), historyIsLocal, accessDenied, Boolean(presentationConfig), setRestorationGate])
+
+  useEffect(() => {
+    if (!initialData || historyIsLocal || accessDenied || presentationConfig) return
+    // The canvas has committed its initial render before this effect runs;
+    // protected speaker-note history is intentionally outside the drawing path.
+    const load = () => void workspaceApi.loadDeferredCloudNotes(boardId)
+    load()
+    window.addEventListener('online', load)
+    return () => window.removeEventListener('online', load)
+  }, [boardId, Boolean(initialData), historyIsLocal, accessDenied, Boolean(presentationConfig)])
+
+  useEffect(() => {
+    const retry = () => {
+      if (restoreGateRef.current && restorationError) void restoreHydrateRef.current().catch(() => {})
+    }
+    window.addEventListener('online', retry)
+    return () => window.removeEventListener('online', retry)
+  }, [restorationError])
+
   useEffect(() => {
     boardEpochRef.current++
+    historyProtocolRef.current = false
+    historyHeadRef.current = undefined
+    setHistoryGeneration(undefined)
+    setHistoryFence(undefined)
+    setHistoryOpen(false)
+    setRestorationGate(false)
     hasAutoZoomedRef.current = false
     sceneGenerationRef.current = undefined
     generationConflictRef.current = false
@@ -553,6 +969,7 @@ export function BoardEditor() {
     documentRef.current = null
     setIsSharedBoard(false)
     ownedSyncBlockedRef.current = false
+    canEditBoardRef.current = false
     setPresentationConfig(undefined)
     setAccessDenied(false)
     setBoardNotFound(false)
@@ -567,7 +984,15 @@ export function BoardEditor() {
         // owner draft must still mount in the explicit read-only recovery view.
         if (details?.document.syncStatus === 'sync-blocked') return { status: 'not-found' as const }
         return resolveBoardSharing(details?.project.ownerId, authUser?.uid, () =>
-          sharingService.getSharedBoard(boardId, authUser?.email, authUser?.uid),
+          sharingService.getSharedBoard(
+            boardId,
+            authUser?.email,
+            authUser?.uid,
+            details?.document.scene.files,
+            details?.document.cloudRevisionId && details.document.cloudGeneration !== undefined
+              ? { scene: details.document.scene, revisionId: details.document.cloudRevisionId, generation: details.document.cloudGeneration }
+              : undefined,
+          ),
         )
       }),
       loadLibraryItems(),
@@ -583,8 +1008,18 @@ export function BoardEditor() {
               details.project.ownerId === 'local-user'),
           )
           if (!isLocalOwner) {
-            setAccessDenied(true)
-            return
+            // The access snapshot may resolve after the parent-project
+            // listener has already marked this owner's local copy recoverable.
+            // Recheck durable local status before replacing it with denial UI.
+            const refreshed = await workspaceApi.loadBoardWithProject(boardId).catch(() => null)
+            if (!active) return
+            if (refreshed?.document.syncStatus !== 'sync-blocked') {
+              setAccessDenied(true)
+              return
+            }
+            details = refreshed
+            setAccessDenied(false)
+            setBoardNotFound(false)
           }
         }
 
@@ -649,6 +1084,7 @@ export function BoardEditor() {
             : isOwner || isGeneralEditor || isCollabEditor
 
           ownedSyncBlockedRef.current = details?.document?.syncStatus === 'sync-blocked'
+          canEditBoardRef.current = canEdit
           setIsReadOnly(ownedSyncBlockedRef.current || !canEdit || generationConflictRef.current)
           if (draft && !draftConflict) setRecoveredSharedScene(finalScene)
           awaitingInitialSceneRef.current = true
@@ -700,7 +1136,7 @@ export function BoardEditor() {
             files: (finalScene.files ?? {}) as BinaryFiles,
             appState: {
               ...finalScene.appState,
-              theme: resolvedTheme,
+              theme: resolvedThemeRef.current,
               viewBackgroundColor: finalScene.appState?.viewBackgroundColor || 'transparent',
             },
             libraryItems: Promise.resolve(libraryItems),
@@ -721,6 +1157,7 @@ export function BoardEditor() {
         // Case 2: Board only in local IndexedDB (freshly created prior to cloud sync)
         if (details) {
           const { document, project } = details
+          canEditBoardRef.current = true
           if (document.syncStatus !== 'sync-blocked') document.scene = await restoreSceneAssets(document.scene)
           // The board read already established that no sharing document exists.
           // Keep this verified default so opening Share needs no second read.
@@ -767,7 +1204,7 @@ export function BoardEditor() {
             files: (document.scene.files ?? {}) as BinaryFiles,
             appState: {
               ...document.scene.appState,
-              theme: resolvedTheme,
+              theme: resolvedThemeRef.current,
               viewBackgroundColor: document.scene.appState.viewBackgroundColor || 'transparent',
             },
             libraryItems: Promise.resolve(libraryItems),
@@ -798,7 +1235,7 @@ export function BoardEditor() {
       active = false
       if (saveTimer.current) window.clearTimeout(saveTimer.current)
     }
-  }, [boardId, authUser?.email, authUser?.uid, resolvedTheme, accessRevision])
+  }, [boardId, authUser?.email, authUser?.uid, accessRevision])
 
   // A recipient may already have a restricted link open when invited. The
   // denied Firestore listener needs reauthorization, just like a revoked one.
@@ -816,13 +1253,6 @@ export function BoardEditor() {
           sceneGenerationRef.current !== undefined &&
           updatedConfig.sceneGeneration !== undefined &&
           updatedConfig.sceneGeneration !== sceneGenerationRef.current
-        if (generationChanged && (pendingSceneRef.current || isLazyCollabActiveRef.current)) {
-          generationConflictRef.current = true
-          setState('Conflict')
-          setIsReadOnly(true)
-          return
-        }
-        if (updatedConfig.sceneGeneration !== undefined) sceneGenerationRef.current = updatedConfig.sceneGeneration
         setPresentationConfig(updatedConfig.effectiveRole === 'presentation' ? updatedConfig : undefined)
         const recoveringAccess = accessDeniedRef.current
         const userEmail = authUser?.email?.trim().toLowerCase()
@@ -834,7 +1264,24 @@ export function BoardEditor() {
           (userEmail && updatedConfig.invitedEmails?.map((e) => e.toLowerCase()).includes(userEmail))
 
         if (!stillAllowed) {
-          setAccessDenied(true)
+          // A project deletion can revoke the shared-scene listener at the
+          // same time the owner workspace records its recoverable local copy.
+          // Honor that verified owner tombstone instead of replacing it with
+          // the generic access-denied screen.
+          void workspaceApi.loadBoardWithProject(boardId).then((refreshed) => {
+            if (refreshed?.document.syncStatus === 'sync-blocked') {
+              ownedSyncBlockedRef.current = true
+              canEditBoardRef.current = false
+              setIsReadOnly(true)
+              setState('Project deleted')
+              setAccessDenied(false)
+              return
+            }
+            canEditBoardRef.current = false
+            setIsReadOnly(true)
+            setHistoryOpen(false)
+            setAccessDenied(true)
+          }).catch((error) => console.error('Failed to confirm local board access:', error))
           return
         }
 
@@ -845,7 +1292,18 @@ export function BoardEditor() {
         const canEdit = updatedConfig.effectiveRole
           ? updatedConfig.effectiveRole === 'owner' || updatedConfig.effectiveRole === 'editor'
           : isOwner || isGeneralEditor || isCollabEditor
+        canEditBoardRef.current = canEdit
         setIsReadOnly(ownedSyncBlockedRef.current || !canEdit || generationConflictRef.current)
+        if (!canEdit) setHistoryOpen(false)
+        // Policy changes apply immediately; replacement content remains fenced.
+        if (historyProtocolRef.current && (generationChanged || restoreGateRef.current)) return
+        if (generationChanged && (pendingSceneRef.current || isLazyCollabActiveRef.current)) {
+          generationConflictRef.current = true
+          setState('Conflict')
+          setIsReadOnly(true)
+          return
+        }
+        if (updatedConfig.sceneGeneration !== undefined) sceneGenerationRef.current = updatedConfig.sceneGeneration
 
         setBoardMeta((prev) =>
           prev
@@ -905,10 +1363,23 @@ export function BoardEditor() {
       },
       (error) => {
         if (error?.code === 'permission-denied' || error?.code === 'functions/permission-denied') {
-          setAccessDenied(true)
+          void workspaceApi.loadBoardWithProject(boardId).then((local) => {
+            if (local?.document.syncStatus === 'sync-blocked') {
+              ownedSyncBlockedRef.current = true
+              setState('Project deleted')
+              setIsReadOnly(true)
+              setAccessDenied(false)
+            } else setAccessDenied(true)
+          }).catch(() => setAccessDenied(true))
         }
       },
       () => filesRef.current as BoardScene['files'],
+      () => {
+        const document = documentRef.current
+        return document?.cloudRevisionId && document.cloudGeneration !== undefined
+          ? { scene: document.scene, revisionId: document.cloudRevisionId, generation: document.cloudGeneration }
+          : undefined
+      },
     )
     return () => unsubscribe()
   }, [boardId, isSharedBoard, authUser?.email, authUser?.uid])
@@ -928,6 +1399,12 @@ export function BoardEditor() {
     return workspaceApi.subscribeToCloudScene(
       boardId,
       (document) => {
+        if (
+          historyProtocolRef.current &&
+          (restoreGateRef.current ||
+            (sceneGenerationRef.current !== undefined && document.cloudGeneration !== sceneGenerationRef.current))
+        )
+          return
         documentRef.current = document
         if (document.syncStatus === 'conflict') {
           generationConflictRef.current = true
@@ -939,6 +1416,7 @@ export function BoardEditor() {
           sceneGenerationRef.current !== undefined &&
           document.cloudGeneration !== undefined &&
           sceneGenerationRef.current !== document.cloudGeneration
+        if (historyProtocolRef.current && (generationChanged || restoreGateRef.current)) return
         if (generationChanged && (pendingSceneRef.current || isLazyCollabActiveRef.current)) {
           generationConflictRef.current = true
           setState('Conflict')
@@ -977,7 +1455,8 @@ export function BoardEditor() {
   ])
 
   useEffect(() => {
-    return workspaceApi.subscribeToBoardSyncStatus(boardId, (status) => {
+    let active = true
+    const applySyncStatus = (status: BoardSyncStatus) => {
       // Registered owned boards also have shared scenes. Their private project
       // lifecycle still blocks edits and retains pending bytes until restoration.
       if (isSharedBoard && status !== 'sync-blocked' && !ownedSyncBlockedRef.current) return
@@ -985,7 +1464,22 @@ export function BoardEditor() {
       if (status === 'conflict') generationConflictRef.current = true
       setState(statusLabel(status))
       setIsReadOnly(ownedSyncBlockedRef.current || generationConflictRef.current)
-    })
+      if (ownedSyncBlockedRef.current) setAccessDenied(false)
+    }
+    const unsubscribe = workspaceApi.subscribeToBoardSyncStatus(boardId, applySyncStatus)
+    // A project tombstone can arrive while the route is mounting, before its
+    // event listener exists. Reconcile the persisted status so the board cannot
+    // remain editable just because that one event was missed.
+    void workspaceApi
+      .loadBoard(boardId)
+      .then((document) => {
+        if (active && document?.syncStatus === 'sync-blocked') applySyncStatus('sync-blocked')
+      })
+      .catch((error) => console.error('Failed to reconcile board sync status:', error))
+    return () => {
+      active = false
+      unsubscribe()
+    }
   }, [boardId, isSharedBoard])
 
   const sendScene = useCallback(
@@ -1090,7 +1584,7 @@ export function BoardEditor() {
           }
           return
         }
-        if (isReadOnly || !apiRef.current) {
+        if (isReadOnly || restoreGateRef.current || !apiRef.current) {
           sendOperationResult(
             operation.id,
             false,
@@ -1509,10 +2003,13 @@ export function BoardEditor() {
       const interacted = userHasInteractedRef.current
       const checkIdentity = () => {
         if (getFirebaseAuth()?.currentUser?.uid !== queuedUid) throw new BoardContextChangedError()
+        if (epoch !== boardEpochRef.current || restoreGateRef.current) throw new BoardContextChangedError()
       }
       const task = saveChainRef.current
         .then(async () => {
           checkIdentity()
+          if (epoch !== boardEpochRef.current) throw new BoardContextChangedError()
+          assertHistoryMutationAllowed(boardId)
           const document = queuedDocument
           if (document) {
             if (document.id !== boardId) throw new BoardContextChangedError()
@@ -1551,7 +2048,59 @@ export function BoardEditor() {
           checkIdentity()
           const draft = await saveSharedSceneDraft(boardId, uid, scene, expectedGeneration)
           checkIdentity()
+          await baselineInFlightRef.current
+          if (epoch !== boardEpochRef.current) throw new BoardContextChangedError()
+          assertHistoryMutationAllowed(boardId)
+          let baseline = await boardHistoryStore.getCommittedContent(boardId)
+          checkIdentity()
+          if (epoch !== boardEpochRef.current || restoreGateRef.current) throw new BoardContextChangedError()
+          if (historyProtocolRef.current) {
+            // A public-link editor may have no owner workspace row to seed
+            // history during hydration. Before its first mutation, bind a
+            // complete authoritative cloud snapshot (including readable
+            // notes) as the local base so the save cannot silently skip
+            // version capture or overwrite protected note content.
+            if (!baseline) {
+              const snapshot = await readHistorySnapshot(boardId, undefined, false, true)
+              checkIdentity()
+              if (epoch !== boardEpochRef.current || restoreGateRef.current) throw new BoardContextChangedError()
+              const now = new Date().toISOString()
+              await boardHistoryStore.initialize({
+                id: boardId,
+                projectId: boardMeta?.projectId ?? '',
+                name: snapshot.entry.name,
+                active: true,
+                createdAt: boardMeta?.createdAt || now,
+                updatedAt: boardMeta?.updatedAt || now,
+                syncStatus: 'synced',
+                revision: 0,
+                baseRevision: 0,
+                cloudRevisionId: snapshot.revisionId,
+                cloudGeneration: snapshot.generation,
+                cloudVersionId: snapshot.currentVersionId ?? undefined,
+                cloudRestoreFence: snapshot.restoreFence ?? 0,
+                cloudNameRevision: snapshot.nameRevision ?? 0,
+                syncAttempts: 0,
+                nextSyncAt: null,
+                lastSyncError: null,
+                formatVersion: 1,
+                scene: snapshot.scene,
+              }, snapshot.notes)
+              baseline = await boardHistoryStore.getCommittedContent(boardId)
+            }
+            if (!baseline) throw new Error('Load the complete board history before saving.')
+            await boardHistoryStore.save(
+              { ...baseline.document, scene: draft.scene },
+              {
+                changedFields: { scene: true },
+                expectedFence: historyHeadRef.current?.restoreFence ?? 0,
+                sourceBaseVersionId: historyHeadRef.current?.currentVersionId,
+              },
+            )
+            window.dispatchEvent(new CustomEvent('board-history-local-save', { detail: { boardId } }))
+          }
           await sharingService.updateSharedScene(boardId, draft.scene, draft.generation)
+          if (epoch !== boardEpochRef.current || restoreGateRef.current) throw new BoardContextChangedError()
           await acknowledgeSharedSceneDraft(draft)
           if (epoch === boardEpochRef.current) {
             committedSignatureRef.current = getSceneSignature(draft.scene)
@@ -1571,21 +2120,29 @@ export function BoardEditor() {
     [boardId, isSharedBoard, queryClient],
   )
 
-  const handleSaveFailure = useCallback((scene: BoardScene, error: unknown) => {
-    if (error instanceof BoardContextChangedError) return
-    pendingSceneRef.current ??= scene
-    console.error('Failed to save scene:', error)
-    if (
-      error instanceof SceneGenerationError ||
-      (error instanceof Error && error.message === 'BOARD_GENERATION_CONFLICT')
-    ) {
-      generationConflictRef.current = true
-      setState('Conflict')
-      setIsReadOnly(true)
-      return
-    }
-    setState(documentRef.current ? 'Local save failed' : 'Sync failed')
-  }, [])
+  const handleSaveFailure = useCallback(
+    (scene: BoardScene, error: unknown) => {
+      if (error instanceof BoardContextChangedError) return
+      pendingSceneRef.current ??= scene
+      console.error('Failed to save scene:', error)
+      if (
+        error instanceof SceneGenerationError ||
+        (error instanceof Error && error.message === 'BOARD_GENERATION_CONFLICT')
+      ) {
+        generationConflictRef.current = true
+        setState('Conflict')
+        if (historyProtocolRef.current) {
+          setRestorationGate(true)
+          void restoreHydrateRef.current().catch(() => {})
+          return
+        }
+        setIsReadOnly(true)
+        return
+      }
+      setState(documentRef.current ? 'Local save failed' : 'Sync failed')
+    },
+    [setRestorationGate],
+  )
 
   useEffect(() => {
     if (!recoveredSharedScene || !initialData || isReadOnly || accessDenied) return
@@ -1600,7 +2157,7 @@ export function BoardEditor() {
   }, [recoveredSharedScene, initialData, isReadOnly, accessDenied, enqueueSceneSave, handleSaveFailure])
 
   const flushSave = useCallback(async () => {
-    if (isReadOnly) return
+    if (isReadOnly || restoreGateRef.current) return
     if (saveTimer.current) {
       window.clearTimeout(saveTimer.current)
       saveTimer.current = undefined
@@ -1699,7 +2256,7 @@ export function BoardEditor() {
 
   const scheduleSave = useCallback(
     (scene: BoardScene) => {
-      if (isReadOnly || isTransitioningCollab) return
+      if (isReadOnly || isTransitioningCollab || restoreGateRef.current) return
       pendingSceneRef.current = scene
       // Journal bytes immediately; the network save remains debounced.
       const uid = getFirebaseAuth()?.currentUser?.uid
@@ -1714,6 +2271,7 @@ export function BoardEditor() {
       setState('Saving')
       saveTimer.current = window.setTimeout(async () => {
         saveTimer.current = undefined
+        if (restoreGateRef.current) return
         pendingSceneRef.current = null
         try {
           await enqueueSceneSave(scene)
@@ -1724,6 +2282,10 @@ export function BoardEditor() {
     },
     [boardId, enqueueSceneSave, handleSaveFailure, isReadOnly, isTransitioningCollab],
   )
+
+  useEffect(() => {
+    if (!restorationBlocked && pendingSceneRef.current && !isReadOnly) scheduleSave(pendingSceneRef.current)
+  }, [restorationBlocked, isReadOnly, scheduleSave])
 
   const getSceneSize = useCallback(() => {
     const elements = elementsRef.current.filter((e) => !e.isDeleted)
@@ -1755,10 +2317,11 @@ export function BoardEditor() {
       }
       // Read-only clients and remote updates still publish current slide content.
       sceneSession.publish(elements as any, appState as any, files)
-      if (isReadOnly || isTransitioningCollab) return
+      if (isReadOnly || isTransitioningCollab || restoreGateRef.current) return
       elementsRef.current = [...elements]
       filesRef.current = files
       appStateRef.current = { ...appStateRef.current, selectedElementIds: appState.selectedElementIds }
+      if (applyingRemoteSceneRef.current) return
       const scene = {
         elements: [...elements],
         files,
@@ -1797,7 +2360,10 @@ export function BoardEditor() {
       // 3. If there are no real changes from the last saved signature, skip
       if (signature === savedSignature.current) return
       savedSignature.current = signature
-      broadcastChanges(elements)
+      // Excalidraw's onChange element list may omit deleted elements. RTDB
+      // collaboration must still receive their tombstones so peers cannot
+      // resurrect stale copies, and can apply a later undo as a newer update.
+      broadcastChanges(apiRef.current?.getSceneElementsIncludingDeleted?.() ?? elements)
 
       // 4. Check if current scene is back to committed state (e.g. reverted via Cmd+Z)
       const isBackToCommitted = signature === committedSignatureRef.current
@@ -1837,7 +2403,7 @@ export function BoardEditor() {
   const importSceneFile = useCallback(
     async (file: File) => {
       const api = apiRef.current
-      if (!api || !canImportRef.current) return
+      if (!api || !canImportRef.current || restoreGateRef.current) return
       const epoch = boardEpochRef.current
       const request = ++importRequestRef.current
       const uid = getFirebaseAuth()?.currentUser?.uid
@@ -1853,6 +2419,7 @@ export function BoardEditor() {
           uid !== getFirebaseAuth()?.currentUser?.uid ||
           generation !== sceneGenerationRef.current ||
           !canImportRef.current ||
+          restoreGateRef.current ||
           api !== apiRef.current
         )
           return
@@ -1997,6 +2564,56 @@ export function BoardEditor() {
     <>
       {content}
       {shareDialog}
+      {historySource ? (
+        <Suspense fallback={null}>
+          <HistoryDialog
+            open={historyOpen}
+            onOpenChange={setHistoryOpen}
+            source={historySource}
+            canRestore={!isReadOnly && !accessDenied && !presentationConfig && !restorationBlocked}
+            isDirty={async () =>
+              Boolean(
+                pendingSceneRef.current ||
+                isEditingName ||
+                (!historyIsLocal && documentRef.current && documentRef.current.syncStatus !== 'synced') ||
+                (await hasDirtyBoardNotes(noteIdentity, boardId)) ||
+                (!historyIsLocal && (await boardHistoryStore.listOutbox(boardId)).length),
+              )
+            }
+            onRestoreStart={() => setRestorationGate(true)}
+            onRestoreComplete={() => restoreHydrateRef.current()}
+            onRestoreFailed={() => {
+              if (historyIsLocal) {
+                setRestorationGate(false)
+                return
+              }
+              const db = getFirestoreDb()
+              if (db)
+                void recoverPendingCloudRestore(boardId)
+                  .then(() => getDocFromServer(doc(db, 'boardScenes', boardId)))
+                  .then((snapshot) => {
+                    const head = snapshot.data()
+                    if (head && !head.restoreOperationId && head.generation === sceneGenerationRef.current)
+                      setRestorationGate(false)
+                    else if (head) {
+                      historyHeadRef.current = head as any
+                      if (!head.restoreOperationId) void restoreHydrateRef.current().catch(() => {})
+                    }
+                  })
+                  .catch(() =>
+                    setRestorationError(
+                      'Could not verify restore status. Editing remains paused until the board is verified.',
+                    ),
+                  )
+            }}
+          />
+        </Suspense>
+      ) : null}
+      <RestorationProgress
+        open={restorationBlocked}
+        error={restorationError || undefined}
+        onRetry={() => void restoreHydrateRef.current().catch(() => {})}
+      />
     </>
   )
 
@@ -2168,43 +2785,9 @@ export function BoardEditor() {
                   <Copy size={13} />
                   <span>{isCopyingBoard ? 'Copying…' : 'Make a copy'}</span>
                 </button>
-
-                {state === 'Project deleted' ? (
-                  <SyncStatusDropdown
-                    state={state}
-                    boardName={boardMeta?.boardName || 'Untitled'}
-                    createdAt={boardMeta?.createdAt}
-                    updatedAt={boardMeta?.updatedAt}
-                    getSceneSize={getSceneSize}
-                  />
-                ) : (
-                  <BoardInfoDropdown
-                    boardName={boardMeta?.boardName || 'Untitled'}
-                    createdAt={boardMeta?.createdAt}
-                    updatedAt={boardMeta?.updatedAt}
-                    projectOwnerId={boardMeta?.projectOwnerId}
-                    projectOwnerName={boardMeta?.projectOwnerName}
-                    projectOwnerEmail={boardMeta?.projectOwnerEmail}
-                    getSceneSize={getSceneSize}
-                  />
-                )}
               </>
             ) : (
               <>
-                <SyncStatusDropdown
-                  state={state}
-                  onKeepLocalConflict={keepLocalConflict}
-                  lastSyncError={documentRef.current?.lastSyncError}
-                  boardName={boardMeta?.boardName || documentRef.current?.name || 'Untitled'}
-                  createdAt={boardMeta?.createdAt || documentRef.current?.createdAt}
-                  updatedAt={boardMeta?.updatedAt || documentRef.current?.updatedAt}
-                  projectOwnerId={boardMeta?.projectOwnerId}
-                  projectOwnerName={boardMeta?.projectOwnerName}
-                  projectOwnerEmail={boardMeta?.projectOwnerEmail}
-                  version={documentRef.current?.revision}
-                  getSceneSize={getSceneSize}
-                />
-
                 {(!isSharedBoard || (authUser?.uid && boardMeta?.projectOwnerId === authUser.uid)) && (
                   <button
                     type="button"
@@ -2217,6 +2800,34 @@ export function BoardEditor() {
                   </button>
                 )}
               </>
+            )}
+
+            {isReadOnly && state !== 'Project deleted' ? (
+              <BoardInfoDropdown
+                boardName={boardMeta?.boardName || 'Untitled'}
+                createdAt={boardMeta?.createdAt}
+                updatedAt={boardMeta?.updatedAt}
+                projectOwnerId={boardMeta?.projectOwnerId}
+                projectOwnerName={boardMeta?.projectOwnerName}
+                projectOwnerEmail={boardMeta?.projectOwnerEmail}
+                getSceneSize={getSceneSize}
+              />
+            ) : (
+              <SyncStatusDropdown
+                state={state}
+                boardId={boardId}
+                cloudHistoryEnabled={!historyIsLocal}
+                onKeepLocalConflict={keepLocalConflict}
+                lastSyncError={documentRef.current?.lastSyncError}
+                boardName={boardMeta?.boardName || documentRef.current?.name || 'Untitled'}
+                createdAt={boardMeta?.createdAt || documentRef.current?.createdAt}
+                updatedAt={boardMeta?.updatedAt || documentRef.current?.updatedAt}
+                projectOwnerId={boardMeta?.projectOwnerId}
+                projectOwnerName={boardMeta?.projectOwnerName}
+                projectOwnerEmail={boardMeta?.projectOwnerEmail}
+                version={documentRef.current?.revision}
+                getSceneSize={getSceneSize}
+              />
             )}
 
             <CollaboratorBar collaborators={activeCollaborators} />
@@ -2310,7 +2921,7 @@ export function BoardEditor() {
           />
           {importError && <div role="alert">{importError}</div>}
           <Excalidraw
-            key={boardId}
+            key={`${boardId}:${canvasEpoch}`}
             theme={resolvedTheme}
             initialData={{
               ...initialData,
@@ -2340,10 +2951,10 @@ export function BoardEditor() {
               }
               return normalizeDuplicatedSlides(next, previous)
             }}
-            viewModeEnabled={isReadOnly || isSpectator || isTransitioningCollab}
+            viewModeEnabled={isReadOnly || isSpectator || isTransitioningCollab || restorationBlocked}
             detectScroll
-            autoFocus={!isShareModalOpen}
-            handleKeyboardGlobally={!isShareModalOpen && !isSlideStageOpen}
+            autoFocus={!isShareModalOpen && !historyOpen && !restorationBlocked}
+            handleKeyboardGlobally={!isShareModalOpen && !isSlideStageOpen && !historyOpen && !restorationBlocked}
             objectsSnapModeEnabled
             aiEnabled={false}
             validateEmbeddable={(url) => {
@@ -2408,8 +3019,25 @@ export function BoardEditor() {
               {!isReadOnly && !isSpectator && <MainMenu.DefaultItems.ChangeCanvasBackground />}
             </MainMenu>
             <SlidesPanel
+              key={`${boardId}:${canvasEpoch}`}
               onSharePresentation={() => setIsShareModalOpen(true)}
-              key={`slides-${boardId}`}
+              footerActions={
+                <>
+                  {!isReadOnly && !presentationConfig && (historySource || !historyIsLocal) && (
+                    <button
+                      type="button"
+                      className="sidebar-trigger board-panel-button"
+                      data-testid="board-history-open"
+                      aria-label="Board history"
+                      onClick={() => setHistoryOpen(true)}
+                      disabled={restorationBlocked || !historySource}
+                      title={historySource ? 'Board history' : 'Board history requires a server update'}
+                    >
+                      <History size={19} />
+                    </button>
+                  )}
+                </>
+              }
               session={sceneSession}
               containerRef={editorShellRef}
               apiRef={apiRef}
@@ -2425,7 +3053,7 @@ export function BoardEditor() {
                 boardMeta?.projectOwnerId !== 'local-user' &&
                 (authUser || getFirebaseAuth()?.currentUser),
               )}
-              canEdit={!isReadOnly && !isSpectator && !isTransitioningCollab && !accessDenied}
+              canEdit={!isReadOnly && !isSpectator && !isTransitioningCollab && !accessDenied && !restorationBlocked}
               onInteraction={markSlideInteraction}
               onStageChange={setIsSlideStageOpen}
             />

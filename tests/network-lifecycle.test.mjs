@@ -53,6 +53,7 @@ async function runNetworkLifecycleTest() {
         id,
         projectId: proj.id,
         name: 'Network Test Canvas',
+        active: true,
         scene: {
           elements: [
             {

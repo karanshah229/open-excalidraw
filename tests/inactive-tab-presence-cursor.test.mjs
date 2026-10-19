@@ -54,6 +54,7 @@ async function runInactiveTabTest() {
         id,
         projectId: proj.id,
         name: 'Inactive Presence Board',
+        active: true,
         scene: {
           elements: [
             {

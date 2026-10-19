@@ -165,9 +165,7 @@ try {
   })
   await page.waitForFunction(() => !document.querySelector('.fullscreen-slides'))
   assert(speakerPage.isClosed(), 'Escape from speaker notes closes both presentation windows')
-  await page.waitForFunction(() =>
-    document.querySelector('#header-status-slot')?.textContent.includes('Synced locally'),
-  )
+  await page.waitForSelector('[data-testid="board-info-open"][data-sync-status="Synced locally"]')
   await page.reload()
   await page.waitForSelector('.slides-panel, .slides-toggle')
   if (!(await page.$('.slides-panel'))) await page.click('.slides-toggle')

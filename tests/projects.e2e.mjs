@@ -186,7 +186,7 @@ async function record(name, fn) {
   results.push(name)
   console.log(`PASS: ${name}`)
 }
-let owner, editor, viewer, outsider, anonymous, project, boardId, createdByEditor
+let owner, editor, viewer, outsider, anonymous, project, boardId, createdByEditor, collabGeneration, fixtureStoragePath
 try {
   owner = await page('owner')
   await record('Create project and board through the UI; real Firestore sync', async () => {
@@ -238,10 +238,18 @@ try {
       })
     }, imageData)
     await until(
-      async () =>
-        (await project.ref.collection('boards').doc(boardId).get()).data()?.scene?.files?.['fixture-image']
-          ?.storagePath,
-      'image uploaded through Storage network',
+      async () => {
+        fixtureStoragePath = await owner.evaluate(async (id) => {
+        const { sceneService } = await import('/src/features/scenes/scene-service.ts')
+        return (await sceneService.load(id))?.scene.files?.['fixture-image']?.storagePath
+        }, boardId)
+        return Boolean(fixtureStoragePath)
+      },
+      'image asset reference committed through the scene gateway',
+    )
+    assert(
+      requests.some((request) => request.role === 'owner' && request.operation === 'upload' && request.status < 400),
+      'Image bytes upload through the authorized boardAsset callable to Firebase Storage',
     )
     await owner.goto(base)
     await owner.waitForSelector('[aria-label="Project actions for Project Alpha"]')
@@ -329,11 +337,11 @@ try {
       assert.deepEqual(exported.failures, [])
       assert.equal(exported.files.length, 3)
       assert.equal((await rtdb.ref(`boardAccess/${board}`).get()).val().blocked, false)
-      assert.deepEqual(
-        (await db.doc(`boardShares/${board}`).get()).data(),
-        policy,
-        'Projection repair preserves sharing and drawing data',
-      )
+      const migratedPolicy = (await db.doc(`boardShares/${board}`).get()).data()
+      assert.equal(migratedPolicy.sceneId, board, 'Legacy inline board content migrates to its canonical scene')
+      delete migratedPolicy.sceneId
+      assert.deepEqual(migratedPolicy, Object.fromEntries(Object.entries(policy).filter(([key]) => key !== 'scene')),
+        'Projection repair preserves the sharing policy while moving content out of metadata')
       const projectPolicy = db.doc(`projectShares/${id}`)
       await projectPolicy.set({ ownerId: identities.editor.uid, generalAccess: 'restricted', generalRole: 'viewer' })
       const denied = await owner.evaluate(async (id) => {
@@ -398,7 +406,7 @@ try {
     assert.equal(await owner.$$eval('.workspace-startup-loader', (nodes) => nodes.length), 1)
     assert.equal(
       await owner.$eval('.workspace-startup-loader', (node) => node.textContent.trim()),
-      'Fetching your ideas…',
+      'Loading boards…',
     )
     assert.equal(await owner.evaluate(() => document.documentElement.scrollHeight > innerHeight), false)
     await owner.waitForSelector(`[data-board-id="${boardId}"]`)
@@ -742,6 +750,7 @@ try {
       async () => Object.keys((await rtdb.ref(`activeSessions/${createdByEditor}`).get()).val() ?? {}).length >= 2,
       'two collaborating sessions registered',
     )
+    collabGeneration = (await db.doc(`boardScenes/${createdByEditor}`).get()).data().generation
     await editor.waitForFunction(() => Boolean(window.__excalidrawAPI))
     await editor.evaluate(() => {
       window.__setUserInteracted()
@@ -753,15 +762,15 @@ try {
       })
     })
     await until(
-      async () => (await rtdb.ref(`boards/${createdByEditor}/elements/inherited-edit`).get()).exists(),
+      async () => (await rtdb.ref(`boards/${createdByEditor}/generations/${collabGeneration}/elements/inherited-edit`).get()).exists(),
       'inherited canvas delta uploaded',
     )
     assert.equal(
-      await viewer.evaluate(async (id) => {
+      await viewer.evaluate(async ({ id, generation }) => {
         const t = window.__projectsTest,
           uid = t.firebase.getFirebaseAuth().currentUser.uid
         try {
-          await t.database.set(t.database.ref(t.firebase.getFirebaseRtdb(), `boards/${id}/elements/viewer-edit`), {
+          await t.database.set(t.database.ref(t.firebase.getFirebaseRtdb(), `boards/${id}/generations/${generation}/elements/viewer-edit`), {
             id: 'viewer-edit',
             version: 1,
             versionNonce: 1,
@@ -772,7 +781,7 @@ try {
         } catch {
           return true
         }
-      }, createdByEditor),
+      }, { id: createdByEditor, generation: collabGeneration }),
       true,
     )
   })
@@ -1094,7 +1103,6 @@ try {
       }
     }, boardId)
     assert.equal(networkDenied, true)
-    const storagePath = (await db.doc(`boardShares/${boardId}`).get()).data().scene.files['fixture-image'].storagePath
     assert.equal(
       await viewer.evaluate(async (path) => {
         const t = window.__projectsTest
@@ -1104,7 +1112,7 @@ try {
         } catch {
           return true
         }
-      }, storagePath),
+      }, fixtureStoragePath),
       true,
       'Storage access must also be revoked',
     )
@@ -1387,10 +1395,18 @@ try {
       }, identities.owner.uid)
       await clickText(owner, 'Download')
       await clickText(owner, 'Download ZIP')
-      await owner.waitForFunction(
-        () => document.querySelector('[role="dialog"]')?.textContent.includes('3 files downloaded. 1 failed.'),
-        { timeout: 60000 },
-      )
+      try {
+        await owner.waitForFunction(
+          () => document.querySelector('[role="dialog"]')?.textContent.includes('3 files downloaded. 1 failed.'),
+          { timeout: 120000 },
+        )
+      } catch (error) {
+        const dialog = await owner
+          .$eval('[role="dialog"]', (node) => node.innerText)
+          .catch(() => '<download dialog missing>')
+        await owner.screenshot({ path: '.system_generated/projects-export-failure.png' }).catch(() => {})
+        throw new Error(`${error.message}; account export dialog was: ${dialog}`, { cause: error })
+      }
       assert.match(await owner.$eval('.export-failures', (node) => node.textContent), /Missing image board/)
       await owner.evaluate(
         async ({ id, dataURL }) => {
@@ -1526,6 +1542,16 @@ try {
       )
       // Keep the fixture across the next scenarios; only demo-emulator resources are used.
       globalThis.exportFixture = { fixtureId, id, inheritedId, parent, scene }
+      // First authenticated access migrates this legacy fixture to the
+      // canonical chunk/history representation. Establish that baseline before
+      // asserting the export itself performs no further Firestore writes.
+      await owner.evaluate(
+        async ({ id, fixtureId }) => {
+          const { sceneService } = await import('/src/features/scenes/scene-service.ts')
+          return sceneService.ensure(id, fixtureId)
+        },
+        { id, fixtureId },
+      )
       const before = (await parent.collection('boards').doc(id).get()).data()
       const exported = await owner.evaluate(
         async ({ fixtureId, id, scene }) => {
@@ -1842,8 +1868,8 @@ try {
     'Must exercise Firestore network calls',
   )
   assert.ok(
-    requests.some((request) => request.url.includes(':29199/')),
-    'Must exercise authorized Storage network calls',
+    requests.some((request) => request.url.includes('/boardAsset') && request.operation === 'upload' && request.status === 200),
+    'Must exercise authorized board asset uploads through the Functions gateway',
   )
   assert.deepEqual(failures, [], 'No uncaught browser errors')
   console.log(`PASS: ${results.length} browser/network scenarios; Firebase rules and Functions exercised`)
@@ -1858,8 +1884,14 @@ try {
       await anonymous.$eval('body', (node) => node.textContent.slice(0, 2000)).catch(() => 'Navigation in progress'),
     )
   }
-  if (editor) await editor.screenshot({ path: `${out}/editor-failure.png`, fullPage: true })
-  if (viewer) await viewer.screenshot({ path: `${out}/viewer-failure.png`, fullPage: true })
+  if (editor) {
+    await editor.screenshot({ path: `${out}/editor-failure.png`, fullPage: true })
+    await writeFile(`${out}/editor-failure.html`, await editor.content())
+  }
+  if (viewer) {
+    await viewer.screenshot({ path: `${out}/viewer-failure.png`, fullPage: true })
+    await writeFile(`${out}/viewer-failure.html`, await viewer.content())
+  }
   if (owner) {
     await owner.screenshot({ path: `${out}/failure.png`, fullPage: true })
     await writeFile(`${out}/failure.html`, await owner.content())

@@ -9,9 +9,11 @@ import {
 import {
   cleanPayload,
   MAX_ELEMENT_PAYLOAD_BYTES,
+  serializeCanonicalElement,
   createDeltaPatch,
   applyDeltaPatch,
   haveElementPropertiesChanged,
+  shouldReplaceElementRecord,
   computeSessionEditorStatus,
 } from '../apps/whiteboard/src/features/collaboration/collaboration-service'
 import { getCollaboratorInitials } from '../apps/whiteboard/src/features/collaboration/collaborator-bar'
@@ -259,6 +261,26 @@ async function runAllEdgeCaseTests() {
     const normalElement = { id: 'rect_1', type: 'rectangle', x: 10, y: 20 }
     const normalSerialized = JSON.stringify(normalElement)
     assert.ok(normalSerialized.length < MAX_ELEMENT_PAYLOAD_BYTES, 'Normal element passes size check')
+
+    // Firebase websocket frames slice JS strings before encoding each frame.
+    // Put the high surrogate at the final UTF-16 slot of a 16KiB frame.
+    const unicodeElement = { text: 'a'.repeat(16374) + '🌎漢字é' }
+    const rawUnicode = JSON.stringify(unicodeElement)
+    const frameTransport = (value: string) => {
+      const frames = []
+      for (let offset = 0; offset < value.length; offset += 16384)
+        frames.push(Buffer.from(value.slice(offset, offset + 16384), 'utf8').toString('utf8'))
+      return frames.join('')
+    }
+    assert.notEqual(frameTransport(rawUnicode), rawUnicode, 'Raw surrogate pair split by websocket framing reproduces text corruption')
+    const safeUnicode = serializeCanonicalElement(unicodeElement)
+    assert.ok(!/[\u0080-\uffff]/.test(safeUnicode), 'Canonical RTDB wire JSON contains only ASCII code units')
+    assert.deepEqual(JSON.parse(frameTransport(safeUnicode)), unicodeElement, 'Framed wire records preserve nonBMP, BMP and combining text exactly')
+    assert.equal(serializeCanonicalElement(normalElement), normalSerialized, 'Small ASCII record bytes remain unchanged')
+    assert.equal(Buffer.byteLength(safeUnicode, 'utf8'), safeUnicode.length, 'Escaped wire length is its actual UTF8 byte budget')
+    const budgetElement = { text: '🌎'.repeat(22000) }
+    assert.ok(JSON.stringify(budgetElement).length < MAX_ELEMENT_PAYLOAD_BYTES, 'Original code-unit length can appear under budget')
+    assert.ok(serializeCanonicalElement(budgetElement).length >= MAX_ELEMENT_PAYLOAD_BYTES, 'Payload budget must count actual escaped wire bytes')
 
     // Malicious oversized element (>256KB memory bomb)
     const giantPayload = {
@@ -834,8 +856,31 @@ async function runAllEdgeCaseTests() {
     passedCount++
   }
 
+  // ----------------------------------------------------
+  // EDGE CASE 18: Delayed RTDB writes cannot roll back an LWW winner
+  // ----------------------------------------------------
+  console.log('▶ Test 18: RTDB transaction ordering preserves the LWW winner')
+  {
+    const older = { id: 'shape', version: 8, versionNonce: 1209693665, data: 'v8' }
+    const newer = { id: 'shape', version: 9, versionNonce: 2114793889, data: 'v9' }
+    const lowerNonceTieWinner = { id: 'shape', version: 9, versionNonce: 2017444995, data: 'v9-tie-winner' }
+    let stored: typeof older | typeof newer | typeof lowerNonceTieWinner | null = null
+    for (const candidate of [newer, older, lowerNonceTieWinner, older]) {
+      if (shouldReplaceElementRecord(stored, candidate)) stored = candidate
+    }
+    assert.equal(stored?.data, 'v9-tie-winner', 'A delayed lower-version write cannot replace the current record')
+    assert.equal(stored?.versionNonce, 2017444995, 'Equal-version writes use the lower nonce as the winner')
+    assert.equal(
+      shouldReplaceElementRecord(stored, { ...stored }),
+      false,
+      'A replay of the exact winner is a no-op and cannot churn author/timestamp metadata',
+    )
+    console.log('   ✓ Out-of-order stale writes cannot replace the deterministic version/nonce winner')
+    passedCount++
+  }
+
   console.log('\n====================================================')
-  console.log(`🎉 ALL ${passedCount}/17 COLLABORATION EDGE CASES VERIFIED!`)
+  console.log(`🎉 ALL ${passedCount}/18 COLLABORATION EDGE CASES VERIFIED!`)
   console.log('====================================================\n')
 }
 

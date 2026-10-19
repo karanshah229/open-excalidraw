@@ -51,7 +51,15 @@
     "test:scenes": "node packages/mcp/node_modules/tsx/dist/cli.mjs tests/scene-codec.test.ts && node packages/mcp/node_modules/tsx/dist/cli.mjs tests/import-scene.test.ts",
     "test:e2e:scenes": "node tests/run-regression-tests.mjs --test=chunked-scenes.test.mjs",
     "test:e2e:scenes:five-chunks": "node tests/run-regression-tests.mjs --test=five-chunk-scene.test.mjs",
-    "test:scenes:backend": "pnpm --filter @agentic-whiteboard/functions build && firebase emulators:exec --only firestore,database --project demo-regression --config regression.firebase.json 'node tests/scene-backend.test.mjs && node tests/scene-rtdb-cleanup.test.mjs'"
+    "test:history:local": "node tests/board-history-local.test.mjs",
+    "test:history:model": "node packages/mcp/node_modules/tsx/dist/cli.mjs tests/board-history-model.test.ts",
+    "test:history:backend": "pnpm --filter @agentic-whiteboard/functions build && firebase emulators:exec --only firestore,database,storage --project demo-regression --config board-history.firebase.json 'node tests/board-history-backend.test.mjs'",
+    "test:e2e:history": "node tests/run-regression-tests.mjs --history",
+    "test:e2e:history:legacy": "node tests/run-regression-tests.mjs --legacy-functions --test=board-history-legacy-ui.test.mjs",
+    "test:e2e:board-info": "node tests/run-regression-tests.mjs --test=board-rail-ui.test.mjs",
+    "test:scenes:backend": "pnpm --filter @agentic-whiteboard/functions build && firebase emulators:exec --only firestore,database --project demo-regression --config regression.firebase.json 'node tests/scene-backend.test.mjs && node tests/scene-rtdb-cleanup.test.mjs'",
+    "test:e2e:history:divergence": "node tests/run-regression-tests.mjs --test=board-history-divergence-ui.test.mjs",
+    "test:e2e:history:divergence:lost-reply": "E2E_DIVERGENCE_LOST_REPLY=true node tests/run-regression-tests.mjs --test=board-history-divergence-ui.test.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

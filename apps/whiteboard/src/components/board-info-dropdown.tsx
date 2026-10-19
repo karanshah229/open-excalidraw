@@ -111,13 +111,25 @@ export function BoardInfoDropdown({
   return (
     <Popover.Root open={isOpen} onOpenChange={setIsOpen}>
       <Popover.Trigger asChild>
-        <button type="button" className="board-info-trigger" title="Board details" aria-label="Board details">
-          <Info size={14} />
+        <button
+          type="button"
+          className="header-info-trigger"
+          data-testid="board-info-open"
+          title="Board details"
+          aria-label="Board details"
+        >
+          <Info size={19} />
         </button>
       </Popover.Trigger>
 
       <Popover.Portal>
-        <Popover.Content className="board-info-popover animate-fade-in" align="end" sideOffset={8}>
+        <Popover.Content
+          className="board-info-popover animate-fade-in"
+          side="bottom"
+          align="end"
+          sideOffset={8}
+          collisionPadding={12}
+        >
           <div className="board-info-header">
             <span className="board-info-header-title">Board details</span>
           </div>

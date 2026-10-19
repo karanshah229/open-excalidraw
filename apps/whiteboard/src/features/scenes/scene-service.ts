@@ -2,7 +2,10 @@ import type { BoardScene } from '@agentic-whiteboard/storage'
 import { doc, getDocFromServer, onSnapshot, setDoc, Timestamp, serverTimestamp } from 'firebase/firestore'
 import { getFirebaseAuth, getFirestoreDb } from '../../lib/firebase'
 import { projectCall } from '../sharing/project-service'
+import { LegacySceneHistoryError, readHistorySnapshot } from '../history/history-service'
+import { assertHistoryMutationAllowed, historyEditingState } from '../history/history-editing-gate'
 import { reconcileElementsLWW } from '../collaboration/reconcile'
+import { ensureAuthenticatedUser } from '../collaboration/anonymous-user'
 import {
   assembleScene,
   digestString,
@@ -20,14 +23,38 @@ export type SceneHead = {
   headRevisionId: string
   generation: number
   sceneFormatVersion: number
+  historyProtocolVersion?: number
+  restoreFence?: number
+  restoreOperationId?: string | null
+  currentVersionId?: string | null
+  readContextId?: string
+  notesPageCount?: number
+  currentBranchId?: string | null
+  historyEpoch?: number
+  boardName?: string
+  nameRevision?: number
+  notesRevisionId?: string | null
 }
 export type LoadedScene = {
   scene: BoardScene
   revisionId: string
   generation: number
   chunks: PackedChunk[]
+  restoreFence?: number
+  historyProtocolVersion?: number
+  readContextId?: string
+  notesPageCount?: number
+  boardName?: string
+  nameRevision?: number
+  currentVersionId?: string | null
 }
-type Receipt = { revisionId: string; generation: number; candidateDigest: string; committedAt: string }
+type Receipt = {
+  revisionId: string
+  generation: number
+  candidateDigest: string
+  committedAt: string
+  versionId?: string
+}
 export class SceneGenerationError extends Error {
   constructor() {
     super(
@@ -56,15 +83,41 @@ async function inBatches<T, R>(items: T[], work: (item: T, index: number) => Pro
 function checkedIdentity(uid: string) {
   if (getFirebaseAuth()?.currentUser?.uid !== uid) throw new Error('Account changed while saving the board.')
 }
-// Cache immutable payload bytes only. Every load first authorizes against a fresh head;
-// account changes/permission failures discard cached entries. SDK access is never inferred from cache.
+// Chunk payloads are immutable. Reuse a complete scene only while a server-confirmed
+// head listener pins the same revision; account changes and listener errors discard it.
 const chunkCache = new Map<string, PackedChunk>()
+const recentSceneCache = new Map<string, { identity: string | undefined; expiresAt: number; value: LoadedScene; bytes: number }>()
+const observedHeads = new Map<string, { revisionId: string; generation: number }>()
+const headSubscriptionCounts = new Map<string, number>()
+let recentSceneCacheBytes = 0
 let cacheUser: string | undefined
 const MAX_CACHED_BYTES = 32 * 1024 * 1024
+const MAX_RECENT_SCENE_CACHE_BYTES = 16 * 1024 * 1024
 let cachedBytes = 0
 function clearSceneCache() {
   chunkCache.clear()
+  recentSceneCache.clear()
+  observedHeads.clear()
   cachedBytes = 0
+  recentSceneCacheBytes = 0
+}
+function dropRecentScene(boardId: string) {
+  const cached = recentSceneCache.get(boardId)
+  if (!cached) return
+  recentSceneCacheBytes -= cached.bytes
+  recentSceneCache.delete(boardId)
+}
+function cacheRecentScene(boardId: string, identity: string | undefined, value: LoadedScene) {
+  dropRecentScene(boardId)
+  const bytes = Math.max(1, value.chunks.reduce((total, chunk) => total + new TextEncoder().encode(chunk.payload).byteLength, 0))
+  if (bytes > MAX_RECENT_SCENE_CACHE_BYTES) return
+  while (recentSceneCacheBytes + bytes > MAX_RECENT_SCENE_CACHE_BYTES) {
+    const oldest = recentSceneCache.keys().next().value
+    if (!oldest) break
+    dropRecentScene(oldest)
+  }
+  recentSceneCache.set(boardId, { identity, expiresAt: Date.now() + 30_000, value, bytes })
+  recentSceneCacheBytes += bytes
 }
 function cacheIdentity() {
   const user = getFirebaseAuth()?.currentUser?.uid
@@ -167,6 +220,7 @@ async function readRevision(boardId: string, revisionId: string, generation: num
   return { scene: (await assembleScene(chunks)) as BoardScene, revisionId, generation, chunks }
 }
 const pendingKey = (uid: string, boardId: string) => `scene-upload:v1:${uid}:${boardId}`
+const sceneLoadRequests = new Map<string, Promise<LoadedScene | null>>()
 function pendingCandidate(
   uid: string,
   boardId: string,
@@ -190,40 +244,139 @@ export const sceneService = {
     return projectCall('ensureBoardScene', { boardId, ...(projectId ? { projectId } : {}) })
   },
   async load(boardId: string): Promise<LoadedScene | null> {
+    const auth = getFirebaseAuth()
+    if (auth) await auth.authStateReady()
+    const identity = cacheIdentity()
+    const cached = recentSceneCache.get(boardId)
+    const observed = observedHeads.get(boardId)
+    // Repeated route/share hydrators may reuse an authorized immutable scene
+    // only while a server-confirmed Firestore head listener proves it current.
+    if (cached && cached.identity === identity && cached.expiresAt > Date.now() && observed &&
+      observed.revisionId === cached.value.revisionId && observed.generation === cached.value.generation)
+      return cached.value
+    if (cached) dropRecentScene(boardId)
+    const active = sceneLoadRequests.get(boardId)
+    if (active) return active
+    const request = sceneService.loadUnshared(boardId).finally(() => {
+      if (sceneLoadRequests.get(boardId) === request) sceneLoadRequests.delete(boardId)
+    })
+    sceneLoadRequests.set(boardId, request)
+    return request
+  },
+  async loadUnshared(boardId: string): Promise<LoadedScene | null> {
     requireOnline()
+    // Establish a guest identity before capturing the cache identity. Creating
+    // it inside the history read would look like an account switch mid-load.
+    const auth = getFirebaseAuth()
+    if (auth) {
+      await auth.authStateReady()
+      if (!auth.currentUser && !await ensureAuthenticatedUser(auth)) throw new Error('Sign in to load this board.')
+    }
     const identity = cacheIdentity()
     try {
-      let head = await getDocFromServer(doc(requireDb(), 'boardScenes', boardId))
-      if (!head.exists()) return null
-      if (head.data().headRevisionId === null) {
-        await sceneService.ensure(boardId)
-        head = await getDocFromServer(doc(requireDb(), 'boardScenes', boardId))
+      let data: SceneHead
+      let snapshot: Awaited<ReturnType<typeof readHistorySnapshot>> | Awaited<ReturnType<typeof readRevision>>
+      try {
+        // One authorized callable returns the head metadata, manifest references,
+        // and first bounded chunk batch. Legacy boards fall back to Firestore.
+        snapshot = await readHistorySnapshot(boardId, undefined, false, false, undefined, 'current-scene')
+        data = {
+          headRevisionId: snapshot.revisionId,
+          generation: snapshot.generation,
+          sceneFormatVersion: SCENE_FORMAT_VERSION,
+          historyProtocolVersion: snapshot.historyProtocolVersion,
+          restoreFence: snapshot.restoreFence,
+          currentVersionId: snapshot.currentVersionId,
+          boardName: 'entry' in snapshot ? snapshot.entry.name : undefined,
+          nameRevision: snapshot.nameRevision,
+        }
+      } catch (error) {
+        // The boardHistory callable was added after the original scene loader.
+        // During a staged Functions rollout, older runtimes can report a
+        // missing callable as either not-found or internal (depending on the
+        // callable router version). Fall back to the protected Firestore
+        // head/revision reads; a genuinely missing board is confirmed by the
+        // head lookup below and returns null there.
+        const code = (error as { code?: string }).code
+        if (!(error instanceof LegacySceneHistoryError) && code !== 'functions/not-found' && code !== 'functions/internal') throw error
+        let head = await getDocFromServer(doc(requireDb(), 'boardScenes', boardId))
+        if (!head.exists()) return null
+        if (head.data().headRevisionId === null) {
+          await sceneService.ensure(boardId)
+          head = await getDocFromServer(doc(requireDb(), 'boardScenes', boardId))
+        }
+        data = head.data() as SceneHead
+        if (!data.headRevisionId || data.sceneFormatVersion !== SCENE_FORMAT_VERSION)
+          throw new Error('Unsupported board scene format.', { cause: error })
+        // A concurrent first save may upgrade the board to history protocol 1
+        // between the initial callable response and this legacy fallback. The
+        // Firestore revision path is intentionally closed for upgraded boards,
+        // so retry through the history gateway after observing the new head.
+        snapshot = data.historyProtocolVersion === 1
+          ? await readHistorySnapshot(boardId, undefined, false, false, undefined, 'current-scene')
+          : await readRevision(boardId, data.headRevisionId, data.generation)
       }
-      const data = head.data() as SceneHead
-      if (!data.headRevisionId || data.sceneFormatVersion !== SCENE_FORMAT_VERSION)
-        throw new Error('Unsupported board scene format.')
-      const loaded = await readRevision(boardId, data.headRevisionId, data.generation)
+      const loaded: LoadedScene = {
+        ...snapshot,
+        restoreFence: data.restoreFence ?? 0,
+        historyProtocolVersion: data.historyProtocolVersion,
+        boardName: data.boardName,
+        nameRevision: data.nameRevision,
+        currentVersionId: data.currentVersionId,
+        readContextId: 'readContextId' in snapshot ? snapshot.readContextId : undefined,
+        notesPageCount: 'notesPageCount' in snapshot ? snapshot.notesPageCount : undefined,
+      }
       if (identity !== getFirebaseAuth()?.currentUser?.uid) throw new Error('Account changed while loading the board.')
+      cacheRecentScene(boardId, identity, loaded)
       return loaded
     } catch (error) {
       clearSceneCache()
       throw error
     }
   },
-  subscribeHead(boardId: string, onChange: () => void, onError?: (error: unknown) => void): () => void {
+  subscribeHead(boardId: string, onChange: (head: SceneHead | undefined) => void, onError?: (error: unknown) => void): () => void {
     const db = getFirestoreDb()
     if (!db) return () => {}
-    return onSnapshot(doc(db, 'boardScenes', boardId), onChange, (error) => {
+    headSubscriptionCounts.set(boardId, (headSubscriptionCounts.get(boardId) ?? 0) + 1)
+    const unsubscribe = onSnapshot(doc(db, 'boardScenes', boardId), { includeMetadataChanges: true }, (snapshot) => {
+      const head = snapshot.exists() ? snapshot.data() as SceneHead : undefined
+      if (!snapshot.metadata.fromCache) {
+        if (head?.headRevisionId) {
+          const next = { revisionId: head.headRevisionId, generation: head.generation }
+          const cached = recentSceneCache.get(boardId)
+          if (cached && (cached.value.revisionId !== next.revisionId || cached.value.generation !== next.generation))
+            dropRecentScene(boardId)
+          observedHeads.set(boardId, next)
+        } else {
+          observedHeads.delete(boardId)
+          dropRecentScene(boardId)
+        }
+      }
+      onChange(head)
+    }, (error) => {
+      observedHeads.delete(boardId)
+      dropRecentScene(boardId)
       clearSceneCache()
       onError?.(error)
     })
+    return () => {
+      unsubscribe()
+      const remaining = (headSubscriptionCounts.get(boardId) ?? 1) - 1
+      if (remaining > 0) headSubscriptionCounts.set(boardId, remaining)
+      else {
+        headSubscriptionCounts.delete(boardId)
+        observedHeads.delete(boardId)
+      }
+    }
   },
   async commit(
     boardId: string,
     source: BoardScene,
-    options: { expectedGeneration?: number } = {},
+    options: { expectedGeneration?: number; expectedFence?: number } = {},
   ): Promise<LoadedScene> {
     requireOnline()
+    assertHistoryMutationAllowed(boardId)
+    const editingEpoch = historyEditingState(boardId).epoch
     const uid = getFirebaseAuth()?.currentUser?.uid
     if (!uid) throw new Error('Sign in to save this board.')
     const sourceDigest = await digestString(canonicalStringify(source))
@@ -240,7 +393,9 @@ export const sceneService = {
         forgetCandidate(uid, boardId)
         // The receipt acknowledges this candidate, but a later committed head must
         // remain the scene we display/cache after an ambiguous-response recovery.
-        return await readRevision(boardId, head.data()!.headRevisionId, receipt.generation)
+        return head.data()?.historyProtocolVersion === 1
+          ? (await sceneService.load(boardId))!
+          : await readRevision(boardId, head.data()!.headRevisionId, receipt.generation)
       } catch (error) {
         const code = (error as { code?: string }).code
         if (code !== 'functions/aborted' && code !== 'functions/not-found' && code !== 'functions/failed-precondition')
@@ -250,6 +405,7 @@ export const sceneService = {
     }
     for (let attempt = 0; attempt < 4; attempt++) {
       checkedIdentity(uid)
+      assertHistoryMutationAllowed(boardId, editingEpoch)
       let base = await sceneService.load(boardId)
       if (!base) {
         await sceneService.ensure(boardId)
@@ -257,6 +413,12 @@ export const sceneService = {
       }
       if (!base) throw new Error('Board scene has not been registered.')
       if (base.generation !== (options.expectedGeneration ?? 1)) throw new SceneGenerationError()
+      if (
+        base.historyProtocolVersion === 1 &&
+        options.expectedFence !== undefined &&
+        options.expectedFence !== base.restoreFence
+      )
+        throw new Error('The board restore fence changed. Refresh before retrying this save.')
       const scene: BoardScene = {
         ...base.scene,
         ...source,
@@ -286,6 +448,9 @@ export const sceneService = {
       const createdAt = serverTimestamp()
       const candidate = {
         uploaderUid: uid,
+        ...(base.historyProtocolVersion === 1
+          ? { expectedFence: options.expectedFence ?? base.restoreFence ?? 0 }
+          : {}),
         expectedHeadRevisionId: base.revisionId,
         generation: base.generation,
         sceneFormatVersion: SCENE_FORMAT_VERSION,
@@ -338,12 +503,23 @@ export const sceneService = {
       }
       checkedIdentity(uid)
       try {
+        assertHistoryMutationAllowed(boardId, editingEpoch)
         const receipt = await projectCall<Receipt>('commitBoardScene', { boardId, commitId })
         if (receipt.candidateDigest !== candidateDigest || receipt.generation !== base.generation)
           throw new Error('Invalid scene commit receipt.')
         forgetCandidate(uid, boardId)
         chunks.forEach((chunk) => cacheChunk(boardId, chunk))
-        return { scene, chunks, revisionId: receipt.revisionId, generation: receipt.generation }
+        return {
+          scene,
+          chunks,
+          revisionId: receipt.revisionId,
+          generation: receipt.generation,
+          restoreFence: base.restoreFence,
+          historyProtocolVersion: base.historyProtocolVersion,
+          boardName: base.boardName,
+          nameRevision: base.nameRevision,
+          currentVersionId: receipt.versionId ?? base.currentVersionId,
+        }
       } catch (error) {
         if ((error as { code?: string }).code !== 'functions/aborted') throw error
         forgetCandidate(uid, boardId)

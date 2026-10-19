@@ -84,20 +84,43 @@ async function rendered(page) {
 async function cloudSaved(page, boardId, fileId, shared, expectedPosition) {
   await page.waitForFunction(
     async ({ boardId, fileId, shared, expectedPosition }) => {
-      const { readFormatScene } = await import('/tests/image-formats-fixture.ts')
-      const scene = await readFormatScene(boardId, shared)
-      const file = scene?.files?.[fileId]
-      const element = scene?.elements?.find((el) => el.fileId === fileId)
-      return (
-        file?.storagePath &&
-        file.dataURL === '' &&
-        element &&
-        (!expectedPosition || (element.x === expectedPosition.x && element.y === expectedPosition.y))
-      )
+      try {
+        const { readFormatScene } = await import('/tests/image-formats-fixture.ts')
+        const scene = await readFormatScene(boardId, shared)
+        const file = scene?.files?.[fileId]
+        const element = scene?.elements?.find((el) => el.fileId === fileId)
+        return (
+          file?.storagePath &&
+          file.dataURL === '' &&
+          element &&
+          (!expectedPosition || (element.x === expectedPosition.x && element.y === expectedPosition.y))
+        )
+      } catch (error) {
+        // A current-version read is leased to one immutable manifest. During
+        // an active save the server may reject that lease with 409; poll again
+        // for the newly committed head instead of treating it as absent data.
+        if (error instanceof Error && /changed while opening this version|\[409\]/.test(error.message)) return false
+        throw error
+      }
     },
     { timeout: live ? 90000 : 30000, polling: 500 },
     { boardId, fileId, shared, expectedPosition },
   )
+}
+async function waitForAssetTrafficToSettle(calls, quietMs = 800, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs
+  let lastCount = calls.length
+  let quietSince = Date.now()
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    if (calls.length !== lastCount) {
+      lastCount = calls.length
+      quietSince = Date.now()
+    } else if (Date.now() - quietSince >= quietMs) {
+      return
+    }
+  }
+  throw new Error('Image asset traffic did not settle before measuring the scene movement')
 }
 try {
   await server.listen()
@@ -111,6 +134,7 @@ try {
     const result = { format, status: 'failed', checks: [], network: {}, errors: [] }
     const page = await browser.newPage()
     const calls = []
+    const callDetails = []
     const probe = await browser.newPage()
     try {
       await probe.setContent('<input type="file">')
@@ -135,7 +159,9 @@ try {
     page.on('request', (request) => {
       if (new URL(request.url()).pathname.endsWith('/boardAsset') && request.method() === 'POST') {
         try {
-          calls.push(JSON.parse(request.postData()).data.operation)
+          const { data } = JSON.parse(request.postData())
+          calls.push(data.operation)
+          callDetails.push({ at: Date.now(), operation: data.operation, boardId: data.boardId, fileId: data.fileId })
         } catch {
           /* preflight */
         }
@@ -256,11 +282,27 @@ try {
         )
         assert.ok(calls.slice(beforeSharedReload).includes('read'), 'Shared reload must fetch stored bytes')
         await rendered(page)
+        // Wait for the metadata-only local save from cache removal to finish its
+        // history outbox replay before measuring movement traffic. Otherwise a
+        // delayed replay can read the same asset during the pointer gesture.
+        await page.waitForFunction(
+          async (id) => {
+            const { boardHistoryStore } = await import('/tests/image-formats-fixture.ts')
+            // Shared editors can have a local board shadow that is not owned
+            // by their active account. Its workspace syncStatus is not the
+            // cloud acknowledgement for this history-only replay; the next
+            // assertions independently verify the canonical shared scene.
+            return (await boardHistoryStore.listOutbox(id)).length === 0
+          },
+          { timeout: 30000 },
+          boardId,
+        )
         result.checks.push('shared cloud reload with cached bytes removed')
       }
       await page.click('[data-testid="toolbar-selection"]')
       // Allow initial centering and hydration to finish before measuring a real pointer drag.
       await new Promise((resolve) => setTimeout(resolve, 700))
+      if (cloud) await waitForAssetTrafficToSettle(calls)
       const position = await page.evaluate((id) => {
         const api = window.__excalidrawAPI
         const el = api.getSceneElements().find((el) => el.fileId === id)
@@ -272,6 +314,7 @@ try {
         }
       }, uploaded.fileId)
       const beforeMove = calls.length
+      const movementStartedAt = Date.now()
       await page.mouse.move(position.x, position.y)
       await page.mouse.down()
       await page.mouse.move(position.x + 90, position.y + 60, { steps: 10 })
@@ -285,8 +328,12 @@ try {
         const el = window.__excalidrawAPI.getSceneElements().find((el) => el.fileId === id)
         return { x: el.x, y: el.y }
       }, uploaded.fileId)
-      if (cloud) await cloudSaved(page, boardId, uploaded.fileId, true, expectedPosition)
-      else
+      if (cloud) {
+        // Measure only transfers caused by the pointer edit. The authenticated
+        // cloud snapshot assertion below is a separate read path and must not
+        // be counted as image traffic from dragging.
+        await waitForAssetTrafficToSettle(calls, 1000)
+      } else
         await page.waitForFunction(
           async ({ boardId, fileId, expectedPosition }) => {
             const { workspaceApi } = await import('/src/features/workspace/workspace-api.ts')
@@ -297,8 +344,10 @@ try {
           { boardId, fileId: uploaded.fileId, expectedPosition },
         )
       const movementTransfers = calls.slice(beforeMove).filter((op) => ['upload', 'read'].includes(op)).length
+      result.network.movementAssetRequests = callDetails.filter((call) => call.at >= movementStartedAt)
       assert.equal(movementTransfers, 0, 'Movement must not transfer image bytes')
       result.checks.push('real mouse movement persists position with zero image byte transfers')
+      if (cloud) await cloudSaved(page, boardId, uploaded.fileId, true, expectedPosition)
       if (cloud)
         assert.equal(
           calls.filter((op) => op === 'upload').length,
@@ -306,6 +355,7 @@ try {
           'Sharing and moving reuse the initial private object',
         )
       result.network = {
+        ...result.network,
         uploads: calls.filter((op) => op === 'upload').length,
         reads: calls.filter((op) => op === 'read').length,
         movementTransfers,
@@ -316,7 +366,45 @@ try {
     } catch (error) {
       result.failure = error.message
       result.failureStack = error.stack
-      result.network = { calls }
+      if (cloud && result.boardId)
+        result.history = await page.evaluate(async (id) => {
+          const { boardHistoryStore, workspaceApi, readFormatScene } = await import('/tests/image-formats-fixture.ts')
+          const [current, outbox, board, cloudScene, versions] = await Promise.all([
+            boardHistoryStore.getCommittedContent(id),
+            boardHistoryStore.listOutbox(id),
+            workspaceApi.loadBoard(id),
+            readFormatScene(id, true),
+            boardHistoryStore.list(id),
+          ])
+          const failed = outbox[0] ? await boardHistoryStore.get(id, outbox[0].localVersionId) : null
+          const comparable = (scene) => ({ ...scene, files: Object.fromEntries(Object.entries(scene?.files ?? {}).map(([key, file]) => [key, { ...file, dataURL: '' }])) })
+          const localScene = comparable(failed?.document.scene)
+          const remoteScene = comparable(cloudScene)
+          const diffs = []
+          const compare = (left, right, path = '') => {
+            if (diffs.length >= 20) return
+            if (left && right && typeof left === 'object' && typeof right === 'object') {
+              const keys = new Set([...Object.keys(left), ...Object.keys(right)])
+              for (const key of keys) compare(left[key], right[key], `${path}/${key}`)
+            } else if (JSON.stringify(left) !== JSON.stringify(right)) {
+              diffs.push({ path, local: JSON.stringify(left)?.slice(0, 300), cloud: JSON.stringify(right)?.slice(0, 300) })
+            }
+          }
+          compare(localScene, remoteScene)
+          return {
+            currentVersionId: current?.version.localVersionId,
+            currentCloudVersionId: current?.document.cloudVersionId,
+            currentSyncStatus: current?.document.syncStatus,
+            boardSyncStatus: board?.syncStatus,
+            outbox: outbox.map(({ localVersionId, retryState, lastError, reason }) => ({ localVersionId, retryState, lastError, reason })),
+            matchingVersions: versions.filter((version) => outbox.some((entry) => entry.localVersionId === version.localVersionId)),
+            failedVersionName: failed?.document.name,
+            cloudSceneName: current?.document.name,
+            sceneDiffs: diffs,
+            localNotes: Object.keys(failed?.notes ?? {}).sort(),
+          }
+        }, result.boardId).catch((diagnosticError) => ({ error: diagnosticError.message }))
+      result.network = { ...result.network, calls, allAssetRequests: callDetails }
       if (cloud && result.boardId)
         result.diagnostic = await page
           .evaluate(async (boardId) => {

@@ -55,8 +55,12 @@ if (imageCloud) {
   const tsx = 'packages/mcp/node_modules/tsx/dist/cli.mjs'
   await run('collaboration-unit', process.execPath, [tsx, 'tests/collab-edge-cases.test.ts'])
   await run('collaboration-load', process.execPath, [tsx, 'tests/collab-load-simulation.test.ts'])
+  await run('scene-signature', process.execPath, [tsx, 'tests/scene-signature.test.ts'])
+  await run('remote-scene-autosave', process.execPath, [tsx, 'tests/remote-scene-autosave.test.ts'])
   await run('slides-model', process.execPath, [tsx, 'tests/slides-model.test.ts'])
   await run('scene-codec', process.execPath, [tsx, 'tests/scene-codec.test.ts'])
+  await run('history-model', process.execPath, [tsx, 'tests/board-history-model.test.ts'])
+  await run('history-local', process.execPath, ['tests/board-history-local.test.mjs'])
   await run('board-loading', process.execPath, [tsx, 'tests/board-loading.test.ts'])
   await run('slides-browser', process.execPath, ['tests/run-slides-tests.mjs'])
   await run('slides-production', process.execPath, ['tests/slides-production.test.mjs'])

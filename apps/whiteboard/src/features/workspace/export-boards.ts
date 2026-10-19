@@ -158,7 +158,13 @@ async function capture(board: ExportBoard): Promise<Capture> {
         : published
       const rtdb = getFirebaseRtdb()
       if (rtdb) {
-        const elementsRef = ref(rtdb, `boards/${board.id}/elements`)
+        const db = getFirestoreDb()
+        const head = db ? (await getDoc(doc(db, 'boardScenes', board.id))).data() : undefined
+        const roomPath =
+          head?.historyProtocolVersion === 1
+            ? `boards/${board.id}/generations/${head.generation}/elements`
+            : `boards/${board.id}/elements`
+        const elementsRef = ref(rtdb, roomPath)
         let deltas
         try {
           deltas = await get(elementsRef)

@@ -44,6 +44,7 @@ async function runTest() {
         id,
         projectId: proj.id,
         name: 'Flash Test Board',
+        active: true,
         scene: {
           elements: [
             {
@@ -123,8 +124,8 @@ async function runTest() {
 
     // Verify UI status badge does NOT say 'Local save failed'
     const statusText = await page.evaluate(() => {
-      const pill = document.querySelector('.sync-status-pill')
-      return pill ? pill.textContent.trim() : null
+      const pill = document.querySelector('[data-testid="board-info-open"]')
+      return pill?.getAttribute('data-sync-status') ?? null
     })
     console.log(`▶ Status pill text: "${statusText}"`)
     assert.ok(

@@ -1,3 +1,8 @@
+import { authorizeHistoryAsset } from './board-history.js';
+import { assertContentWritable } from './board-history-model.js';
+import { loadSceneRevision } from './board-scenes.js';
+import { createHash } from 'node:crypto';
+import { reserveBoardAssetUpload, completeBoardAssetUpload } from './board-history-assets.js';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getStorage } from 'firebase-admin/storage';
 import { defineBoolean, defineString } from 'firebase-functions/params';
@@ -106,6 +111,36 @@ export const boardAsset = onCall({
             throw new HttpsError('permission-denied', 'Board was not found.');
         }
     }
+    const head = (await db.doc(`boardScenes/${boardId}`).get()).data();
+    if (head?.historyProtocolVersion === 1) {
+        const resourceId = createHash('sha256').update(storagePath).digest('hex');
+        const resource = (await db.doc(`boardScenes/${boardId}/assetResources/${resourceId}`).get()).data();
+        if (resource?.state === 'deleting')
+            throw new HttpsError('unavailable', 'Image cleanup is in progress; retry shortly.');
+        if (operation === 'upload') {
+            assertContentWritable(head, request.data.generation, request.data.expectedFence);
+            if (request.data.generation !== head.generation || request.data.expectedFence !== (head.restoreFence ?? 0))
+                throw new HttpsError('aborted', 'Refresh the board before uploading assets.');
+        }
+        else if (operation === 'read') {
+            const actor = {
+                // Public-link viewers may intentionally be unauthenticated. Policy
+                // authorization above has already constrained their access; use an
+                // empty UID so history authorization cannot mistake them for owners.
+                uid: request.auth?.uid ?? '',
+                email: request.auth?.token.email_verified ? request.auth.token.email : undefined,
+            };
+            if (request.data.contextId) {
+                await authorizeHistoryAsset(boardId, request.data.contextId, actor, storagePath);
+            }
+            else {
+                // Legacy/current callers cannot turn a board grant into arbitrary historical image access.
+                const { scene } = await loadSceneRevision(boardId, head);
+                if (!Object.values(scene.files ?? {}).some((file) => file.storagePath === storagePath))
+                    throw new HttpsError('permission-denied', 'Image is not in current board content. Open its eligible history context.');
+            }
+        }
+    }
     const file = getStorage().bucket().file(storagePath);
     let metadata;
     try {
@@ -120,8 +155,14 @@ export const boardAsset = onCall({
     if (operation === 'stat')
         return { exists };
     if (operation === 'upload') {
-        if (exists)
+        const reservationId = head?.historyProtocolVersion === 1
+            ? await reserveBoardAssetUpload(boardId, storagePath, request.data.generation, request.data.expectedFence)
+            : undefined;
+        if (exists) {
+            if (reservationId)
+                await completeBoardAssetUpload(boardId, storagePath, reservationId, String(metadata.generation));
             return { exists: true };
+        }
         const { dataURL, mimeType } = request.data;
         const match = typeof dataURL === 'string' && /^data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/]*={0,2})$/.exec(dataURL);
         if (!match || match[1] !== mimeType)
@@ -142,6 +183,10 @@ export const boardAsset = onCall({
         catch (error) {
             if (error.code !== 412)
                 throw error;
+        }
+        if (reservationId) {
+            const [savedMetadata] = await file.getMetadata();
+            await completeBoardAssetUpload(boardId, storagePath, reservationId, String(savedMetadata.generation));
         }
         return { exists: true };
     }

@@ -1,3 +1,5 @@
+import { boardHistoryStore } from '@agentic-whiteboard/storage'
+import { historyEditingState, assertHistoryMutationAllowed } from '../history/history-editing-gate'
 import { useEffect, useRef, useState } from 'react'
 import {
   acknowledgeNote,
@@ -66,12 +68,38 @@ export function SlideNotes({
       }
     }
     const sync = async () => {
-      if (!active || saving || blocked || !cloud || !navigator.onLine || !draftRef.current) return
+      if (!active || historyEditingState(boardId).blocked || saving || blocked || !draftRef.current) return
       saving = true
       try {
         await queue.current
         if (!active) return
         const draft = draftRef.current!
+        const gateEpoch = historyEditingState(boardId).epoch
+        if (draft.dirty && !readOnly) {
+          const current = await boardHistoryStore.getCommittedContent(boardId)
+          if (!current) throw new Error('Load the complete board before saving notes.')
+          assertHistoryMutationAllowed(boardId, gateEpoch)
+          const generation = historyEditingState(boardId).generation
+          if (generation !== undefined && (draft.generation ?? 1) !== generation) throw new Error('BOARD_GENERATION_CONFLICT')
+          await boardHistoryStore.saveNotes(boardId, { ...current.notes, [slideId]: draft.text }, {
+            changedFields: { notes: [slideId] },
+            ...(historyEditingState(boardId).restoreFence !== undefined ? { expectedFence: historyEditingState(boardId).restoreFence } : {}),
+            fieldBases: { notes: { [slideId]: draft.revision } },
+          })
+          if (!active || gateEpoch !== historyEditingState(boardId).epoch) return
+          window.dispatchEvent(new CustomEvent('board-history-local-save', { detail: { boardId } }))
+          if (!cloud) {
+            const next = await acknowledgeNote(draft, { text: draft.text, revision: draft.revision, conflict: false, updatedAt: null })
+            if (!active || gateEpoch !== historyEditingState(boardId).epoch) return
+            draftRef.current = next
+            setStatus(next.dirty ? 'Saving notes…' : 'All notes saved locally')
+            return
+          }
+        }
+        if (!cloud || !navigator.onLine) {
+          setStatus(cloud ? 'Saved on this device · offline' : 'All notes saved locally')
+          return
+        }
         const remote = await callNote(
           draft.dirty && !readOnly ? 'write' : 'read',
           boardId,
@@ -79,7 +107,7 @@ export function SlideNotes({
           slideId,
           draft.dirty && !readOnly ? draft : undefined,
         )
-        if (!active) return
+        if (!active || gateEpoch !== historyEditingState(boardId).epoch || historyEditingState(boardId).blocked) return
         // A read may race typing; do not replace or advance the base of that new draft.
         if (!draft.dirty && draftRef.current?.mutationId !== draft.mutationId) return
         if (remote.conflict) {
@@ -114,7 +142,9 @@ export function SlideNotes({
         await queue.current
         const cached = await readNoteDraft(key)
         if (!active) return
-        let draft = cached ?? { key, text: '', revision: 0, dirty: false, mutationId: crypto.randomUUID() }
+        const generation = historyEditingState(boardId).generation
+        const validCached = cloud && generation !== undefined && (cached?.generation ?? 1) !== generation ? undefined : cached
+        let draft = validCached ?? { key, text: '', revision: 0, dirty: false, generation, mutationId: crypto.randomUUID() }
         draftRef.current = draft
         setText(draft.text)
         if (cloud && navigator.onLine) {
@@ -140,6 +170,8 @@ export function SlideNotes({
       }
     })()
     window.addEventListener('online', retryRef.current)
+    const gateChanged = (event: Event) => { if ((event as CustomEvent).detail?.boardId === boardId && !(event as CustomEvent).detail?.blocked) retryRef.current() }
+    window.addEventListener('board-history-editing-state', gateChanged)
     const retry = retryRef.current
     const interval = window.setInterval(retry, 15000)
     return () => {
@@ -147,6 +179,7 @@ export function SlideNotes({
       window.clearTimeout(timer.current)
       window.clearInterval(interval)
       window.removeEventListener('online', retry)
+      window.removeEventListener('board-history-editing-state', gateChanged)
     }
   }, [boardId, projectId, slideId, identity, cloud, reload, readOnly])
 
@@ -160,11 +193,12 @@ export function SlideNotes({
   }, [boardId, slideId])
 
   function change(value: string) {
-    if (readOnly) return
+    if (readOnly || historyEditingState(boardId).blocked) return
     setText(value)
-    const draft = { ...draftRef.current!, text: value, dirty: true, mutationId: crypto.randomUUID() }
+    const gate = historyEditingState(boardId)
+    const draft = { ...draftRef.current!, text: value, dirty: true, generation: gate.generation, mutationId: crypto.randomUUID() }
     draftRef.current = draft
-    queue.current = queue.current.catch(() => {}).then(() => writeNoteDraft(draft))
+    queue.current = queue.current.catch(() => {}).then(() => writeNoteDraft(draft, gate.epoch))
     void queue.current.catch(() => setStatus('Could not save notes on this device'))
     setStatus(cloud ? 'Saving notes…' : 'Saved locally')
     window.clearTimeout(timer.current)
@@ -172,18 +206,25 @@ export function SlideNotes({
   }
 
   async function resolveConflict(useRemote: boolean) {
-    if (readOnly) return
+    if (readOnly || historyEditingState(boardId).blocked) return
     const remote = conflict!,
       draft = draftRef.current!
+    const gate = historyEditingState(boardId)
     await queue.current
+    assertHistoryMutationAllowed(boardId, gate.epoch)
+    if (useRemote) await boardHistoryStore.acceptRemoteNote(boardId, slideId, remote.text)
+    else await boardHistoryStore.rebaseNoteIntent(boardId, slideId, remote.revision)
+    assertHistoryMutationAllowed(boardId, gate.epoch)
     const next = {
       ...draft,
+      generation: gate.generation,
       text: useRemote ? remote.text : draft.text,
       revision: remote.revision,
       dirty: !useRemote,
       mutationId: crypto.randomUUID(),
     }
-    await writeNoteDraft(next)
+    await writeNoteDraft(next, gate.epoch)
+    window.dispatchEvent(new CustomEvent('board-history-local-save', { detail: { boardId } }))
     draftRef.current = next
     setText(next.text)
     setConflict(null)
