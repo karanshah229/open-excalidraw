@@ -43,7 +43,7 @@ async function pageIn(context) {
     } catch {
       return
     }
-    calls.push({ endpoint: request.url().split('/').pop(), data, at: Date.now() })
+    calls.push({ endpoint: request.url().split('/').pop(), data, peer: page.__tracePeer, at: Date.now() })
   })
   return page
 }
@@ -131,6 +131,7 @@ async function durable(id) {
 try {
   const ownerContext = await browser.createBrowserContext()
   const owner = await pageIn(ownerContext)
+  owner.__tracePeer = 'owner'
   await owner.goto(base)
   const fixture = await owner.evaluate(async () => {
     const { getFirebaseAuth } = await import('/src/lib/firebase.ts')
@@ -171,6 +172,35 @@ try {
   assert.equal(initial.scene.elements.length, fixture.count)
   assert.equal(initial.scene.elements[319].customData.payload, '319:' + '🌍'.repeat(1100))
   checkpoint('large board saved and assembled')
+  // Audit a true cold reload separately from the owner tab that created it.
+  // Keep observing for 30 seconds because the production HAR showed repeated
+  // full-scene reads several seconds after the first canvas render.
+  const loadAuditContext = await browser.createBrowserContext()
+  const loadAuditPage = await pageIn(loadAuditContext)
+  loadAuditPage.__tracePeer = 'load-audit'
+  await loadAuditPage.goto(base)
+  await loadAuditPage.evaluate(async (email) => {
+    const { signInExistingOwner } = await import('/tests/chunked-scene-fixture.ts')
+    await signInExistingOwner(email)
+  }, fixture.email)
+  const reloadStart = calls.length
+  const reloadStartedAt = Date.now()
+  await open(loadAuditPage, fixture.id, fixture.count)
+  const canvasReadyMs = Date.now() - reloadStartedAt
+  await new Promise((resolve) => setTimeout(resolve, 30_000))
+  const reloadReads = calls.slice(reloadStart).filter((call) => call.peer === 'load-audit' &&
+    call.data?.boardId === fixture.id && ['current-scene', 'chunks'].includes(call.data?.operation))
+  if (reloadReads.filter((call) => call.data.operation === 'current-scene').length !== 1)
+    console.error('RELOAD_READ_DIAGNOSTIC', JSON.stringify(reloadReads))
+  if (reloadReads.filter((call) => call.data.operation === 'chunks').length !== Math.ceil(Math.max(0, initial.refs.length - 3) / 6))
+    console.error('RELOAD_CHUNK_DIAGNOSTIC', JSON.stringify({ refs: initial.refs.length, reads: reloadReads }))
+  assert.equal(reloadReads.filter((call) => call.data.operation === 'current-scene').length, 1,
+    'Cold reload reads the current head and initial chunk batch exactly once')
+  assert.equal(reloadReads.filter((call) => call.data.operation === 'chunks').length,
+    Math.ceil(Math.max(0, initial.refs.length - 3) / 6),
+    'Cold reload fetches only the remaining bounded chunk batches')
+  checkpoint(`cold reload renders in ${canvasReadyMs}ms, makes ${reloadReads.length} scene reads, and does not repeat them for 30 seconds`)
+  await loadAuditContext.close()
   const pendingContext = await browser.createBrowserContext(),
     pendingPage = await pageIn(pendingContext)
   await pendingPage.goto(base)
@@ -228,6 +258,7 @@ try {
   assert.equal(await owner.evaluate(() => window.__lazyCollab?.isLazyCollabActive), false)
   const mountedElements = await owner.evaluate(() => window.__excalidrawAPI.getSceneElementsIncludingDeleted())
   const remotePage = await pageIn(ownerContext)
+  remotePage.__tracePeer = 'remote'
   await remotePage.goto(base)
   await remotePage.evaluate(
     async ({ id, scene }) => {
@@ -282,7 +313,7 @@ try {
             version: local.scene.elements.find((e) => e.id === 'large-0').version,
           },
         },
-        status: document.querySelector('.sync-status-pill')?.textContent,
+        status: document.querySelector('[data-testid="board-info-open"]')?.getAttribute('data-sync-status'),
         trace: window.__sceneTrace,
       }
     }, fixture.id)
@@ -295,7 +326,7 @@ try {
     false,
     'A private head update reaches the mounted editor without an active live scene room',
   )
-  await waitFor(async () => {
+  try { await waitFor(async () => {
     const local = await owner.evaluate(async (id) => {
       const { localBoard } = await import('/tests/chunked-scene-fixture.ts')
       return localBoard(id)
@@ -304,7 +335,16 @@ try {
       local?.cloudRevisionId === externalSnapshot.head.headRevisionId &&
       local?.scene.elements.find((e) => e.id === 'large-0')?.x === 777
     )
-  }, 'Owned shared head did not reach durable local cache')
+  }, 'Owned shared head did not reach durable local cache') } catch (error) {
+    const local = await owner.evaluate(async (id) => {
+      const { localBoard } = await import('/tests/chunked-scene-fixture.ts')
+      const value = await localBoard(id)
+      return { revisionId: value?.cloudRevisionId, generation: value?.cloudGeneration, status: value?.syncStatus,
+        sceneX: value?.scene.elements.find((e) => e.id === 'large-0')?.x }
+    }, fixture.id)
+    console.error('DURABLE HEAD DIAGNOSTIC', JSON.stringify({ expected: externalSnapshot.head.headRevisionId, local }))
+    throw error
+  }
   await remotePage.close()
   checkpoint('private mounted editor receives external head commit without collab activation')
   const begin = calls.length
@@ -422,11 +462,26 @@ try {
   )
   const viewerContext = await browser.createBrowserContext()
   const viewer = await pageIn(viewerContext)
+  viewer.__tracePeer = 'viewer'
   await viewer.evaluateOnNewDocument((id) => {
     window.__chunkLoadEvents = []
     window.addEventListener(`board-load:${id}`, (event) => window.__chunkLoadEvents.push(event.detail))
   }, fixture.id)
+  const coldReadStart = calls.length
   await open(viewer, fixture.id, fixture.count + 4)
+  const firstCanvasAt = Date.now()
+  const coldReads = calls.slice(coldReadStart).filter((call) => call.peer === 'viewer' && call.at <= firstCanvasAt &&
+    call.endpoint === 'boardHistory' && call.data?.boardId === fixture.id &&
+    ['current-scene', 'chunks', 'pages', 'manifest'].includes(call.data?.operation),
+  )
+  const expectedSceneReads = 1 + Math.ceil(Math.max(0, initial.refs.length - 3) / 6)
+  assert.equal(coldReads.filter((call) => call.data.operation === 'current-scene').length, 1,
+    'Cold current-scene request combines head, references, and initial bounded chunk batch')
+  assert.equal(coldReads.filter((call) => call.data.operation === 'pages' || call.data.operation === 'manifest').length, 0,
+    'Cold current-scene load does not fetch page references in follow-up calls')
+  assert.equal(coldReads.length, expectedSceneReads,
+    'Cold board render fetches exactly one combined request plus only the remaining chunk batches')
+  checkpoint(`cold board draw uses ${coldReads.length} history calls for ${initial.refs.length} chunks`)
   assert.equal(
     await viewer.evaluate(() =>
       window.__excalidrawAPI.getSceneElements().some((e) => e.customData?.payload === '319:' + '🌍'.repeat(1100)),
@@ -444,6 +499,15 @@ try {
     loadEvents.some((event) => event.completed === event.total && event.total > 1),
     'Complete multi-chunk load is reported',
   )
+  // Once the revision is rendered, listener keepalives must not cause another
+  // callable read or a write when no editor changed the board.
+  await new Promise((resolve) => setTimeout(resolve, 1500))
+  const idleStart = calls.length
+  await new Promise((resolve) => setTimeout(resolve, 5000))
+  const idleBoardCalls = calls.slice(idleStart).filter((call) => call.peer === 'viewer' && call.data?.boardId === fixture.id &&
+    ['boardHistory', 'ensureBoardScene', 'commitBoardScene', 'importBoardVersion'].includes(call.endpoint))
+  assert.deepEqual(idleBoardCalls, [], 'A loaded, untouched board must not issue further board/history calls while idle')
+  checkpoint('loaded multi-chunk board remains network-idle without edits')
   const headBeforeAttack = (await durable(fixture.id)).head.headRevisionId
   const denial = await viewer.evaluate(
     async ({ id, commitId }) => {
@@ -781,18 +845,24 @@ try {
     )
   await finalContext.close()
   checkpoint('three-context native collab edits, sequential dropout, solo continuation and cold reload')
-  // Inject an acknowledged RTDB delta after every browser is gone. This isolates
-  // the server fallback from normal browser flushing and exercises the real 30s grace.
+  // Inject an acknowledged RTDB delta after every browser is gone. History
+  // boards use immutable generation-scoped rooms; delete the matching presence
+  // record to exercise the generation fallback's real 30s grace.
   const beforeFallback = await durable(fixture.id)
+  const activeGeneration = (await db.doc(`boardScenes/${fixture.id}`).get()).data().generation
+  const generationRoom = `boards/${fixture.id}/generations/${activeGeneration}`
+  const generationPresence = `presence/${fixture.id}/generations/${activeGeneration}`
   const crashedEdit = { ...beforeFallback.scene.elements[0], x: 2026, version: 10000, versionNonce: 1 }
-  await rtdb.ref(`boards/${fixture.id}/elements/${crashedEdit.id}`).set({
+  await rtdb.ref(`${generationRoom}/elements/${crashedEdit.id}`).set({
     id: crashedEdit.id,
     version: crashedEdit.version,
     versionNonce: 1,
+    generation: activeGeneration,
+    restoreFence: beforeFallback.head.restoreFence,
     data: JSON.stringify(crashedEdit),
   })
-  await rtdb.ref(`presence/${fixture.id}/crashed-session`).set({ uid: fixture.uid })
-  await rtdb.ref(`presence/${fixture.id}/crashed-session`).remove()
+  await rtdb.ref(`${generationPresence}/crashed-session`).set({ uid: fixture.uid, generation: activeGeneration })
+  await rtdb.ref(`${generationPresence}/crashed-session`).remove()
   const fallback = await waitFor(
     async () => {
       const snapshot = await durable(fixture.id)
@@ -806,7 +876,7 @@ try {
     'Fallback preserves existing browser checkpoint edits',
   )
   await waitFor(
-    async () => !(await rtdb.ref(`boards/${fixture.id}/elements/${crashedEdit.id}`).get()).exists(),
+    async () => !(await rtdb.ref(`${generationRoom}/elements/${crashedEdit.id}`).get()).exists(),
     'Captured unchanged RTDB delta was not pruned after checkpoint',
   )
   checkpoint('last-client-loss fallback commits RTDB delta after real grace and prunes captured record')

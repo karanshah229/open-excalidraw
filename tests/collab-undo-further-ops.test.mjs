@@ -50,6 +50,7 @@ async function run() {
         id,
         projectId: proj.id,
         name: 'Ops Test Board',
+        active: true,
         scene: {
           elements: [
             {

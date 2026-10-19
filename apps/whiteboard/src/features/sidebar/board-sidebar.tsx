@@ -19,6 +19,7 @@ export function BoardSidebar({
   containerRef,
   slideCount,
   slidesHeader,
+  footerActions,
   children,
   theme,
   onSlidesVisibilityChange,
@@ -27,6 +28,7 @@ export function BoardSidebar({
   containerRef: MutableRefObject<HTMLElement | null>
   slideCount: number
   slidesHeader: ReactNode
+  footerActions?: ReactNode
   children: ReactNode
   theme: 'light' | 'dark'
   onSlidesVisibilityChange: (visible: boolean) => void
@@ -86,14 +88,17 @@ export function BoardSidebar({
                 <panel.icon size={19} />
               </button>
             ))}
-            <button
-              className="sidebar-trigger board-panel-button board-panel-help"
-              aria-label="Help"
-              title="Help · ?"
-              onClick={() => api?.updateScene({ appState: { openDialog: { name: 'help' } } })}
-            >
-              <CircleHelp size={19} />
-            </button>
+            <div className="board-panel-footer">
+              {footerActions}
+              <button
+                className="sidebar-trigger board-panel-button board-panel-help"
+                aria-label="Help"
+                title="Help · ?"
+                onClick={() => api?.updateScene({ appState: { openDialog: { name: 'help' } } })}
+              >
+                <CircleHelp size={19} />
+              </button>
+            </div>
           </nav>,
           containerRef.current,
         )}

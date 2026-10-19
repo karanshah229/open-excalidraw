@@ -42,6 +42,8 @@ service cloud.firestore {
         allow update: if signedIn() && request.auth.uid == userId && privateParentLive(userId, projectId)
           && resource.data.active == true && request.resource.data.projectId == projectId
           && (!exists(/databases/$(database)/documents/boardScenes/$(boardId))
+            || !historyEnabled(boardId) || !request.resource.data.diff(resource.data).affectedKeys().hasAny(['name']))
+          && (!exists(/databases/$(database)/documents/boardScenes/$(boardId))
             || get(/databases/$(database)/documents/boardScenes/$(boardId)).data.headRevisionId == null
             || !request.resource.data.diff(resource.data).affectedKeys().hasAny(['scene', 'sceneId']));
         allow delete: if false;
@@ -58,6 +60,8 @@ service cloud.firestore {
       allow create, delete: if false;
       allow update: if editBoard(resource.data)
         && (!exists(/databases/$(database)/documents/boardScenes/$(boardId))
+          || !historyEnabled(boardId) || !request.resource.data.diff(resource.data).affectedKeys().hasAny(['boardName', 'scene']))
+        && (!exists(/databases/$(database)/documents/boardScenes/$(boardId))
           || get(/databases/$(database)/documents/boardScenes/$(boardId)).data.headRevisionId == null
           || !request.resource.data.diff(resource.data).affectedKeys().hasAny(['scene', 'sceneId']))
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['scene', 'updatedAt', 'boardName']);
@@ -66,7 +70,7 @@ service cloud.firestore {
         allow write: if false;
       }
       match /history/{revisionId} {
-        allow read: if readBoard(get(/databases/$(database)/documents/boardShares/$(boardId)).data);
+        allow read: if false;
         allow write: if false;
       }
     }
@@ -90,9 +94,13 @@ service cloud.firestore {
           && (editing ? editBoard(get(sharePath).data) : readBoard(get(sharePath).data)))
         : owner(binding));
     }
+    function historyEnabled(boardId) { return sceneBinding(boardId).get('historyProtocolVersion', 0) == 1; }
+    function contentUnlocked(boardId) { return sceneBinding(boardId).get('restoreOperationId', null) == null; }
     function validUpload(boardId, commitId) {
       let upload = get(/databases/$(database)/documents/boardScenes/$(boardId)/uploads/$(commitId)).data;
-      return signedIn() && sceneAccess(boardId, true) && sceneBinding(boardId).headRevisionId != null && upload.uploaderUid == request.auth.uid
+      return signedIn() && sceneAccess(boardId, true) && contentUnlocked(boardId) && sceneBinding(boardId).headRevisionId != null && upload.uploaderUid == request.auth.uid
+        && (!historyEnabled(boardId) || upload.keys().hasAll(['expectedFence']))
+        && upload.get('expectedFence', 0) == sceneBinding(boardId).get('restoreFence', 0)
         && upload.generation == sceneBinding(boardId).generation && upload.expiresAt > request.time
         && upload.get('status', '') != 'committed';
     }
@@ -100,24 +108,29 @@ service cloud.firestore {
       allow get: if !exists(/databases/$(database)/documents/boardScenes/$(boardId)) || sceneAccess(boardId, false);
       allow list, write: if false;
       match /revisions/{revisionId} {
-        allow read: if sceneAccess(boardId, false);
+        allow read: if !historyEnabled(boardId) && sceneAccess(boardId, false);
         allow write: if false;
         match /pages/{pageId} {
-          allow read: if sceneAccess(boardId, false);
+          allow read: if !historyEnabled(boardId) && sceneAccess(boardId, false);
           allow write: if false;
         }
       }
       match /versions/{versionId} {
-        allow read: if sceneAccess(boardId, false);
+        allow read: if false;
         allow write: if false;
       }
       match /uploads/{commitId} {
-        allow read: if sceneAccess(boardId, false);
-        allow create: if signedIn() && sceneAccess(boardId, true) && sceneBinding(boardId).headRevisionId != null
-          && request.resource.data.keys().hasOnly(['uploaderUid', 'expectedHeadRevisionId', 'generation', 'sceneFormatVersion', 'pageCount', 'chunkCount', 'newChunkCount', 'candidateDigest', 'createdAt', 'expiresAt'])
+        allow read: if signedIn() && sceneAccess(boardId, true) && resource.data.uploaderUid == request.auth.uid;
+        allow create: if signedIn() && sceneAccess(boardId, true) && contentUnlocked(boardId) && sceneBinding(boardId).headRevisionId != null
+          && request.resource.data.keys().hasOnly(['uploaderUid', 'expectedHeadRevisionId', 'generation', 'sceneFormatVersion', 'pageCount', 'chunkCount', 'newChunkCount', 'candidateDigest', 'createdAt', 'expiresAt', 'expectedFence', 'purpose', 'sourceBaseVersionId'])
           && request.resource.data.uploaderUid == request.auth.uid
+          && (!historyEnabled(boardId) || request.resource.data.keys().hasAll(['expectedFence']))
+          && request.resource.data.get('expectedFence', 0) == sceneBinding(boardId).get('restoreFence', 0)
           && request.resource.data.generation == sceneBinding(boardId).generation
-          && request.resource.data.expectedHeadRevisionId == sceneBinding(boardId).headRevisionId
+          && (request.resource.data.expectedHeadRevisionId == sceneBinding(boardId).headRevisionId
+            || (request.resource.data.get('purpose', '') == 'history-only'
+              && request.resource.data.get('sourceBaseVersionId', '') is string
+              && request.resource.data.sourceBaseVersionId.size() > 0))
           && request.resource.data.sceneFormatVersion == 1
           && request.resource.data.pageCount is int && request.resource.data.pageCount > 0 && request.resource.data.pageCount <= 6
           && request.resource.data.chunkCount is int && request.resource.data.chunkCount > 0 && request.resource.data.chunkCount <= 512
@@ -128,7 +141,7 @@ service cloud.firestore {
           && request.resource.data.expiresAt > request.time && request.resource.data.expiresAt <= request.time + duration.value(24, 'h');
         allow update, delete: if false;
         match /pages/{pageId} {
-          allow read: if sceneAccess(boardId, false);
+          allow read: if validUpload(boardId, commitId);
           allow create: if validUpload(boardId, commitId)
             && request.resource.data.keys().hasOnly(['references'])
             && request.resource.data.references is list && request.resource.data.references.size() > 0 && request.resource.data.references.size() <= 100
@@ -137,7 +150,8 @@ service cloud.firestore {
         }
       }
       match /chunks/{chunkId} {
-        allow read: if sceneAccess(boardId, false);
+        allow read: if (!historyEnabled(boardId) && sceneAccess(boardId, false))
+          || (signedIn() && resource.data.uploaderUid == request.auth.uid && validUpload(boardId, resource.data.uploadId));
         allow create: if validUpload(boardId, request.resource.data.uploadId)
           && request.resource.data.keys().hasOnly(['payload', 'digest', 'uploadId', 'slot', 'uploaderUid', 'generation', 'kind'])
           && request.resource.data.payload is string && request.resource.data.payload.size() <= 524288

@@ -72,7 +72,12 @@ try {
       })
     } else await request.continue()
   }
-  page.on('request', injectLoadFailure)
+  const pendingInterceptions = new Set()
+  const interceptRequest = (request) => {
+    const pending = injectLoadFailure(request).finally(() => pendingInterceptions.delete(pending))
+    pendingInterceptions.add(pending)
+  }
+  page.on('request', interceptRequest)
   await page.goto(`${base}/boards/${id}`)
   await page.waitForSelector('.access-denied-title')
   assert.equal(await page.$eval('.access-denied-title', (node) => node.textContent), 'Could not load board')
@@ -83,8 +88,10 @@ try {
   await page.click('.access-denied-card button')
   await page.waitForFunction(() => !!window.__excalidrawAPI)
   await page.waitForSelector('.excalidraw canvas')
+  await page.waitForNetworkIdle()
+  page.off('request', interceptRequest)
+  await Promise.all([...pendingInterceptions])
   await page.setRequestInterception(false)
-  page.off('request', injectLoadFailure)
   assert.equal(await page.$('.slides-controls'), null, 'No slide controls on a board without slides')
   await page.click('.board-panel-rail [aria-label="Library"]')
   await page.waitForSelector('.board-sidebar')

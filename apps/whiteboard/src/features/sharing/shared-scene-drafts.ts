@@ -1,3 +1,4 @@
+import { historyEditingState, assertHistoryMutationAllowed } from '../history/history-editing-gate'
 import type { BoardScene } from '@agentic-whiteboard/storage'
 import { reconcileElementsLWW } from '../collaboration/reconcile'
 
@@ -33,7 +34,12 @@ export async function saveSharedSceneDraft(
   scene: BoardScene,
   generation?: number,
 ): Promise<SharedSceneDraft> {
+  const gate = historyEditingState(boardId)
+  assertHistoryMutationAllowed(boardId)
+  if (generation !== undefined && gate.generation !== undefined && generation !== gate.generation) throw new Error('BOARD_GENERATION_CONFLICT')
   const db = await openDatabase()
+  assertHistoryMutationAllowed(boardId, gate.epoch)
+  if (generation !== undefined && historyEditingState(boardId).generation !== undefined && generation !== historyEditingState(boardId).generation) throw new Error('BOARD_GENERATION_CONFLICT')
   return new Promise((resolve, reject) => {
     const transaction = db.transaction(storeName, 'readwrite')
     const store = transaction.objectStore(storeName)
@@ -80,6 +86,22 @@ export async function acknowledgeSharedSceneDraft(draft: SharedSceneDraft): Prom
     const request = store.get(draft.key)
     request.onsuccess = () => {
       if (request.result?.revision === draft.revision) store.delete(draft.key)
+    }
+    transaction.oncomplete = () => resolve()
+    transaction.onerror = transaction.onabort = () => reject(transaction.error)
+  })
+}
+
+/** Discard only older-generation recovery bytes after a committed restoration. */
+export async function discardRestoredSharedSceneDraft(boardId: string, uid: string, generation: number): Promise<void> {
+  const db = await openDatabase()
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(storeName, 'readwrite')
+    const store = transaction.objectStore(storeName)
+    const request = store.get(`${uid}:${boardId}`)
+    request.onsuccess = () => {
+      const draft = request.result as SharedSceneDraft | undefined
+      if (draft && (draft.generation ?? 1) < generation) store.delete(draft.key)
     }
     transaction.oncomplete = () => resolve()
     transaction.onerror = transaction.onabort = () => reject(transaction.error)

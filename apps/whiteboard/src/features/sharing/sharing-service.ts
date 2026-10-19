@@ -6,7 +6,7 @@ import { restoreSceneAssets, storeSceneAssets } from '../assets/scene-assets'
 import { workspaceStore, workspaceValue } from '../workspace/workspace-api'
 import type { BoardScene } from '@agentic-whiteboard/storage'
 import type { ActiveSessionRecord } from '../collaboration/types'
-import { sceneService } from '../scenes/scene-service'
+import { sceneService, type LoadedScene, type SceneHead } from '../scenes/scene-service'
 
 export type ShareAccessLevel = 'restricted' | 'anyone_with_link'
 export type ShareRole = 'viewer' | 'editor' | 'presentation'
@@ -220,6 +220,7 @@ export const sharingService = {
     onUpdate: (config: BoardShareConfig) => void,
     onError?: (error: any) => void,
     getKnownFiles?: () => BoardScene['files'],
+    getKnownScene?: () => Pick<LoadedScene, 'scene' | 'revisionId' | 'generation'> | undefined,
   ): () => void {
     const db = getFirestoreDb()
     if (!db) return () => {}
@@ -252,21 +253,21 @@ export const sharingService = {
     }
     const attachBoard = () => {
       if (disposed || boardUnsubscribe) return
-      boardUnsubscribe = onSnapshot(boardRef, refresh, (error) => {
+      boardUnsubscribe = onSnapshot(boardRef, () => refresh(), (error) => {
         boardUnsubscribe = undefined // Firestore terminates a denied listener.
         denied(error)
       })
     }
     const attachScene = () => {
       if (disposed || sceneUnsubscribe) return
-      sceneUnsubscribe = sceneService.subscribeHead(boardId, refresh, (error) => {
+      sceneUnsubscribe = sceneService.subscribeHead(boardId, (head) => refresh(head), (error) => {
         // Firestore terminates denied listeners. Recovery must reattach the
         // scene head as well as policy listeners, or later drawing commits disappear.
         sceneUnsubscribe = undefined
         denied(error)
       })
     }
-    const refresh = () => {
+    const refresh = (head?: SceneHead) => {
       if (disposed) return
       const current = ++generation
       const user = getFirebaseAuth()?.currentUser
@@ -274,10 +275,15 @@ export const sharingService = {
         .catch(() => {})
         .then(async () => {
           if (disposed || current !== generation) return
+          const knownScene = getKnownScene?.()
+          // Reuse the revision already hydrated by the route for policy/head
+          // snapshots. Fetch scene bytes again only after a newer head arrives.
+          const reusableScene = knownScene && (!head || head.headRevisionId === knownScene.revisionId)
+            ? knownScene : undefined
           const result = await sharingService.getSharedBoard(boardId, user?.email, user?.uid, {
             ...knownFiles,
             ...getKnownFiles?.(),
-          })
+          }, reusableScene)
           // Retain the first transfer for queued snapshots of immutable image bytes.
           knownFiles = { ...knownFiles, ...result.config?.scene?.files }
 
@@ -300,7 +306,7 @@ export const sharingService = {
           ) {
             parentUnsubscribe?.()
             parentId = result.config.projectId
-            parentUnsubscribe = onSnapshot(doc(db, 'projectShares', parentId), refresh, () => {
+            parentUnsubscribe = onSnapshot(doc(db, 'projectShares', parentId), () => refresh(), () => {
               parentUnsubscribe = undefined
               // A direct board grant can survive loss of project membership.
               // Reauthorize the board rather than treating the parent as its ACL.
@@ -331,6 +337,7 @@ export const sharingService = {
     _currentUserEmail?: string | null,
     _currentUserId?: string | null,
     knownFiles: BoardScene['files'] = {},
+    knownScene?: Pick<LoadedScene, 'scene' | 'revisionId' | 'generation'>,
   ): Promise<{
     status: 'allowed' | 'restricted' | 'not-found'
     config?: BoardShareConfig
@@ -361,7 +368,7 @@ export const sharingService = {
       sharingService.rememberShareConfig(remoteData!, requestUser)
       try {
         // A committed empty scene is authoritative; never substitute legacy content.
-        let canonical = await sceneService.load(boardId)
+        let canonical = knownScene ?? await sceneService.load(boardId)
         if (!canonical) {
           await sceneService.ensure(boardId, remoteData!.projectId)
           canonical = await sceneService.load(boardId)

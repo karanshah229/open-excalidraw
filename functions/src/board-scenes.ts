@@ -1,7 +1,11 @@
 import { randomUUID } from 'node:crypto'
-import { getFirestore, Timestamp, type DocumentData } from 'firebase-admin/firestore'
+import { getDatabase } from 'firebase-admin/database'
+import { getFirestore, Timestamp, FieldValue, type DocumentData } from 'firebase-admin/firestore'
 import { HttpsError, onCall, type CallableRequest } from 'firebase-functions/v2/https'
 import { defineBoolean, defineString } from 'firebase-functions/params'
+import { indexSceneAssets, validateSceneAssetResources } from './board-history-assets.js'
+import { assertContentWritable, publishContentVersion } from './board-history-model.js'
+import { loadNoteSnapshot, writeNoteSnapshot } from './board-history-notes.js'
 import { authorizeScene, type SceneActor, type SceneBinding } from './scene-access.js'
 import {
   packScene,
@@ -128,11 +132,19 @@ export async function ensureScene(boardId: string, actor: SceneActor, requestedP
     root = `boardScenes/${boardId}`,
     ref = db.doc(root)
   const existing = (await ref.get()).data()
+  // A coordinated rollout closes this server-only gate before installing services/rules.
+  // Already-started migrations and protocol-1 recovery must remain able to finish.
+  if (
+    existing?.historyProtocolVersion !== 1 &&
+    !existing?.restoreOperationId &&
+    (await db.doc('system/boardHistoryRollout').get()).data()?.migrationEnabled === false
+  )
+    throw new HttpsError('unavailable', 'Board history deployment is in progress. Retry shortly.')
   if (existing) {
     if (requestedProjectId && existing.projectId !== requestedProjectId)
       throw new HttpsError('permission-denied', 'Scene project binding does not match the requested project.')
     await authorizeScene(boardId, existing as SceneBinding, actor, undefined, false)
-    if (existing.headRevisionId) return existing
+    if (existing.headRevisionId) return initializeBoardHistory(boardId, actor)
   }
   for (let attempt = 0; attempt < 4; attempt++) {
     const shareSnapshot = await db.doc(`boardShares/${boardId}`).get(),
@@ -203,6 +215,11 @@ export async function ensureScene(boardId: string, actor: SceneActor, requestedP
     pages.forEach((page, slot) =>
       staged.create(db.doc(`${root}/revisions/${revisionId}/pages/${scenePageId(slot)}`), { references: page }),
     )
+    packed.forEach((chunk) =>
+      staged.set(db.doc(`${root}/chunkReferences/${chunk.chunkId}/revisions/${revisionId}`), {
+        createdAt: new Date().toISOString(),
+      }),
+    )
     staged.create(db.doc(`${root}/revisions/${revisionId}`), {
       generation,
       sceneFormatVersion: SCENE_FORMAT_VERSION,
@@ -231,6 +248,7 @@ export async function ensureScene(boardId: string, actor: SceneActor, requestedP
         (shareNow.exists && !shareNow.updateTime?.isEqual(shareSnapshot.updateTime!))
       )
         return null
+      const notes = await loadNoteSnapshot(boardId, null, tx)
       const head = {
         ...binding,
         headRevisionId: revisionId,
@@ -239,17 +257,42 @@ export async function ensureScene(boardId: string, actor: SceneActor, requestedP
         updatedAt: new Date().toISOString(),
       }
       tx.set(ref, head)
+      const history = publishContentVersion(
+        tx,
+        boardId,
+        head,
+        actor,
+        revisionId,
+        {
+          boardName:
+            privateNow?.data()?.name ?? shareNow.data()?.boardName ?? shareNow.data()?.name ?? 'Untitled board',
+          notesRevisionId: writeNoteSnapshot(tx, boardId, notes),
+          nameRevision: 0,
+        },
+        'initial',
+      )
       // Embedded payloads retained read-only for recovery. Rules disallow further scene updates after cutover.
       if (privateRef) tx.update(privateRef, { sceneId: boardId })
       if (shareNow.exists) tx.update(shareNow.ref, { sceneId: boardId })
-      return head
+      return {
+        ...head,
+        ...history,
+        currentVersionId: history.versionId,
+        currentBranchId: history.branchId,
+        restoreFence: 0,
+      }
     })
-    if (result) return result
+    if (result) return initializeBoardHistory(boardId, actor)
   }
   throw new HttpsError('aborted', 'The board changed during migration. Retry registration.')
 }
 
-export async function commitSceneCandidate(boardId: string, commitId: string, actor: SceneActor) {
+export async function commitSceneCandidate(
+  boardId: string,
+  commitId: string,
+  actor: SceneActor,
+  restoreOperationId?: string,
+) {
   const db = getFirestore(),
     root = `boardScenes/${boardId}`,
     headRef = db.doc(root),
@@ -262,6 +305,14 @@ export async function commitSceneCandidate(boardId: string, commitId: string, ac
     if (!head.headRevisionId)
       dataError('Initial scene migration is pending. Complete registration before staging a save.')
     await authorizeScene(boardId, head as SceneBinding, actor, tx)
+    assertContentWritable(
+      actor.trusted && restoreOperationId === head.restoreOperationId ? { ...head, restoreOperationId: null } : head,
+      candidate.generation,
+      candidate.expectedFence ?? 0,
+    )
+    if (head.historyProtocolVersion === 1 && !Number.isInteger(candidate.expectedFence))
+      throw new HttpsError('failed-precondition', 'Update this tab before saving; restore fence is required.')
+    if (candidate.purpose === 'history-only') dataError('Use importBoardVersion for historical candidates.')
     if (candidate.uploaderUid !== actor.uid)
       throw new HttpsError('permission-denied', 'Upload belongs to another actor.')
     if (candidate.receipt) return { head, candidate, receipt: candidate.receipt }
@@ -353,7 +404,15 @@ export async function commitSceneCandidate(boardId: string, commitId: string, ac
     if (newlyStaged !== candidate.newChunkCount) dataError('New chunk count mismatch.')
     const scene = await assembleScene(chunks)
     validateAssets(boardId, head.ownerId, scene)
-    const revisionId = commitId
+    const revisionId = commitId,
+      assetResources = await indexSceneAssets(boardId, commitId, scene)
+    const reverseWriter = db.bulkWriter()
+    references.forEach((reference) =>
+      reverseWriter.set(db.doc(`${root}/chunkReferences/${reference.chunkId}/revisions/${revisionId}`), {
+        createdAt: new Date().toISOString(),
+      }),
+    )
+    await reverseWriter.close()
     // Stage immutable server manifests once; retries preserve the original timestamp and bytes.
     const createdAt = await db.runTransaction(async (tx) => {
       const revisionRef = db.doc(`${root}/revisions/${revisionId}`),
@@ -378,6 +437,7 @@ export async function commitSceneCandidate(boardId: string, commitId: string, ac
         chunkCount: candidate.chunkCount,
         candidateDigest: candidate.candidateDigest,
         parentRevisionId: candidate.expectedHeadRevisionId,
+        assetResourceIds: assetResources.map((resource) => resource.id),
         createdAt,
       })
       return createdAt
@@ -387,6 +447,13 @@ export async function commitSceneCandidate(boardId: string, commitId: string, ac
         upload = (await tx.get(candidateRef)).data()
       if (!latest || !upload) dataError('Restage required.')
       await authorizeScene(boardId, latest as SceneBinding, actor, tx)
+      assertContentWritable(
+        actor.trusted && restoreOperationId === latest.restoreOperationId
+          ? { ...latest, restoreOperationId: null }
+          : latest,
+        candidate.generation,
+        candidate.expectedFence ?? 0,
+      )
       if (upload.receipt) return upload.receipt
       if (upload.leaseId !== leaseId || milliseconds(upload.leaseUntil) <= Date.now())
         dataError('Validation lease expired. Retry publication.')
@@ -395,13 +462,52 @@ export async function commitSceneCandidate(boardId: string, commitId: string, ac
           currentHeadRevisionId: latest.headRevisionId,
           generation: latest.generation,
         })
+      const canonical = (await tx.get(db.doc(`${root}/revisions/${latest.headRevisionId}`))).data()
+      if (canonical && canonical.candidateDigest === candidate.candidateDigest) {
+        const receipt = {
+          revisionId: latest.headRevisionId,
+          generation: latest.generation,
+          candidateDigest: canonical.candidateDigest,
+          committedAt: canonical.createdAt,
+          versionId: latest.currentVersionId,
+          contentSequence: latest.contentSequence,
+          branchId: latest.currentBranchId,
+          branchSequence: latest.branchSequence,
+        }
+        tx.update(candidateRef, { receipt, status: 'committed', leaseId: null, leaseUntil: null })
+        return receipt
+      }
+      const resources = await tx.getAll(
+        ...references.map((reference) => db.doc(`${root}/chunks/${reference.chunkId}`)),
+        { fieldMask: ['digest', 'generation', 'deletionFence'] },
+      )
+      resources.forEach((resource, slot) => {
+        const chunk = resource.data()
+        if (
+          !chunk ||
+          chunk.deletionFence ||
+          chunk.digest !== references[slot].digest ||
+          chunk.generation !== latest.generation
+        )
+          dataError('Chunk was collected during validation. Restage this save.')
+      })
+      await validateSceneAssetResources(tx, boardId, assetResources)
       const receipt = {
         revisionId,
         generation: latest.generation,
         candidateDigest: candidate.candidateDigest,
         committedAt: createdAt,
       }
-      tx.update(headRef, { headRevisionId: revisionId, updatedAt: createdAt })
+      const history = publishContentVersion(
+        tx,
+        boardId,
+        latest,
+        actor,
+        revisionId,
+        { headRevisionId: revisionId },
+        actor.trusted ? 'collaboration-checkpoint' : 'scene-save',
+      )
+      Object.assign(receipt, history)
       tx.update(candidateRef, { receipt, status: 'committed', leaseId: null, leaseUntil: null })
       return receipt
     })
@@ -412,7 +518,7 @@ export async function commitSceneCandidate(boardId: string, commitId: string, ac
     })
   }
 }
-function validateAssets(boardId: string, ownerId: string, scene: ScenePayload) {
+export function validateAssets(boardId: string, ownerId: string, scene: ScenePayload) {
   for (const file of Object.values(scene.files ?? {}) as any[]) {
     if (!file || typeof file !== 'object') dataError('Invalid file descriptor.')
     if (file.dataURL || file.url || file.downloadURL)
@@ -430,7 +536,13 @@ function validateAssets(boardId: string, ownerId: string, scene: ScenePayload) {
   }
 }
 
-export async function checkpointScene(boardId: string, scene: ScenePayload, head: DocumentData, actor: SceneActor) {
+export async function checkpointScene(
+  boardId: string,
+  scene: ScenePayload,
+  head: DocumentData,
+  actor: SceneActor,
+  restoreOperationId?: string,
+) {
   const db = getFirestore(),
     root = `boardScenes/${boardId}`,
     commitId = `checkpoint_${randomUUID()}`
@@ -442,6 +554,31 @@ export async function checkpointScene(boardId: string, scene: ScenePayload, head
     ),
     references = chunks.map(({ chunkId, digest }) => ({ chunkId, digest })),
     pages = paginateReferences(references)
+  const candidateDigest = await manifestDigest(references, head.generation)
+  if (candidateDigest === (await manifestDigest(base.references, head.generation))) {
+    return db.runTransaction(async (tx) => {
+      const latest = (await tx.get(db.doc(root))).data()!
+      await authorizeScene(boardId, latest as SceneBinding, actor, tx)
+      assertContentWritable(
+        actor.trusted && restoreOperationId === latest.restoreOperationId
+          ? { ...latest, restoreOperationId: null }
+          : latest,
+        head.generation,
+        head.restoreFence ?? 0,
+      )
+      if (latest.headRevisionId !== head.headRevisionId) throw new HttpsError('aborted', 'Scene revision changed.')
+      return {
+        revisionId: latest.headRevisionId,
+        generation: latest.generation,
+        candidateDigest,
+        committedAt: (await tx.get(db.doc(`${root}/revisions/${latest.headRevisionId}`))).data()!.createdAt,
+        versionId: latest.currentVersionId,
+        contentSequence: latest.contentSequence,
+        branchId: latest.currentBranchId,
+        branchSequence: latest.branchSequence,
+      }
+    })
+  }
   const oldIds = new Set(base.references.map((ref) => ref.chunkId)),
     newChunks = chunks.filter((chunk) => !oldIds.has(chunk.chunkId)),
     writer = db.bulkWriter(),
@@ -450,11 +587,12 @@ export async function checkpointScene(boardId: string, scene: ScenePayload, head
     uploaderUid: actor.uid,
     expectedHeadRevisionId: head.headRevisionId,
     generation: head.generation,
+    expectedFence: head.restoreFence ?? 0,
     sceneFormatVersion: SCENE_FORMAT_VERSION,
     pageCount: pages.length,
     chunkCount: chunks.length,
     newChunkCount: newChunks.length,
-    candidateDigest: await manifestDigest(references, head.generation),
+    candidateDigest,
     createdAt: now,
     expiresAt: Timestamp.fromMillis(now.toMillis() + 60 * 60 * 1000),
   })
@@ -473,7 +611,7 @@ export async function checkpointScene(boardId: string, scene: ScenePayload, head
     writer.create(db.doc(`${root}/uploads/${commitId}/pages/${scenePageId(slot)}`), { references: page }),
   )
   await writer.close()
-  return commitSceneCandidate(boardId, commitId, actor)
+  return commitSceneCandidate(boardId, commitId, actor, restoreOperationId)
 }
 export const ensureBoardScene = onCall(
   { region, enforceAppCheck: appCheck.value(), timeoutSeconds: 120, memory: '512MiB' },
@@ -487,6 +625,11 @@ export const ensureBoardScene = onCall(
       headRevisionId: head.headRevisionId,
       generation: head.generation,
       sceneFormatVersion: head.sceneFormatVersion,
+      restoreFence: head.restoreFence ?? 0,
+      currentVersionId: head.currentVersionId ?? null,
+      boardName: head.boardName,
+      nameRevision: head.nameRevision ?? 0,
+      historyProtocolVersion: head.historyProtocolVersion ?? 0,
     }
   },
 )
@@ -501,3 +644,181 @@ export const commitBoardScene = onCall(
   },
   async (request) => commitSceneCandidate(id(request.data?.boardId), id(request.data?.commitId), actorOf(request)),
 )
+
+/** Upgrade an existing canonical scene and fence legacy RTDB traffic before advertising history. */
+export async function initializeBoardHistory(boardId: string, actor: SceneActor) {
+  const db = getFirestore(),
+    root = `boardScenes/${boardId}`,
+    ref = db.doc(root),
+    migrationId = `migration_${boardId}`,
+    leaseId = randomUUID()
+  let head = await db.runTransaction(async (tx) => {
+    const head = (await tx.get(ref)).data()!
+    await authorizeScene(boardId, head as SceneBinding, actor, tx, false)
+    if (head.historyProtocolVersion === 1 && !head.restoreOperationId) return head
+    if (
+      !head.restoreOperationId &&
+      (await tx.get(db.doc('system/boardHistoryRollout'))).data()?.migrationEnabled === false
+    )
+      throw new HttpsError('unavailable', 'Board history deployment is in progress. Retry shortly.')
+    // Viewers may read legacy content, but cannot initiate a migration that checkpoints edits.
+    await authorizeScene(boardId, head as SceneBinding, actor, tx)
+    if (head.restoreOperationId && head.restoreOperationId !== migrationId)
+      throw new HttpsError('unavailable', 'A restore is in progress.')
+    if (head.migrationLeaseUntil?.toMillis?.() > Date.now())
+      throw new HttpsError('unavailable', 'Board history migration is in progress.')
+    const privateBoard = head.projectId
+        ? (await tx.get(db.doc(`users/${head.ownerId}/projects/${head.projectId}/boards/${boardId}`))).data()
+        : null,
+      share = (await tx.get(db.doc(`boardShares/${boardId}`))).data(),
+      notes = !head.currentVersionId ? await loadNoteSnapshot(boardId, null, tx) : null
+    const patch = {
+      restoreOperationId: migrationId,
+      restoreFence: (head.restoreFence ?? 0) + 1,
+      migrationLeaseId: leaseId,
+      migrationLeaseUntil: Timestamp.fromMillis(Date.now() + 120_000),
+    }
+    if (!head.currentVersionId) {
+      const history = publishContentVersion(
+        tx,
+        boardId,
+        head,
+        actor,
+        `baseline_${randomUUID()}`,
+        {
+          ...patch,
+          boardName: privateBoard?.name ?? share?.boardName ?? share?.name ?? 'Untitled board',
+          nameRevision: 0,
+          notesRevisionId: writeNoteSnapshot(tx, boardId, notes!),
+        },
+        'history-baseline',
+      )
+      return { ...head, ...patch, ...history, currentVersionId: history.versionId, currentBranchId: history.branchId }
+    }
+    tx.update(ref, patch)
+    return { ...head, ...patch }
+  })
+  if (head.historyProtocolVersion === 1 && !head.restoreOperationId) return head
+  head = (await ref.get()).data()!
+  const reverseWriter = db.bulkWriter(),
+    currentManifest = await loadSceneManifest(boardId, head)
+  currentManifest.references.forEach((reference) =>
+    reverseWriter.set(db.doc(`${root}/chunkReferences/${reference.chunkId}/revisions/${head.headRevisionId}`), {
+      createdAt: new Date().toISOString(),
+    }),
+  )
+  await reverseWriter.close()
+  const currentScene = await loadSceneRevision(boardId, head)
+  const initialAssetResources = await indexSceneAssets(boardId, head.headRevisionId, currentScene.scene)
+  await db
+    .doc(`${root}/revisions/${head.headRevisionId}`)
+    .update({ assetResourceIds: initialAssetResources.map((resource) => resource.id) })
+  const room = getDatabase().ref(`boards/${boardId}`),
+    holdRoom = () => {}
+  room.on('value', holdRoom)
+  try {
+    await room.once('value')
+    const locked = await room.transaction((current) => {
+      if ((current?.restoreFence ?? 0) > head.restoreFence) return
+      return {
+        ...current,
+        generation: head.generation,
+        restoreFence: head.restoreFence,
+        restoreOperationId: migrationId,
+      }
+    })
+    if (!locked.committed) throw new HttpsError('aborted', 'Migration transport fence was superseded.')
+    const data = (await room.get()).val() ?? {},
+      legacy = head.generation === 1 ? (data.elements ?? {}) : {},
+      scoped = data.generations?.[head.generation]?.elements ?? {}
+    if (head.historyProtocolVersion !== 1 && (Object.keys(legacy).length || Object.keys(scoped).length)) {
+      const { scene } = await loadSceneRevision(boardId, head),
+        elements = new Map(scene.elements.map((element: any) => [element.id, element]))
+      for (const record of Object.values({ ...legacy, ...scoped }) as any[]) {
+        let element: any
+        try {
+          element = typeof record.data === 'string' ? JSON.parse(record.data) : (record.element ?? record)
+        } catch {
+          continue
+        }
+        const previous: any = elements.get(element.id)
+        if (
+          element.id &&
+          (!previous ||
+            element.version > previous.version ||
+            (element.version === previous.version && element.versionNonce < previous.versionNonce))
+        )
+          elements.set(element.id, element)
+      }
+      await checkpointScene(
+        boardId,
+        { ...scene, elements: [...elements.values()] },
+        head,
+        { uid: head.ownerId, trusted: true },
+        migrationId,
+      )
+    }
+    // Fence new transport before publishing the client-visible protocol switch.
+    const switched = await room.transaction((current) => {
+      if (current?.restoreOperationId !== migrationId || current.restoreFence !== head.restoreFence) return
+      const generations = {
+        ...current.generations,
+        [head.generation]: { ...current.generations?.[head.generation], elements: { ...legacy, ...scoped } },
+      }
+      const next = { ...current, historyProtocolVersion: 1, generation: head.generation, generations }
+      delete next.elements
+      return next
+    })
+    if (!switched.committed) throw new HttpsError('aborted', 'Migration switch fence was superseded.')
+    await db.runTransaction(async (tx) => {
+      const latest = (await tx.get(ref)).data()!
+      await authorizeScene(boardId, latest as SceneBinding, actor, tx)
+      const privateRef = latest.projectId
+          ? db.doc(`users/${latest.ownerId}/projects/${latest.projectId}/boards/${boardId}`)
+          : null,
+        privateDoc = privateRef ? await tx.get(privateRef) : null,
+        shareDoc = await tx.get(db.doc(`boardShares/${boardId}`))
+      if (
+        latest.restoreOperationId !== migrationId ||
+        latest.migrationLeaseId !== leaseId ||
+        latest.migrationLeaseUntil.toMillis() <= Date.now()
+      )
+        throw new HttpsError('aborted', 'Migration lease was superseded.')
+      if (privateDoc?.data()?.scene) {
+        tx.set(db.doc(`${root}/legacyArchive/private`), {
+          scene: privateDoc.data()!.scene,
+          archivedAt: Timestamp.now(),
+          expiresAt: Timestamp.fromMillis(Date.now() + 30 * 24 * 60 * 60 * 1000),
+        })
+        tx.update(privateRef!, { scene: FieldValue.delete() })
+      }
+      if (shareDoc.data()?.scene) {
+        tx.set(db.doc(`${root}/legacyArchive/share`), {
+          scene: shareDoc.data()!.scene,
+          archivedAt: Timestamp.now(),
+          expiresAt: Timestamp.fromMillis(Date.now() + 30 * 24 * 60 * 60 * 1000),
+        })
+        tx.update(shareDoc.ref, { scene: FieldValue.delete() })
+      }
+      tx.update(ref, { historyProtocolVersion: 1, chunkReferencesReady: true })
+    })
+    const unlocked = await room.transaction((current) => {
+      if (current?.restoreOperationId !== migrationId || current.restoreFence !== head.restoreFence) return
+      return { ...current, restoreOperationId: null }
+    })
+    if (!unlocked.committed) throw new HttpsError('aborted', 'Migration unlock fence was superseded.')
+    await db.runTransaction(async (tx) => {
+      const latest = (await tx.get(ref)).data()!
+      if (
+        latest.restoreOperationId !== migrationId ||
+        latest.migrationLeaseId !== leaseId ||
+        latest.migrationLeaseUntil.toMillis() <= Date.now()
+      )
+        throw new HttpsError('aborted', 'Migration unlock lease was superseded.')
+      tx.update(ref, { restoreOperationId: null, migrationLeaseUntil: null })
+    })
+    return (await ref.get()).data()!
+  } finally {
+    room.off('value', holdRoom)
+  }
+}

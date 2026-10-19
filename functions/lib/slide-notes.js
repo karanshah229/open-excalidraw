@@ -1,3 +1,5 @@
+import { assertContentWritable, publishContentVersion } from './board-history-model.js';
+import { loadNoteSnapshot, writeNoteSnapshot } from './board-history-notes.js';
 import { getFirestore } from 'firebase-admin/firestore';
 import { defineBoolean, defineString } from 'firebase-functions/params';
 import { HttpsError, onCall } from 'firebase-functions/v2/https';
@@ -48,7 +50,12 @@ export const slideNotes = onCall({ region, enforceAppCheck: enforceAppCheck.valu
         if (!allowed || !isAssetParentActive(project) || !isAssetParentActive(board)) {
             throw new HttpsError('permission-denied', 'Board editor access required.');
         }
-        const existing = (await transaction.get(noteRef)).data();
+        const head = (await transaction.get(db.doc(`boardScenes/${boardId}`))).data();
+        const receiptRef = operation === 'write' ? db.doc(`boardScenes/${boardId}/noteReceipts/${mutationId}`) : null;
+        const receipt = receiptRef ? (await transaction.get(receiptRef)).data() : null;
+        const snapshot = head ? await loadNoteSnapshot(boardId, head.notesRevisionId ?? null, transaction) : null;
+        const existingRaw = (await transaction.get(noteRef)).data();
+        const existing = snapshot ? snapshot[slideId] : existingRaw;
         const current = {
             text: existing?.text ?? '',
             revision: existing?.revision ?? 0,
@@ -56,12 +63,38 @@ export const slideNotes = onCall({ region, enforceAppCheck: enforceAppCheck.valu
         };
         if (operation === 'read')
             return { ...current, conflict: false };
-        if (existing?.mutationId === mutationId)
+        if (receipt) {
+            if (receipt.actorUid !== uid ||
+                receipt.slideId !== slideId ||
+                receipt.text !== text ||
+                receipt.generation !== (request.data.generation ?? request.data.expectedGeneration ?? 1))
+                throw new HttpsError('already-exists', 'Note mutation identity was reused.');
+            return receipt.result;
+        }
+        if (operation === 'write' && head) {
+            if (!Number.isInteger(request.data.generation ?? request.data.expectedGeneration) ||
+                !Number.isInteger(request.data.expectedFence))
+                throw new HttpsError('invalid-argument', 'Generation and restore fence are required.');
+            assertContentWritable(head, request.data.generation ?? request.data.expectedGeneration, request.data.expectedFence);
+        }
+        if (existingRaw?.mutationId === mutationId && (!head || existingRaw?.generation === head.generation))
             return { ...current, conflict: false };
         if (revision !== current.revision)
             return { ...current, conflict: true };
         const next = { text, revision: current.revision + 1, updatedAt: new Date().toISOString() };
-        transaction.set(noteRef, { ...next, mutationId, updatedBy: uid });
+        if (head)
+            publishContentVersion(transaction, boardId, head, { uid }, `note_${mutationId}`, {
+                notesRevisionId: writeNoteSnapshot(transaction, boardId, { ...snapshot, [slideId]: next }),
+            }, 'speaker-note');
+        transaction.set(noteRef, { ...next, mutationId, updatedBy: uid, generation: head?.generation ?? 1 });
+        transaction.create(receiptRef, {
+            actorUid: uid,
+            slideId,
+            text,
+            generation: head?.generation ?? 1,
+            result: { ...next, conflict: false },
+            expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+        });
         return { ...next, conflict: false };
     });
 });

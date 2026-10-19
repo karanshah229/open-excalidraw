@@ -23,8 +23,11 @@ service firebase.storage {
       allow read, write: if false;
     }
     match /boards/{boardId}/snapshots/{snapshotId} {
-      allow read: if readBoard(board(boardId));
-      allow write: if editBoard(board(boardId));
+      allow read: if readBoard(board(boardId)) && (!firestore.exists(/databases/(default)/documents/boardScenes/$(boardId))
+        || (firestore.get(/databases/(default)/documents/boardScenes/$(boardId)).data.get('historyProtocolVersion', 0) != 1));
+      allow write: if editBoard(board(boardId))
+        && (!firestore.exists(/databases/(default)/documents/boardScenes/$(boardId))
+          || firestore.get(/databases/(default)/documents/boardScenes/$(boardId)).data.get('historyProtocolVersion', 0) != 1);
     }
   }
 }

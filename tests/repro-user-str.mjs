@@ -58,6 +58,7 @@ async function runUserSTRVerification() {
         id,
         projectId: proj.id,
         name: 'Architecture Diagram',
+        active: true,
         scene: {
           elements: [
             {

@@ -16,44 +16,17 @@ import { patchEmulatorDocument } from './emulator-document-fixture'
 import { projectService } from '../src/features/sharing/project-service'
 import { sharingService } from '../src/features/sharing/sharing-service'
 import { workspaceApi } from '../src/features/workspace/workspace-api'
+import { readHistorySnapshot } from '../src/features/history/history-service'
 import type { BoardScene } from '@agentic-whiteboard/storage'
 
 /** Independent durable reader: image regressions must inspect stored descriptors, not hydrated bytes. */
 export async function persistedScene(boardId: string, legacy?: any): Promise<BoardScene> {
-  const db = getFirestoreDb()!
-  const head = (await getDoc(doc(db, 'boardScenes', boardId))).data()
-  if (!head?.headRevisionId) {
-    if (legacy) return legacy
-    throw new Error('Missing committed scene head')
-  }
-  const revision = (await getDoc(doc(db, 'boardScenes', boardId, 'revisions', head.headRevisionId))).data()!
-  const records: any[] = []
-  for (let page = 0; page < revision.pageCount; page++) {
-    const refs = (
-      await getDoc(
-        doc(db, 'boardScenes', boardId, 'revisions', head.headRevisionId, 'pages', String(page).padStart(6, '0')),
-      )
-    ).data()!.references
-    for (const reference of refs) {
-      const chunk = (await getDoc(doc(db, 'boardScenes', boardId, 'chunks', reference.chunkId))).data()!
-      const digest = Array.from(
-        new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(chunk.payload))),
-        (byte) => byte.toString(16).padStart(2, '0'),
-      ).join('')
-      if (digest !== reference.digest || chunk.digest !== digest) throw new Error('Corrupt persisted image scene')
-      records.push(...JSON.parse(chunk.payload))
-    }
-  }
-  const scene: BoardScene = {
-    elements: records
-      .filter((r) => r.kind === 'element')
-      .sort((a, b) => a.order - b.order)
-      .map((r) => r.value),
-    appState: records.find((r) => r.kind === 'appState').value,
-  }
-  if (records.find((r) => r.kind === 'header').value.hasFiles)
-    scene.files = Object.fromEntries(records.filter((r) => r.kind === 'file').map((r) => [r.value.id, r.value]))
-  return scene
+  // History v1 intentionally denies direct reads of revision/page/chunk
+  // documents. Exercise the supported authenticated gateway, which also
+  // verifies the immutable chunk digests before returning the scene.
+  const head = (await getDoc(doc(getFirestoreDb()!, 'boardScenes', boardId))).data()
+  if (!head?.headRevisionId && legacy) return legacy
+  return (await readHistorySnapshot(boardId, undefined, false, false)).scene
 }
 
 export async function exerciseCloudAssets(dataURL: string, live?: string) {
@@ -240,6 +213,8 @@ export async function exerciseAssetLifecycle(boardId: string) {
   )
   const sharedPath = lifecycleScene.files!.asset.storagePath!
   const privatePath = `users/${auth.currentUser!.uid}/boards/${boardId}/assets/asset`
+  const referencedPath = sourceScene.files!.asset.storagePath!
+  const boardHead = (await getDoc(doc(getFirestoreDb()!, 'boardScenes', boardId))).data()!
   const read = (storagePath: string) => requestBoardAsset({ operation: 'read', storagePath })
   const denied = async (path: string) => {
     try {
@@ -274,54 +249,65 @@ export async function exerciseAssetLifecycle(boardId: string) {
   await sharePolicy('restricted', 'viewer')
   const restrictedDeniesVisitor = (await visitorDenied('read')) && (await visitorDenied('upload'))
   await sharePolicy('anyone_with_link', 'viewer')
-  const publicViewerCanRead = Boolean((await visitorAsset({ operation: 'read', storagePath: sharedPath })).data)
+  // Link access does not authorize arbitrary uploaded assets. The shared-root
+  // path is not in the current scene, so guests must not be able to read it.
+  const publicViewerCannotReadUnreferencedAsset = await visitorDenied('read')
   const publicViewerCannotUpload = await visitorDenied('upload')
   await sharePolicy('anyone_with_link', 'editor')
-  const publicEditorCanReuseAsset = Boolean((await visitorAsset({ operation: 'upload', storagePath: sharedPath })).data)
+  const publicEditorCanReuseAsset = Boolean(
+    (
+      await visitorAsset({
+        operation: 'upload',
+        storagePath: sharedPath,
+        generation: boardHead.generation,
+        expectedFence: boardHead.restoreFence ?? 0,
+      })
+    ).data,
+  )
   await sharePolicy('restricted', 'viewer')
   const revokedVisitorCannotRead = await visitorDenied('read')
   await deleteApp(visitorApp)
-  const before = (await read(sharedPath)).dataURL
+  const before = (await read(referencedPath)).dataURL
   const originalScene = await persistedScene(boardId)
   await sharingService.updateSharedScene(boardId, {
     ...originalScene,
     elements: originalScene.elements.map((el: any) => ({ ...el, isDeleted: true, version: Number(el.version) + 1 })),
   })
-  const imageTombstoneRetainsBytes = (await read(sharedPath)).dataURL === before
+  const imageTombstoneRetainsBytes = (await read(referencedPath)).dataURL === before
   await sharingService.updateSharedScene(boardId, {
     ...originalScene,
     elements: originalScene.elements.map((el: any) => ({ ...el, isDeleted: false, version: Number(el.version) + 2 })),
   })
-  const imageRestoreReusesBytes = (await read(sharedPath)).dataURL === before
+  const imageRestoreReusesBytes = (await read(referencedPath)).dataURL === before
   // Missing token metadata must not be regeneratable by a browser, even its owner.
   let directStorageDenied = false
   let tokenCreationDenied = false
   try {
-    await getBytes(ref(getFirebaseStorage()!, sharedPath))
+      await getBytes(ref(getFirebaseStorage()!, referencedPath))
   } catch (error: any) {
     directStorageDenied = error.code === 'storage/unauthorized'
   }
   try {
-    await getDownloadURL(ref(getFirebaseStorage()!, sharedPath))
+      await getDownloadURL(ref(getFirebaseStorage()!, referencedPath))
   } catch (error: any) {
     tokenCreationDenied = error.code === 'storage/unauthorized'
   }
   try {
     await patchEmulatorDocument(privateRef.path, { active: false })
-    const boardDeleteDeniesBoth = (await denied(privatePath)) && (await denied(sharedPath))
+      const boardDeleteDeniesBoth = (await denied(privatePath)) && (await denied(referencedPath))
     await patchEmulatorDocument(privateRef.path, { active: true })
     await patchEmulatorDocument(shareRef.path, { deletedAt: null })
-    const boardRestoreReusesBytes = (await read(sharedPath)).dataURL === before
+    const boardRestoreReusesBytes = (await read(referencedPath)).dataURL === before
     await patchEmulatorDocument(projectRef.path, { active: false })
-    const projectDeleteDeniesBoth = (await denied(privatePath)) && (await denied(sharedPath))
+      const projectDeleteDeniesBoth = (await denied(privatePath)) && (await denied(referencedPath))
     await patchEmulatorDocument(projectRef.path, { active: true })
-    const projectRestoreReusesBytes = (await read(sharedPath)).dataURL === before
+    const projectRestoreReusesBytes = (await read(referencedPath)).dataURL === before
     await patchEmulatorDocument(shareRef.path, { active: false })
-    const sharedDeleteDenied = await denied(sharedPath)
+    const sharedDeleteDenied = await denied(referencedPath)
     await patchEmulatorDocument(shareRef.path, { active: true })
     return {
       restrictedDeniesVisitor,
-      publicViewerCanRead,
+      publicViewerCannotReadUnreferencedAsset,
       publicViewerCannotUpload,
       publicEditorCanReuseAsset,
       revokedVisitorCannotRead,

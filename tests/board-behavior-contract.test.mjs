@@ -206,9 +206,7 @@ try {
     await draw(page)
     const fileId = await insertImage(page)
     const uploadedData = await page.evaluate((id) => window.__excalidrawAPI.getFiles()[id].dataURL, fileId)
-    await page.waitForFunction(() =>
-      document.querySelector('#header-status-slot')?.textContent.includes('Synced locally'),
-    )
+    await page.waitForSelector('[data-testid="board-info-open"][data-sync-status="Synced locally"]')
     const url = page.url()
     const ids = await page.evaluate(() =>
       window.__excalidrawAPI
@@ -240,7 +238,7 @@ try {
     await owner.goto(`${base}/boards/${id}`)
     await owner.waitForFunction(() => Boolean(window.__excalidrawAPI))
     await draw(owner)
-    await owner.waitForSelector('.sync-status-pill--saved')
+    await owner.waitForSelector('[data-testid="board-info-open"][data-sync-status="Synced"]')
     // Publish a link and restrict it again through the UI: the recipient has a
     // real previously issued link, rather than an unpublished synthetic URL.
     await share(owner)
@@ -472,7 +470,7 @@ try {
     )
     await reopened.waitForFunction((id) => Boolean(window.__excalidrawAPI.getFiles()[id]?.dataURL), {}, fileId)
     assert.equal(await reopened.evaluate((id) => window.__excalidrawAPI.getFiles()[id]?.dataURL, fileId), uploadedData)
-    await reopened.waitForSelector('.sync-status-pill--saved')
+    await reopened.waitForSelector('[data-testid="board-info-open"][data-sync-status="Synced"]')
     await closeTab(reopened)
     const saved = await open(context, `/boards/${id}`)
     await saved.waitForFunction(() => Boolean(window.__excalidrawAPI))

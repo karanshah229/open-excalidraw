@@ -45,6 +45,7 @@ export function SlidesPanel({
   onInteraction,
   onStageChange,
   onSharePresentation,
+  footerActions,
 }: {
   session: ReturnType<typeof createSceneSession>
   containerRef: MutableRefObject<HTMLElement | null>
@@ -57,6 +58,7 @@ export function SlidesPanel({
   onInteraction: () => void
   onStageChange: (open: boolean) => void
   onSharePresentation: () => void
+  footerActions?: ReactNode
 }) {
   const previewCache = useMemo(createSlidePreviewCache, [boardId, identity])
   useEffect(() => () => previewCache.clear(), [previewCache])
@@ -185,6 +187,7 @@ export function SlidesPanel({
         containerRef={containerRef}
         slideCount={slides.length}
         theme={scene.theme}
+        footerActions={footerActions}
         onSlidesVisibilityChange={setOpen}
         slidesHeader={
           slides.length ? (

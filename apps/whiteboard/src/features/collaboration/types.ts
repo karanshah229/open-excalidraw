@@ -19,6 +19,8 @@ export interface ActiveSessionRecord {
 }
 
 export interface ElementDeltaRecord {
+  generation?: number
+  restoreFence?: number
   id: string
   version: number
   versionNonce: number

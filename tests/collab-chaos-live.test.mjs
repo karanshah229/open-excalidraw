@@ -111,6 +111,7 @@ async function runChaosSuite() {
           id,
           projectId: project.id,
           name: 'Chaos Board',
+          active: true,
           scene: { elements: [initial], appState: { viewBackgroundColor: '#ffffff' } },
           revision: 1,
           syncStatus: 'synced',

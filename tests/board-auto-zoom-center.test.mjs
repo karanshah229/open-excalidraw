@@ -37,6 +37,7 @@ async function runAutoZoomCenterTest() {
         id,
         projectId: proj.id,
         name: 'Large Diagram Board',
+        active: true,
         scene: {
           elements: [
             {
@@ -188,6 +189,7 @@ async function runAutoZoomCenterTest() {
         id,
         projectId: proj.id,
         name: 'Small Diagram Board',
+        active: true,
         scene: {
           elements: [
             {
@@ -298,6 +300,7 @@ async function runAutoZoomCenterTest() {
         id,
         projectId: project.id,
         name: 'Architecture-scale Zoom Fixture',
+        active: true,
         scene: { elements, appState: { viewBackgroundColor: '#ffffff' } },
       })
     }, targetBoardId)

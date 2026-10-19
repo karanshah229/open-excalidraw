@@ -39,6 +39,7 @@ async function runTest() {
         id,
         projectId: proj.id,
         name: 'Solo Undo Board',
+        active: true,
         scene: {
           elements: [
             {
@@ -143,7 +144,7 @@ async function runTest() {
       return {
         active: window.__excalidrawAPI.getSceneElements().filter((e) => !e.isDeleted).length,
         all: all.map((e) => ({ id: e.id, version: e.version, versionNonce: e.versionNonce, isDeleted: e.isDeleted })),
-        status: document.querySelector('.sync-status-pill')?.textContent?.trim() || '',
+        status: document.querySelector('[data-testid="board-info-open"]')?.getAttribute('data-sync-status') || '',
         collab: window.__lazyCollab,
       }
     })
@@ -165,7 +166,7 @@ async function runTest() {
       return {
         active: window.__excalidrawAPI.getSceneElements().filter((e) => !e.isDeleted).length,
         all: all.map((e) => ({ id: e.id, version: e.version, versionNonce: e.versionNonce, isDeleted: e.isDeleted })),
-        status: document.querySelector('.sync-status-pill')?.textContent?.trim() || '',
+        status: document.querySelector('[data-testid="board-info-open"]')?.getAttribute('data-sync-status') || '',
       }
     })
     console.log(`   P2 initial -> active: ${p2Initial.active}, status: "${p2Initial.status}"`)
@@ -184,8 +185,8 @@ async function runTest() {
       return {
         active: window.__excalidrawAPI.getSceneElements().filter((e) => !e.isDeleted).length,
         all: all.map((e) => ({ id: e.id, version: e.version, versionNonce: e.versionNonce, isDeleted: e.isDeleted })),
-        status: document.querySelector('.sync-status-pill')?.textContent?.trim() || '',
-        statusClass: document.querySelector('.sync-status-pill')?.className || '',
+        status: document.querySelector('[data-testid="board-info-open"]')?.getAttribute('data-sync-status') || '',
+        statusClass: document.querySelector('[data-testid="board-info-open"]')?.className || '',
       }
     })
     const p2AfterUndo = await page2.evaluate(() => {
@@ -193,8 +194,8 @@ async function runTest() {
       return {
         active: window.__excalidrawAPI.getSceneElements().filter((e) => !e.isDeleted).length,
         all: all.map((e) => ({ id: e.id, version: e.version, versionNonce: e.versionNonce, isDeleted: e.isDeleted })),
-        status: document.querySelector('.sync-status-pill')?.textContent?.trim() || '',
-        statusClass: document.querySelector('.sync-status-pill')?.className || '',
+        status: document.querySelector('[data-testid="board-info-open"]')?.getAttribute('data-sync-status') || '',
+        statusClass: document.querySelector('[data-testid="board-info-open"]')?.className || '',
       }
     })
 
