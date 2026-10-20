@@ -177,6 +177,9 @@ async function performWorkspaceSync(userId: string) {
     if (board.syncStatus !== 'local-only' || historyPending.has(board.id) || !board.cloudRevisionId || board.cloudScenePending)
       continue
     await workspaceStore.markBoardSynced(board.id, board.revision)
+    const settled = await workspaceStore.loadBoard(board.id)
+    if (activation !== generation || activeUserId !== userId) return
+    if (settled) window.dispatchEvent(new CustomEvent(`board-sync:${board.id}`, { detail: settled.syncStatus }))
     settledBoardIds.add(board.id)
   }
   const unsyncedBoards = boards.filter(

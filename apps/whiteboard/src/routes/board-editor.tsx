@@ -62,6 +62,7 @@ import { scheduleWhiteboardFontPreload } from '../features/fonts/font-loading'
 import { getSlides, newSlideData, slideLabel, slideMetadata } from '../features/slides/slide-model'
 import {
   commitSlideCommand,
+  convertSelectedFramesToSlides,
   createSlide,
   duplicateSlide,
   normalizeDuplicatedSlides,
@@ -1523,7 +1524,7 @@ export function BoardEditor() {
     const applySyncStatus = (status: BoardSyncStatus) => {
       // Registered owned boards also have shared scenes. Their private project
       // lifecycle still blocks edits and retains pending bytes until restoration.
-      if (isSharedBoard && status !== 'sync-blocked' && !ownedSyncBlockedRef.current) return
+      if (isSharedBoard && !documentRef.current && status !== 'sync-blocked' && !ownedSyncBlockedRef.current) return
       ownedSyncBlockedRef.current = status === 'sync-blocked'
       if (status === 'conflict') generationConflictRef.current = true
       setState(statusLabel(status))
@@ -1531,20 +1532,32 @@ export function BoardEditor() {
       if (ownedSyncBlockedRef.current) setAccessDenied(false)
     }
     const unsubscribe = workspaceApi.subscribeToBoardSyncStatus(boardId, applySyncStatus)
-    // A project tombstone can arrive while the route is mounting, before its
-    // event listener exists. Reconcile the persisted status so the board cannot
-    // remain editable just because that one event was missed.
-    void workspaceApi
-      .loadBoard(boardId)
-      .then((document) => {
-        if (active && document?.syncStatus === 'sync-blocked') applySyncStatus('sync-blocked')
-      })
-      .catch((error) => console.error('Failed to reconcile board sync status:', error))
+    // Recover missed acknowledgements on mount/focus without overwriting an
+    // in-flight canvas save. Project tombstones must apply even while loading.
+    const reconcile = () => {
+      void workspaceApi
+        .loadBoard(boardId)
+        .then((document) => {
+          if (!active || !document) return
+          if (document.syncStatus === 'sync-blocked') applySyncStatus('sync-blocked')
+          else if (initialData && documentRef.current && !pendingSceneRef.current && !restoreGateRef.current) {
+            setState((current) =>
+              current === 'Saving' || current === 'Local save failed' || generationConflictRef.current
+                ? current
+                : statusLabel(document.syncStatus),
+            )
+          }
+        })
+        .catch((error) => console.error('Failed to reconcile board sync status:', error))
+    }
+    reconcile()
+    window.addEventListener('focus', reconcile)
     return () => {
       active = false
       unsubscribe()
+      window.removeEventListener('focus', reconcile)
     }
-  }, [boardId, isSharedBoard])
+  }, [boardId, isSharedBoard, Boolean(initialData)])
 
   const sendScene = useCallback(
     (elements = elementsRef.current, operationId?: string, result?: unknown) => {
@@ -2993,7 +3006,17 @@ export function BoardEditor() {
             }}
             onChange={onChange}
             onPointerUpdate={onPointerUpdate}
-            frameTool={slideFrameTool}
+            frameTool={{
+              ...slideFrameTool,
+              onSelect: () => {
+                const api = apiRef.current
+                if (!api || isReadOnly || isSpectator || isTransitioningCollab || accessDenied) return false
+                const frames = convertSelectedFramesToSlides(api)
+                if (!frames.length) return false
+                markSlideInteraction()
+                return true
+              },
+            }}
             getFrameLabel={slideLabel}
             onDuplicate={(next, previous) => {
               const known = new Set(previous.map((element) => element.id))

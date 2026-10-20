@@ -89,6 +89,37 @@ try {
   chunkFailure = 'none'
   assert.equal(await page.evaluate(() => !!window.__excalidrawAPI), false, 'Running production bundle')
   await page.waitForFunction(() => document.body.textContent.includes('Slide 1'))
+  async function selectComponent(name) {
+    for (const button of await page.$$('.App-toolbar__extra-tools-trigger')) {
+      if ((await button.boundingBox())?.width) {
+        await button.click()
+        break
+      }
+    }
+    await page.waitForSelector(`[data-testid="toolbar-${name}"]`, { visible: true })
+    await page.click(`[data-testid="toolbar-${name}"]`)
+  }
+  async function undoConversion(redo = false) {
+    await page.keyboard.down('Meta')
+    if (redo) await page.keyboard.down('Shift')
+    await page.keyboard.press('z')
+    if (redo) await page.keyboard.up('Shift')
+    await page.keyboard.up('Meta')
+  }
+  await selectComponent('frame')
+  await page.mouse.move(800, 280)
+  await page.mouse.down()
+  await page.mouse.move(1050, 450, { steps: 12 })
+  await page.mouse.up()
+  await selectComponent('slide')
+  await page.waitForFunction(() => document.body.textContent.includes('Slide 2'))
+  await selectComponent('slide')
+  await undoConversion()
+  await page.waitForFunction(() => !document.body.textContent.includes('Slide 2'))
+  await undoConversion(true)
+  await page.waitForFunction(() => document.body.textContent.includes('Slide 2'))
+  await undoConversion()
+  await undoConversion()
   const toolbarPosition = await page.$eval('.shapes-section', (node) => node.getBoundingClientRect().x)
   if (!(await page.$('.slides-panel'))) await page.click('.slides-toggle')
   assert.equal(
