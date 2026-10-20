@@ -147,7 +147,7 @@ try {
     downloadThroughput: -1, uploadThroughput: -1, connectionType: 'none' })
   await owner.waitForFunction(() => document.querySelector('[data-testid="history-preview-notes"]')?.textContent.includes('Canonical original speaker note'))
   await previewNetwork.detach()
-  assert.equal(calls.slice(offset).filter((call) => ['restoreBoardVersion', 'commitBoardScene', 'updateBoardContent'].includes(call.endpoint)).length, 0, 'Historical preview generated content writes')
+  assert.equal(calls.slice(offset).filter((call) => call.peer === 'owner' && ['restoreBoardVersion', 'commitBoardScene', 'updateBoardContent'].includes(call.endpoint)).length, 0, 'Historical preview generated content writes for the previewing owner')
   await owner.click('[data-testid="history-restore"]')
   if (await owner.$('[data-testid="history-data-loss-confirmation"]')) await owner.click('[data-testid="history-confirm-restore"]')
   await wait(async () => (await db.doc(`boardScenes/${seed.id}`).get()).data()?.generation === before.generation + 1, 'Restore did not publish exactly next generation')

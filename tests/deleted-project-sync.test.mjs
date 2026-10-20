@@ -62,6 +62,9 @@ try {
   // The shared-board header shows the read-only state as "View only"; the
   // specific project-deletion reason remains in the sync-status model.
   await page.waitForFunction(() => document.body.innerText.includes('View only'), { timeout: 10000 })
+  // The sync label and Excalidraw's read-only prop settle in separate React
+  // work, so wait for the actual editing gate before asserting it.
+  await page.waitForFunction(() => window.__excalidrawAPI?.getAppState().viewModeEnabled === true, { timeout: 10000 })
   assert.equal(await page.evaluate(() => window.__excalidrawAPI.getAppState().viewModeEnabled), true)
   const beforeBlockedSave = calls.length
   const pending = await page.evaluate(

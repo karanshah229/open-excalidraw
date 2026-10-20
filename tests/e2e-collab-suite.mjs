@@ -864,11 +864,28 @@ async function runLiveE2ECollaborationSuite() {
         undoShape.id,
       )
 
-      await page2.waitForFunction(
-        (id) => !window.__excalidrawAPI.getSceneElements().some((e) => e.id === id && !e.isDeleted),
-        { timeout: 15000 },
-        undoShape.id,
-      )
+      try {
+        await page2.waitForFunction(
+          (id) => !window.__excalidrawAPI.getSceneElements().some((e) => e.id === id && !e.isDeleted),
+          { timeout: 15000 },
+          undoShape.id,
+        )
+      } catch (error) {
+        const diagnostics = await Promise.all([page1, page2].map((page) => page.evaluate(async (id) => {
+          const api = window.__excalidrawAPI
+          const elements = api?.getSceneElementsIncludingDeleted?.() ?? api?.getSceneElements() ?? []
+          return {
+            element: elements.find((element) => element.id === id),
+            collab: window.__collab ? {
+              user: window.__collab.collabUser?.uid,
+              isSpectator: window.__collab.isSpectator,
+              editorCount: window.__collab.editorCount,
+            } : null,
+          }
+        }, undoShape.id)))
+        console.error('Delete propagation diagnostics (owner, guest):', JSON.stringify(diagnostics))
+        throw error
+      }
 
       await page1.keyboard.down('Meta')
       await page1.keyboard.press('KeyZ')
@@ -881,11 +898,28 @@ async function runLiveE2ECollaborationSuite() {
 
       // RTDB delivery is asynchronous. Assert the required state with a bounded
       // condition wait instead of a fixed delay that can fail under suite load.
-      await page2.waitForFunction(
-        (id) => window.__excalidrawAPI.getSceneElements().some((element) => element.id === id && !element.isDeleted),
-        { timeout: 15000 },
-        undoShape.id,
-      )
+      try {
+        await page2.waitForFunction(
+          (id) => window.__excalidrawAPI.getSceneElements().some((element) => element.id === id && !element.isDeleted),
+          { timeout: 15000 },
+          undoShape.id,
+        )
+      } catch (error) {
+        const diagnostics = await Promise.all([page1, page2].map((page) => page.evaluate(async (id) => {
+          const api = window.__excalidrawAPI
+          const elements = api?.getSceneElementsIncludingDeleted?.() ?? api?.getSceneElements() ?? []
+          return {
+            element: elements.find((element) => element.id === id),
+            collab: window.__collab ? {
+              user: window.__collab.collabUser?.uid,
+              isSpectator: window.__collab.isSpectator,
+              editorCount: window.__collab.editorCount,
+            } : null,
+          }
+        }, undoShape.id)))
+        console.error('Undo resurrection diagnostics (owner, guest):', JSON.stringify(diagnostics))
+        throw error
+      }
 
       console.log('   ✓ Shape deleted and restored via Undo, successfully synced to Guest in real time!')
       passedTests++

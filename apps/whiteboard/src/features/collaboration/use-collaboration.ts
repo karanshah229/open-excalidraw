@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ExcalidrawImperativeAPI } from '@excalidraw/excalidraw/types'
 import type { Collaborator } from '@excalidraw/excalidraw/types'
-import { reconcileElements } from '@excalidraw/excalidraw'
+import { reconcileElementsLWW } from './reconcile'
 import { type User } from 'firebase/auth'
 import { getFirebaseAuth, getFirebaseRtdb, getFirebaseStorage } from '../../lib/firebase'
 import { ensureAuthenticatedUser, generateSessionId, resolveCollabUser, getAnonymousProfile } from './anonymous-user'
@@ -276,8 +276,11 @@ export function useCollaboration({
       lastBroadcastElementsRef.current.set(mergedElement.id, { ...mergedElement })
 
       // Reconcile with live scene elements using Excalidraw's engine
-      const appState = appStateRef.current
-      const reconciled = reconcileElements(local, [mergedElement], appState as any)
+      // Excalidraw's multiplayer reconciler can retain a locally normalized
+      // intermediate gesture frame when a higher-version final element arrives
+      // over RTDB. Use the same version/nonce ordering as the canonical scene
+      // merge, then let Excalidraw render that winning full element.
+      const reconciled = reconcileElementsLWW(local, [mergedElement])
 
       elementsRef.current = reconciled
       // Establish the editor's remote baseline before updateScene can invoke
@@ -546,30 +549,27 @@ export function useCollaboration({
         const prev = known.get(elem.id)
         const last = lastBroadcastElementsRef.current.get(elem.id)
 
-        // A different nonce alone does not prove that a same-version element is
-        // newer. During pointer gestures Excalidraw can emit multiple geometry
-        // snapshots at one version; treating each nonce as a competing winner
-        // lets a peer keep an intermediate frame forever. Compare authored
-        // content first and give a changed local snapshot a monotonic version.
-        const isForwardVersion = !prev || elem.version > prev.version
+        // A different nonce or a higher local Excalidraw version alone does not
+        // prove this authored state wins over a peer's state at that version.
+        // Tombstones and local resurrection must be unambiguous: a remote active
+        // copy at the same version must not resurrect a deletion. Ordinary
+        // concurrent edits keep Excalidraw's same-version nonce tie-break; local
+        // undo/reverts at or below our known version still get a monotonic bump.
+        const isResurrected = Boolean(last?.isDeleted) && !elem.isDeleted
+        const hasStateChanged = Boolean(last && haveElementPropertiesChanged(last, elem))
+        const isDeleted = Boolean(last && !last.isDeleted && elem.isDeleted)
+        const isForwardVersion = !prev || Number(elem.version ?? 1) > prev.version
 
-        if (isForwardVersion) {
+        if (last && (isDeleted || isResurrected || (hasStateChanged && !isForwardVersion))) {
+          const bumpedVersion = Math.max(Number(elem.version ?? 1), Number(prev?.version ?? 1)) + 1
+          const bumpedNonce = Math.floor(Math.random() * 1000000)
+          const bumpedElem = { ...elem, version: bumpedVersion, versionNonce: bumpedNonce }
+          changedElements.push(bumpedElem)
+          known.set(elem.id, { version: bumpedVersion, versionNonce: bumpedNonce })
+          hasVersionBumps = true
+        } else if (isForwardVersion) {
           changedElements.push(elem)
           known.set(elem.id, { version: Number(elem.version ?? 1), versionNonce: Number(elem.versionNonce ?? 0) })
-        } else if (last) {
-          // Detect if an element was resurrected or reverted locally (e.g. via Undo)
-          // where Excalidraw restored an older or matching version number
-          const isResurrected = Boolean(last.isDeleted) && !elem.isDeleted
-          const hasStateChanged = haveElementPropertiesChanged(last, elem)
-
-          if (isResurrected || hasStateChanged) {
-            const bumpedVersion = Math.max(Number(elem.version ?? 1), Number(prev?.version ?? 1)) + 1
-            const bumpedNonce = Math.floor(Math.random() * 1000000)
-            const bumpedElem = { ...elem, version: bumpedVersion, versionNonce: bumpedNonce }
-            changedElements.push(bumpedElem)
-            known.set(elem.id, { version: bumpedVersion, versionNonce: bumpedNonce })
-            hasVersionBumps = true
-          }
         }
       }
 
