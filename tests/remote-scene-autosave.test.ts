@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { getSceneSignature } from '../apps/whiteboard/src/features/scenes/scene-signature.js'
+import { reconcileElementsLWW } from '../apps/whiteboard/src/features/collaboration/reconcile.js'
 
 const require = createRequire(new URL('../apps/whiteboard/package.json', import.meta.url))
 const ts = require('typescript')
@@ -49,6 +50,7 @@ let publishes = 0
 const environment = {
   ...refs,
   getSceneSignature,
+  reconcileElementsLWW,
   isReadOnly: false,
   isTransitioningCollab: false,
   apiRef: { current: { getFiles: () => ({}), getAppState: () => appState } },

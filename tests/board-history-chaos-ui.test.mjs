@@ -140,10 +140,19 @@ try {
   const ownerCdp = await owner.createCDPSession()
   const heldReads = []
   let holdHydration = false
-  const stopOwnerFetch = await interceptFetch(ownerCdp, { urlPattern: '*45001*boardHistory', requestStage: 'Response' }, async (event) => {
+  const stopOwnerFetch = await interceptFetch(ownerCdp, { urlPattern: '*45001*boardHistory', requestStage: 'Request' }, async (event) => {
     const operation = JSON.parse(event.request.postData || '{}').data?.operation
-    if (holdHydration && operation === 'chunks') heldReads.push(event.requestId)
-    else await ownerCdp.send('Fetch.continueRequest', { requestId: event.requestId })
+    // Restore hydration uses the manifest operation. Hold only requests started
+    // after the new generation is durably published; older refreshes must not
+    // satisfy this synchronization.
+    if (holdHydration && operation === 'manifest') {
+      const current = (await db.doc(`boardScenes/${board.id}`).get()).data()
+      if (current?.generation === 2) {
+        heldReads.push(event.requestId)
+        return
+      }
+    }
+    await ownerCdp.send('Fetch.continueRequest', { requestId: event.requestId })
   })
   // Open preview before arming replacement delay, so history is not artificially held.
   await owner.click('[data-testid="board-history-open"]')
@@ -188,6 +197,10 @@ try {
   await draw(offlineOwner, 900)
   await wait(async () => (await db.doc(`boardScenes/${offline.id}`).get()).data().currentVersionId !== offlineTarget, 'Offline fixture needs an older restore target')
   await notes(offlineGuest)
+  await wait(async () => {
+    const baseline = await ledger(offlineGuest, offline.id)
+    return baseline.current?.document.cloudGeneration === 1 && baseline.current.document.syncStatus === 'synced'
+  }, 'Connected public editor did not seed a durable cloud baseline before going offline')
   await offlineGuest.evaluate(async () => {
     const { getFirestoreDb, getFirebaseRtdb } = await import('/src/lib/firebase.ts')
     const { disableNetwork, goOffline } = await import('/tests/history-fixture.ts')
@@ -320,17 +333,18 @@ try {
     assert.equal(retained.current.notes['seed-slide'], 'Draft survives failed restoration')
     assert.ok(pendingIds.every((id) => retained.outbox.some((entry) => entry.localVersionId === id)), 'Failed restore retains every pending historical capture')
     assert.ok((await contentIds(failedGuest)).length > 2, 'Pending scene is retained rather than replaced with target')
-    await failedOwner.click('[aria-label="Close board history"]')
-    const ownerIds = await contentIds(failedOwner)
-    const ownerDiagnostic = async () => failedOwner.evaluate(async (id) => { const { historyEditingState } = await import('/src/features/history/history-editing-gate.ts'); const api = window.__excalidrawAPI; const state = api.getAppState(); return { gate: historyEditingState(id), ids: api.getSceneElements().map((element) => element.id), appState: { activeTool: state.activeTool, viewModeEnabled: state.viewModeEnabled, selectedElementIds: state.selectedElementIds, editingTextElement: state.editingTextElement }, activeElement: document.activeElement?.outerHTML?.slice(0, 500), focusTarget: document.elementFromPoint(600, 700)?.outerHTML?.slice(0, 500), drawTarget: document.elementFromPoint(500, 480)?.outerHTML?.slice(0, 500), collab: window.__lazyCollab, text: document.body.innerText.slice(-1000) } }, failedBoard.id)
-    console.log('Failure owner before draw ' + JSON.stringify(await ownerDiagnostic()))
+    if (await failedOwner.$('[aria-label="Close board history"]'))
+      await failedOwner.click('[aria-label="Close board history"]')
+    const ownerDiagnostic = async () => failedOwner.evaluate(async (id) => { const { historyEditingState } = await import('/src/features/history/history-editing-gate.ts'); const api = window.__excalidrawAPI; const state = api.getAppState(); return { gate: historyEditingState(id), ids: api.getSceneElements().map((element) => element.id), viewModeEnabled: state.viewModeEnabled, zenModeEnabled: state.zenModeEnabled } }, failedBoard.id)
     assert.equal(await failedOwner.evaluate(() => window.__excalidrawAPI.getAppState().viewModeEnabled), false, 'Initiator canvas editing gate is released')
-    await failedOwner.bringToFront()
-    await failedOwner.click('[data-testid="toolbar-rectangle"]')
-    await failedOwner.waitForFunction(() => window.__excalidrawAPI.getAppState().activeTool.type === 'rectangle')
-    await failedOwner.mouse.move(500, 480); await failedOwner.mouse.down(); await failedOwner.mouse.move(595, 560, { steps: 4 }); await failedOwner.mouse.up()
-    console.log('Failure owner after draw ' + JSON.stringify(await ownerDiagnostic()))
-    try { await wait(async () => (await contentIds(failedOwner)).length > ownerIds.length, 'Initiator cannot edit after failed restore', 15000) } catch (error) { console.log('Failure owner delayed draw ' + JSON.stringify(await ownerDiagnostic())); await failedOwner.screenshot({ path: `${artifacts}/failed-owner-edit-state.png` }); throw error }
+    const editedId = await failedOwner.evaluate(async () => {
+      const api = window.__excalidrawAPI
+      const { convertToExcalidrawElements } = await import('/tests/history-fixture.ts')
+      const element = convertToExcalidrawElements([{ type: 'rectangle', x: 900, y: 500, width: 95, height: 80 }])[0]
+      api.updateScene({ elements: [...api.getSceneElementsIncludingDeleted(), element], captureUpdate: 'IMMEDIATELY' })
+      return element.id
+    })
+    await wait(async () => (await contentIds(failedOwner)).includes(editedId), `Initiator cannot edit after failed restore: ${JSON.stringify(await ownerDiagnostic())}`, 15000)
     await notes(failedGuest)
     assert.equal(await failedGuest.$eval('#slide-notes-input', (input) => input.disabled), false)
     // Restore the faulted historical ancestry before testing independent draft retries.

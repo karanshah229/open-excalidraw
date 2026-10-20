@@ -19,6 +19,7 @@ const context = await browser.createBrowserContext(), page = await context.newPa
 const base = process.env.E2E_BASE_URL || 'http://127.0.0.1:15190', artifacts = process.env.E2E_ARTIFACT_DIR || '.system_generated/regression'
 const calls = [], responses = [], errors = [], checks = [], report = { captures: [], previews: [], timelines: [], bulkRenameCount: 55 }
 const pendingResponses = new Set()
+const cachedPreviewIds = new Set()
 let boardId, projectId, root
 await page.setViewport({ width: 1440, height: 900 }); page.setDefaultTimeout(60000)
 page.on('dialog', (dialog) => dialog.accept())
@@ -124,6 +125,12 @@ async function inspectTimeline(label, minimum = 0) {
   assert.equal(new Set(expectedIds).size, expectedIds.length, 'Gateway has no duplicate IDs across pages')
   await page.click('[data-testid="board-history-open"]')
   await page.waitForSelector('.history-entry')
+  const currentEntry = expected.entries.find((entry) => entry.versionId === currentHead.currentVersionId)
+  assert.ok(currentEntry, 'The current head appears in the eligible timeline')
+  await page.waitForFunction((name) => document.querySelector('[data-testid="history-preview-name"]')?.textContent === name, {}, currentEntry.boardName)
+  const initiallySelectedId = await page.$eval('.history-entry[aria-pressed="true"]', (row) => row.dataset.versionId)
+  assert.equal(initiallySelectedId, currentHead.currentVersionId, 'Opening history previews the latest version by default')
+  cachedPreviewIds.add(initiallySelectedId)
   let pageLoads = 1
   while (true) {
     await page.waitForFunction(() => !document.querySelector('.history-list [role="status"]'))
@@ -160,6 +167,7 @@ async function inspectTimeline(label, minimum = 0) {
 }
 async function preview(value, current = false) {
   const liveBefore = await head(), beforeCalls = calls.length, beforeResponses = responses.length
+  const wasCached = cachedPreviewIds.has(value.id)
   const liveIds = await page.evaluate(() => window.__excalidrawAPI.getSceneElements().filter((element) => !element.isDeleted).map((element) => element.id).sort())
   await page.click(`[data-version-id="${value.id}"]`)
   await page.waitForFunction((name) => document.querySelector('[data-testid="history-preview-name"]')?.textContent === name, {}, value.name)
@@ -167,12 +175,20 @@ async function preview(value, current = false) {
   await page.waitForFunction((text) => document.querySelector('[data-testid="history-preview-notes"]')?.textContent.includes(text), {}, value.notes['timeline-slide'] || 'No speaker notes')
   assert.equal(await page.$eval('[data-testid="history-restore"]', (button) => button.disabled), current, 'Current preview cannot be restored; older eligible previews can')
   await Promise.all([...pendingResponses])
-  const read = responses.slice(beforeResponses), manifest = read.find((entry) => entry.endpoint === 'boardHistory' && entry.request.operation === 'manifest' && entry.request.versionId === value.id)?.result
-  assert.ok(manifest, 'UI selected version requested a fixed actor-bound manifest')
+  const read = responses.slice(beforeResponses)
+  const manifestResponse = responses.find((entry) => entry.endpoint === 'boardHistory' && entry.request.operation === 'manifest' && entry.request.versionId === value.id)
+  const manifest = manifestResponse?.result
+  assert.ok(manifest, 'The selected version has a fixed actor-bound manifest, fetched initially or retained in cache')
+  const selectedManifestRequests = read.filter((entry) => entry.endpoint === 'boardHistory' && entry.request.operation === 'manifest' && entry.request.versionId === value.id)
+  assert.equal(selectedManifestRequests.length, wasCached ? 0 : 1, wasCached ? 'A cached version preview does not refetch its manifest' : 'A first preview fetches its manifest exactly once')
+  cachedPreviewIds.add(value.id)
   assert.equal(manifest.revisionId, value.sceneRevisionId)
   assert.equal(manifest.candidateDigest, value.manifestDigest)
   assert.equal(manifest.chunkCount, value.references.length)
-  const chunks = read.filter((entry) => entry.endpoint === 'boardHistory' && entry.request.operation === 'chunks' && entry.request.contextId === manifest.contextId).flatMap((entry) => entry.result.chunks)
+  const chunks = [
+    ...(manifestResponse.result.chunks ?? []),
+    ...responses.filter((entry) => entry.endpoint === 'boardHistory' && entry.request.operation === 'chunks' && entry.request.contextId === manifest.contextId).flatMap((entry) => entry.result.chunks),
+  ]
   assert.deepEqual(chunks.map((chunk) => ({ chunkId: chunk.chunkId, digest: chunk.digest })), value.references, 'UI preview read exactly the selected immutable chunk manifest')
   const { assembleScene } = await import('../functions/lib/scene-codec.js')
   assert.deepEqual(ids(await assembleScene(chunks)), ids(value.scene), 'Exact preview bytes contain that version’s elements, not live elements')
@@ -280,6 +296,7 @@ try {
   assert.ok(edited.some((entry) => entry.versionId === newSave.id))
   assert.ok(removed.every((id) => !edited.some((entry) => entry.versionId === id)))
   await page.click('[aria-label="Close board history"]')
+  cachedPreviewIds.clear()
   await page.reload(); await page.waitForSelector('[data-testid="board-history-open"]:not(:disabled)'); await settled()
   const reloaded = await inspectTimeline('Cold route reload keeps the exact eligible set')
   assert.deepEqual(reloaded.map((entry) => entry.versionId), edited.map((entry) => entry.versionId))

@@ -299,7 +299,14 @@ try {
   await open(guestB)
   console.log('Owner and guest tabs loaded; waiting for all three collaboration sessions.')
   await eventually(async () => (await Promise.all([owner, guestA, guestB].map(p => p.evaluate(() => !!window.__lazyCollab?.isLazyCollabActive)))).every(Boolean), 'Three real editors must join collaboration')
-  for (const p of [owner, guestA, guestB]) await idle(p)
+  // Public-link guests can render the canonical board without a local history
+  // record. Their local baseline is initialized on the first edit; requiring a
+  // history ledger merely for joining is not part of the collaboration contract.
+  await idle(owner)
+  for (const page of [guestA, guestB]) {
+    const guestLedger = await ledger(page)
+    assert.ok(!guestLedger.outbox.length, 'A newly joined guest must not create history writes before editing')
+  }
   const initial = await durable(); generation = initial.current.generation
   assert.ok(initial.refs.length >= 5, 'Fixture must exercise at least five cloud chunks')
   assert.deepEqual(ids(initial.elements), Array.from({ length: 24 }, (_, i) => `seed-${i}`).sort())
@@ -350,13 +357,18 @@ try {
   // still explicitly pending locally.
   const guestCaptures = await eventually(async () => {
     const captures = await Promise.all([guestA, guestB].map(async (page, index) => {
-      const versions = (await ledger(page)).versions.map((version) => version.localVersionId)
-      return versions.filter((id) => !guestVersionIdsBefore[index].includes(id))
+      const value = await ledger(page)
+      const publishableIds = new Set([
+        ...value.outbox.map((entry) => entry.localVersionId),
+        ...value.versions.filter((version) => version.receipt).map((version) => version.localVersionId),
+      ])
+      return value.versions.map((version) => version.localVersionId)
+        .filter((id) => !guestVersionIdsBefore[index].includes(id) && publishableIds.has(id))
     }))
     return captures.every((entries) => entries.length > 0) ? captures : null
   }, 'Each online guest creates at least one history capture after its debounced scene save', 30000)
-  guestCaptures[0] = await idle(guestA, guestCaptures[0], guestVersionIdsBefore[0])
-  guestCaptures[1] = await idle(guestB, guestCaptures[1], guestVersionIdsBefore[1])
+  guestCaptures[0] = await idle(guestA, guestCaptures[0])
+  guestCaptures[1] = await idle(guestB, guestCaptures[1])
   drawDiagnostics = await Promise.all([guestA, guestB].map(async (page, index) => ({
     peer: index === 0 ? 'guest-a' : 'guest-b',
     drawn: [onlineAddedA, onlineAddedB][index],

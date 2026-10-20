@@ -613,10 +613,14 @@ async function hydrateBoardOnOpen(boardId: string, expectedHeadRevisionId?: stri
 }
 
 /** Called after the editor mounts; note history is not on the drawing critical path. */
-export function loadDeferredCloudNotes(boardId: string): Promise<void> {
+export function loadDeferredCloudNotes(
+  boardId: string,
+  seedDocument?: BoardDocument,
+  seedRead?: { contextId: string; notesPageCount: number; generation: number },
+): Promise<void> {
   const active = deferredNoteRequests.get(boardId)
   if (active) return active
-  const pending = deferredHistoryReads.get(boardId)
+  const pending = deferredHistoryReads.get(boardId) ?? seedRead
   if (!pending || !navigator.onLine) return Promise.resolve()
   const request = (async () => {
     try {
@@ -626,7 +630,7 @@ export function loadDeferredCloudNotes(boardId: string): Promise<void> {
         // The board's scene was already downloaded on the drawing path. Seed
         // local version history from that durable copy and fetch only notes;
         // re-reading the full scene manifest/chunks here delayed first paint.
-        const local = await workspaceStore.loadBoard(boardId)
+        const local = (await workspaceStore.loadBoard(boardId)) ?? seedDocument
         if (!local || local.cloudGeneration !== pending.generation || !local.cloudRevisionId) return
         await boardHistoryStore.initialize(local, snapshot.notes)
       } else {

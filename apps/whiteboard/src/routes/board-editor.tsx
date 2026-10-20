@@ -6,7 +6,7 @@ import {
 import { PresentationView } from './presentation'
 import { AccessDenied } from '../components/access-denied'
 import { BoardLoading } from '../components/board-loading'
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { doc, getDoc, getDocFromServer, onSnapshot, updateDoc } from 'firebase/firestore'
 import { createPortal } from 'react-dom'
 import { Link, useNavigate, useParams, useBlocker } from '@tanstack/react-router'
@@ -81,7 +81,10 @@ import {
 } from '../features/history/history-editing-gate'
 import type { HistorySource } from '../features/history/history-model'
 import { RestorationProgress } from '../features/history/restoration-progress'
-const HistoryDialog = lazy(() => import('../features/history/history-dialog'))
+// History stays in the board route bundle so an editor that goes offline after
+// loading the canvas can still open its local version history without a failed
+// lazy-chunk request taking down the whole board route.
+import HistoryDialog from '../features/history/history-dialog'
 import { readSidebarPinned } from '../features/sidebar/sidebar-preferences'
 import { SlidesPanel } from '../features/slides/slides-panel'
 
@@ -237,6 +240,7 @@ export function BoardEditor() {
     nameRevision?: number
   }>()
   const restoreGateRef = useRef(false)
+  const restoreGateBaseRef = useRef<{ generation?: number; restoreFence?: number }>()
   const restoreHydrateRef = useRef<() => Promise<void>>(async () => {})
   const [historyOpen, setHistoryOpen] = useState(false)
   const [historySource, setHistorySource] = useState<HistorySource>()
@@ -247,9 +251,18 @@ export function BoardEditor() {
   const [historyFence, setHistoryFence] = useState<number>()
   const hydrationInFlightRef = useRef<Promise<void>>()
   const baselineInFlightRef = useRef<Promise<unknown>>()
+  const historyBaselineSceneRef = useRef<BoardScene>()
+  const historyReadContextRef = useRef<{ contextId: string; notesPageCount: number; generation: number }>()
   const publishedHydrationGenerationRef = useRef<number>()
   const setRestorationGate = useCallback(
     (blocked: boolean) => {
+      if (blocked && !restoreGateRef.current) {
+        restoreGateBaseRef.current = {
+          generation: historyHeadRef.current?.generation,
+          restoreFence: historyHeadRef.current?.restoreFence ?? 0,
+        }
+      }
+      if (!blocked) restoreGateBaseRef.current = undefined
       restoreGateRef.current = blocked
       const head = historyHeadRef.current
       setHistoryEditingState(boardId, {
@@ -725,9 +738,12 @@ export function BoardEditor() {
       }
       const before = await boardHistoryStore.getCommittedContent(boardId)
       if (!historyIsLocal && head) {
+        const gateBase = restoreGateBaseRef.current
         const generationAdvanced =
           (sceneGenerationRef.current !== undefined && head.generation > sceneGenerationRef.current) ||
-          (before?.document.cloudGeneration !== undefined && head.generation > before.document.cloudGeneration)
+          (before?.document.cloudGeneration !== undefined && head.generation > before.document.cloudGeneration) ||
+          (gateBase?.generation !== undefined && head.generation > gateBase.generation) ||
+          (gateBase?.restoreFence !== undefined && (head.restoreFence ?? 0) > gateBase.restoreFence)
         if (generationAdvanced) publishedHydrationGenerationRef.current = head.generation
         if (publishedHydrationGenerationRef.current !== head.generation) {
           // No successful replacement: a failed same-generation restore must preserve every draft.
@@ -880,8 +896,37 @@ export function BoardEditor() {
         if (!isReadOnly && !head.restoreOperationId && !baselineInFlightRef.current) {
           const baselineEpoch = boardEpochRef.current
           const baselineUser = getFirebaseAuth()?.currentUser?.uid
+          const timestamp = new Date().toISOString()
+          const seedDocument: BoardDocument = documentRef.current ?? {
+            id: boardId,
+            projectId: boardMeta?.projectId ?? '',
+            name: head.boardName ?? boardMeta?.boardName ?? 'Untitled',
+            active: true,
+            createdAt: boardMeta?.createdAt ?? timestamp,
+            updatedAt: boardMeta?.updatedAt ?? timestamp,
+            syncStatus: 'synced',
+            revision: 0,
+            baseRevision: 0,
+            cloudRevisionId: head.headRevisionId,
+            cloudGeneration: head.generation,
+            cloudVersionId: head.currentVersionId ?? undefined,
+            cloudRestoreFence: head.restoreFence ?? 0,
+            cloudNameRevision: head.nameRevision ?? 0,
+            syncAttempts: 0,
+            nextSyncAt: null,
+            lastSyncError: null,
+            formatVersion: 1,
+            scene: historyBaselineSceneRef.current ?? {
+              elements: elementsRef.current,
+              appState: appStateRef.current,
+              files: filesRef.current as BoardScene['files'],
+            },
+          }
+          const seedRead = historyReadContextRef.current?.generation === head.generation
+            ? historyReadContextRef.current
+            : undefined
           const task = workspaceApi
-            .loadDeferredCloudNotes(boardId)
+            .loadDeferredCloudNotes(boardId, seedDocument, seedRead)
             .then(() => {
               if (baselineEpoch !== boardEpochRef.current || baselineUser !== getFirebaseAuth()?.currentUser?.uid ||
                 restoreGateRef.current) return
@@ -895,6 +940,18 @@ export function BoardEditor() {
         setHistoryGeneration(head.generation)
         setHistoryFence(head.restoreFence ?? 0)
         if (head.restoreOperationId) setRestorationGate(true)
+        else if (
+          restoreGateBaseRef.current &&
+          ((restoreGateBaseRef.current.generation !== undefined &&
+            head.generation > restoreGateBaseRef.current.generation) ||
+            (head.restoreFence ?? 0) > (restoreGateBaseRef.current.restoreFence ?? 0))
+        ) {
+          // A restore may already have advanced the local scene/document
+          // metadata before its replacement chunks finish loading. The remote
+          // generation/fence is authoritative: keep every editor blocked until
+          // restoreHydrateRef applies the full replacement scene.
+          void restoreHydrateRef.current().catch(() => {})
+        }
         else if (
           (sceneGenerationRef.current !== undefined && sceneGenerationRef.current !== head.generation) ||
           (documentRef.current?.cloudGeneration !== undefined &&
@@ -957,6 +1014,8 @@ export function BoardEditor() {
     boardEpochRef.current++
     historyProtocolRef.current = false
     historyHeadRef.current = undefined
+    historyBaselineSceneRef.current = undefined
+    historyReadContextRef.current = undefined
     setHistoryGeneration(undefined)
     setHistoryFence(undefined)
     setHistoryOpen(false)
@@ -1026,6 +1085,10 @@ export function BoardEditor() {
         // Case 1: Board exists in Firebase (authoritative single source of truth)
         if (shared.status === 'allowed' && shared.config) {
           const config = shared.config
+          historyReadContextRef.current = config.historyReadContextId &&
+            config.historyNotesPageCount !== undefined && config.sceneGeneration !== undefined
+            ? { contextId: config.historyReadContextId, notesPageCount: config.historyNotesPageCount, generation: config.sceneGeneration }
+            : undefined
           setPresentationConfig(config.effectiveRole === 'presentation' ? config : undefined)
           const db = getFirestoreDb()
           const parent =
@@ -1035,6 +1098,7 @@ export function BoardEditor() {
             elements: [],
             appState: { viewBackgroundColor: 'transparent' },
           }
+          historyBaselineSceneRef.current = cloudScene
 
           // If local edits also exist, reconcile elements via LWW
           let finalScene = cloudScene

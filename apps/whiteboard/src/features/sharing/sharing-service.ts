@@ -34,6 +34,8 @@ export interface BoardShareConfig {
   scene?: BoardScene
   sceneRevisionId?: string
   sceneGeneration?: number
+  historyReadContextId?: string
+  historyNotesPageCount?: number
   createdAt: string
   updatedAt: string
   accessRevision?: number
@@ -337,7 +339,7 @@ export const sharingService = {
     _currentUserEmail?: string | null,
     _currentUserId?: string | null,
     knownFiles: BoardScene['files'] = {},
-    knownScene?: Pick<LoadedScene, 'scene' | 'revisionId' | 'generation'>,
+    knownScene?: Pick<LoadedScene, 'scene' | 'revisionId' | 'generation' | 'readContextId' | 'notesPageCount'>,
   ): Promise<{
     status: 'allowed' | 'restricted' | 'not-found'
     config?: BoardShareConfig
@@ -377,6 +379,8 @@ export const sharingService = {
           remoteData!.scene = await restoreSceneAssets(canonical.scene, knownFiles)
           remoteData!.sceneRevisionId = canonical.revisionId
           remoteData!.sceneGeneration = canonical.generation
+          remoteData!.historyReadContextId = canonical.readContextId
+          remoteData!.historyNotesPageCount = canonical.notesPageCount
         } else if (remoteData!.scene) remoteData!.scene = await restoreSceneAssets(remoteData!.scene, knownFiles)
       } catch (error: any) {
         if (error?.code === 'functions/permission-denied' || error?.code === 'permission-denied') {

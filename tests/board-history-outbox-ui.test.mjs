@@ -162,6 +162,7 @@ try {
   // or autosave callback. This verifies the actual rows use the receipt IDs.
   await page.evaluate(async (boardId) => {
     const { default: HistoryDialog } = await import('/src/features/history/history-dialog.tsx')
+    const { ThemeProvider } = await import('/src/lib/theme-context.tsx')
     // Resolve the existing Vite React module, including its configured cacheDir,
     // so this fixture does not introduce a second React instance.
     const reactUrl = performance.getEntriesByType('resource').map((entry) => entry.name)
@@ -178,9 +179,9 @@ try {
     document.body.append(host)
     const root = createRoot(host)
     window.__outboxDialog = { root, host }
-    root.render(React.createElement(HistoryDialog, { open: true, onOpenChange() {},
+    root.render(React.createElement(ThemeProvider, null, React.createElement(HistoryDialog, { open: true, onOpenChange() {},
       source: cloudHistorySource(boardId, () => ({ generation: head.generation, restoreFence: head.restoreFence })),
-      canRestore: false, async isDirty() { return false }, onRestoreStart() {}, async onRestoreComplete() {}, onRestoreFailed() {} }))
+      canRestore: false, async isDirty() { return false }, onRestoreStart() {}, async onRestoreComplete() {}, onRestoreFailed() {} })))
   }, boardId)
   await wait(async () => await page.$$eval('.history-entry', (rows) => rows.length) === timeline.length, 'production HistoryDialog did not display all eligible version rows')
   const visibleRows = await page.$$eval('.history-entry', (rows) => rows.map((row) => ({ id: row.dataset.versionId, timestamp: row.querySelector('time')?.dateTime, label: row.querySelector('time')?.textContent, expectedLabel: new Date(row.querySelector('time').dateTime).toLocaleString() })))

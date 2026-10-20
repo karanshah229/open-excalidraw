@@ -252,7 +252,12 @@ try {
     /complete|load/i,
     'Unhydrated metadata placeholder cannot be saved as an empty board',
   )
-  assert.equal((await durable(fixture.id)).head.headRevisionId, initial.head.headRevisionId)
+  const stillDurable = await durable(fixture.id)
+  assert.equal(stillDurable.scene.elements.length, initial.scene.elements.length,
+    'A rejected metadata-only offline save cannot replace the canonical scene with an empty placeholder')
+  assert.deepEqual(stillDurable.scene.elements.map((element) => element.id).sort(), initial.scene.elements.map((element) => element.id).sort())
+  assert.equal(stillDurable.scene.elements.find((element) => element.id === 'large-319')?.customData.payload,
+    initial.scene.elements.find((element) => element.id === 'large-319').customData.payload)
   await pendingContext.close()
   checkpoint('cold metadata discovery cannot edit an unhydrated scene offline')
   assert.equal(await owner.evaluate(() => window.__lazyCollab?.isLazyCollabActive), false)
