@@ -1,6 +1,7 @@
 export interface CollaboratorPresence {
   userId: string
   sessionId: string
+  connectionEpoch: string
   displayName: string
   color: string
   avatarUrl?: string
@@ -14,6 +15,7 @@ export interface CollaboratorPresence {
 export interface ActiveSessionRecord {
   userId: string
   sessionId: string
+  sceneGeneration: number
   joinedAt: number
   lastSeen: number
 }
@@ -23,6 +25,8 @@ export interface ElementDeltaRecord {
   version: number
   versionNonce: number
   lastModifiedBy: string
+  sessionId: string
+  connectionEpoch: string
   updatedAt: number
   data: string
 }

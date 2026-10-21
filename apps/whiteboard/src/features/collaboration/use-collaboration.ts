@@ -4,6 +4,7 @@ import type { Collaborator } from '@excalidraw/excalidraw/types'
 import { reconcileElements } from '@excalidraw/excalidraw'
 import { type User } from 'firebase/auth'
 import { getFirebaseAuth, getFirebaseRtdb, getFirebaseStorage } from '../../lib/firebase'
+import { onValue, ref } from 'firebase/database'
 import { ensureAuthenticatedUser, generateSessionId, resolveCollabUser, getAnonymousProfile } from './anonymous-user'
 import {
   CollaborationService,
@@ -24,6 +25,8 @@ export interface UseCollaborationOptions {
   apiRef: React.RefObject<ExcalidrawImperativeAPI | null>
   elementsRef: React.MutableRefObject<any[]>
   appStateRef: React.MutableRefObject<Record<string, unknown>>
+  onConnectionChange?: (connected: boolean) => void | Promise<void>
+  getSceneGeneration?: () => number
 }
 
 export function getFullSceneElements(
@@ -47,6 +50,8 @@ export function useCollaboration({
   apiRef,
   elementsRef,
   appStateRef,
+  onConnectionChange,
+  getSceneGeneration = () => 1,
 }: UseCollaborationOptions) {
   // Session ID stays fixed for the lifetime of this tab
   const sessionIdRef = useRef<string>(sessionId || generateSessionId())
@@ -69,6 +74,7 @@ export function useCollaboration({
     }
   })
   const [activeCollaborators, setActiveCollaborators] = useState<CollaboratorPresence[]>([])
+  const [connectionEpoch, setConnectionEpoch] = useState<string | null>(null)
   const collabUserRef = useRef(collabUser)
   collabUserRef.current = collabUser
 
@@ -79,6 +85,8 @@ export function useCollaboration({
   const isSpectator = !isEditor
   const isSpectatorRef = useRef(isSpectator)
   isSpectatorRef.current = isSpectator
+  const isReadOnlyRef = useRef(isReadOnly)
+  isReadOnlyRef.current = isReadOnly
 
   // Collaboration service singleton ref
   const collabServiceRef = useRef<CollaborationService>(new CollaborationService())
@@ -90,7 +98,7 @@ export function useCollaboration({
   const isDraggingRef = useRef<boolean>(false)
   const pendingDragElementsRef = useRef<Map<string, any>>(new Map())
   const lastBroadcastElementsRef = useRef<Map<string, any>>(new Map())
-  const seededBoardIdRef = useRef<string | null>(null)
+  const seededConnectionEpochRef = useRef<string | null>(null)
 
   // Seed known element versions and snapshot baselines from initial elements
   useEffect(() => {
@@ -142,6 +150,24 @@ export function useCollaboration({
     }
   }, [enabled])
 
+  // In solo mode the presence service is intentionally not joined, but the
+  // shared RTDB connection still detects socket loss. Surface those transitions
+  // so the board can refresh its canonical scene before reconnect admission.
+  useEffect(() => {
+    if (enabled || !onConnectionChange) return
+    const rtdb = getFirebaseRtdb()
+    if (!rtdb) return
+    let previous: boolean | null = null
+    return onValue(ref(rtdb, '.info/connected'), (snapshot) => {
+      const connected = Boolean(snapshot.val())
+      if (previous === connected) return
+      previous = connected
+      void Promise.resolve(onConnectionChange(connected)).catch((error) => {
+        console.warn('[Collab] Connection callback failed:', (error as any)?.message)
+      })
+    })
+  }, [enabled, onConnectionChange])
+
   // 1. Maintain authenticated user identity (Google or Anonymous fallback)
   useEffect(() => {
     if (isAuthLoading) return
@@ -187,7 +213,16 @@ export function useCollaboration({
     let isCancelled = false
     let leavePresence: (() => void) | undefined
 
-    void service.joinBoardPresence(boardId, collabUser).then((cleanup) => {
+    void service.joinBoardPresence(
+      boardId,
+      collabUser,
+      async (connected) => {
+        if (!connected) setConnectionEpoch(null)
+        await onConnectionChange?.(connected)
+      },
+      (epoch) => setConnectionEpoch(epoch),
+      getSceneGeneration,
+    ).then((cleanup) => {
       if (isCancelled) {
         if (cleanup) cleanup()
       } else {
@@ -205,7 +240,20 @@ export function useCollaboration({
       if (leavePresence) leavePresence()
       setActiveCollaborators([])
     }
-  }, [enabled, collabUser, boardId, isAuthReady])
+  }, [enabled, collabUser, boardId, isAuthReady, onConnectionChange, getSceneGeneration])
+
+  // Seed after the current socket epoch is authorized. Re-seeding after a
+  // reconnect is safe because the element records are versioned and ensures a
+  // newly admitted session can reconstruct a scene that predates its join.
+  useEffect(() => {
+    if (!enabled || !connectionEpoch || !isAuthReady || !collabUser || isSpectatorRef.current || isReadOnlyRef.current) return
+    if (seededConnectionEpochRef.current === connectionEpoch) return
+    seededConnectionEpochRef.current = connectionEpoch
+    const scene = getFullSceneElements(apiRef.current, elementsRef.current)
+    if (scene.length > 0) {
+      void collabServiceRef.current.broadcastElementDeltas(boardId, scene, collabUser.uid)
+    }
+  }, [enabled, connectionEpoch, isAuthReady, collabUser, isSpectator, isReadOnly, boardId, apiRef, elementsRef])
 
   // 3. Subscribe to remote element deltas and reconcile
   useEffect(() => {
@@ -269,23 +317,6 @@ export function useCollaboration({
       unsubElements()
     }
   }, [enabled, boardId, isAuthReady, elementsRef, appStateRef, apiRef])
-
-  // A late joiner may start from a Firestore snapshot that predates this live
-  // room. Seed full elements once per room entry so RTDB never contains only a
-  // delta patch for an element the joiner has not seen before.
-  useEffect(() => {
-    if (!enabled) {
-      seededBoardIdRef.current = null
-      return
-    }
-    if (!isAuthReady || !collabUser || isSpectatorRef.current || seededBoardIdRef.current === boardId) return
-
-    const scene = getFullSceneElements(apiRef.current, elementsRef.current)
-    seededBoardIdRef.current = boardId
-    if (scene.length > 0) {
-      void collabServiceRef.current.broadcastElementDeltas(boardId, scene, collabUser.uid)
-    }
-  }, [enabled, isAuthReady, collabUser, boardId, apiRef, elementsRef])
 
   // 4. Convert active collaborators to Excalidraw's native Collaborator Map
   const excalidrawCollaborators = useMemo(() => {

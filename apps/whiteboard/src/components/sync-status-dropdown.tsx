@@ -9,6 +9,7 @@ import {
   Clock,
   Cloud,
   Copy,
+  Download,
   FileText,
   HardDrive,
   Info,
@@ -33,6 +34,8 @@ export type EditorStatus =
 export interface SyncStatusDropdownProps {
   state: EditorStatus
   onKeepLocalConflict?: () => void
+  onSaveConflictAsNewBoard?: () => void
+  onDownloadConflictDraft?: () => void
   lastSyncError?: string | null
   boardName: string
   createdAt?: string
@@ -156,6 +159,8 @@ function formatTimestamp(isoString?: string | null): { formatted: string; relati
 export function SyncStatusDropdown({
   state,
   onKeepLocalConflict,
+  onSaveConflictAsNewBoard,
+  onDownloadConflictDraft,
   lastSyncError,
   boardName,
   createdAt,
@@ -265,6 +270,26 @@ export function SyncStatusDropdown({
 
           {state === 'Conflict' && onKeepLocalConflict && (
             <div className="sync-conflict-box">
+              {onSaveConflictAsNewBoard && (
+                <button
+                  type="button"
+                  className="sync-conflict-btn"
+                  onClick={() => { onSaveConflictAsNewBoard(); setIsOpen(false) }}
+                >
+                  <Copy size={12} />
+                  <span>Save local draft as new board</span>
+                </button>
+              )}
+              {onDownloadConflictDraft && (
+                <button
+                  type="button"
+                  className="sync-conflict-btn"
+                  onClick={() => { onDownloadConflictDraft(); setIsOpen(false) }}
+                >
+                  <Download size={12} />
+                  <span>Download local draft</span>
+                </button>
+              )}
               <button
                 type="button"
                 className="sync-conflict-btn"

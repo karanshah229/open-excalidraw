@@ -4,6 +4,7 @@ import type { BoardDocument, Project } from '@agentic-whiteboard/storage'
 import type { BoardShareConfig, ShareAccessLevel, ShareRole } from './sharing-service'
 
 export type ProjectPolicy = {
+  name?: string
   accessRevision?: number
   generalAccess: ShareAccessLevel
   generalRole: ShareRole

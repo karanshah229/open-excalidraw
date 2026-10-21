@@ -1,0 +1,39 @@
+{
+  "status": "collected-and-verified",
+  "projectId": "open-excalidraw-dev-2",
+  "boardId": "scene_maintenance_canary_07a590cdebd04865bac1d019ca3f5d83",
+  "ownerId": "canary_owner_7cc30fb81aa34c33a5b8173c4da3e16f",
+  "quarantineJobId": "gc_e1cfc62e-873a-42dd-b875-95adbf9ce9f5",
+  "epoch": 3,
+  "candidateChunkIds": [
+    "canary_orphan_chunk"
+  ],
+  "candidateBytes": 4166,
+  "reachableChunkIds": [
+    "canary_live_chunk"
+  ],
+  "censusComplete": true,
+  "ownershipVerified": true,
+  "independentOracleMatched": true,
+  "gateClosedDurationMs": 1242,
+  "deleteNotBefore": "2026-10-23T07:56:22.324Z",
+  "collectionCommand": "node scripts/scene-maintenance-dev-canary.mjs --collect --board scene_maintenance_canary_07a590cdebd04865bac1d019ca3f5d83 --job gc_e1cfc62e-873a-42dd-b875-95adbf9ce9f5",
+  "localProcessGateClosedDurationMs": 18211,
+  "quarantineInvocation": "private IAM-protected Cloud Function in us-central1",
+  "workerPersistedGateClosedDurationMs": 1110,
+  "cloudInvocationResult": {
+    "status": "proposal-only",
+    "jobId": "gc_e1cfc62e-873a-42dd-b875-95adbf9ce9f5",
+    "candidateCount": 1,
+    "candidateBytes": 4166,
+    "admissionReopened": true
+  },
+  "collection": {
+    "jobId": "collect_ae0af273-b2c4-406b-9c28-3e58539b3550",
+    "deletedChunkCount": 1,
+    "gateClosedDurationMs": 1770,
+    "independentPostCollectionOracleMatched": true,
+    "admissionReopened": true,
+    "completedAt": "2026-10-21T08:25:08.156Z"
+  }
+}

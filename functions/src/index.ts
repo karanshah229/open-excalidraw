@@ -1,13 +1,32 @@
 import { pruneCheckpointedRecords } from './scene-compaction-cleanup.js'
+import { runWithAbandonedRoomFence } from './scene-collaboration-fence.js'
 import { initializeApp } from 'firebase-admin/app'
 import { getDatabase } from 'firebase-admin/database'
 import { getFirestore } from 'firebase-admin/firestore'
 import { onValueDeleted } from 'firebase-functions/v2/database'
 import { onDocumentWritten } from 'firebase-functions/v2/firestore'
-import { HttpsError, onCall } from 'firebase-functions/v2/https'
-import { defineString } from 'firebase-functions/params'
-import { checkpointScene, ensureScene, loadSceneRevision } from './board-scenes.js'
-export { ensureBoardScene, commitBoardScene } from './board-scenes.js'
+import { HttpsError, onCall, onRequest } from 'firebase-functions/v2/https'
+import { defineBoolean, defineString } from 'firebase-functions/params'
+import { checkpointScene, ensureScene } from './board-scenes.js'
+import { collectQuarantinedOrphanChunks, quarantineSceneOrphanChunks } from './scene-maintenance-gc.js'
+import { mintSceneConnectionEpochForSession } from './scene-connection-epoch.js'
+export {
+  ensureBoardScene,
+  commitBoardScene,
+  beginBoardSceneUpload,
+  stageBoardSceneChunk,
+  stageBoardScenePage,
+  acquireBoardSceneReadPin,
+  createNamedBoardSceneVersion,
+  prepareBoardSceneGenerationReset,
+  listNamedBoardSceneVersions,
+  acquireNamedBoardSceneVersionReadPin,
+  readBoardScenePage,
+  readBoardSceneChunks,
+  renewBoardSceneReadPin,
+  releaseBoardSceneReadPin,
+  repackBoardScene,
+} from './board-scenes.js'
 import { mirrorCurrentPolicy } from './project-access.js'
 export {
   manageProject,
@@ -22,15 +41,23 @@ initializeApp()
 
 export { boardAsset } from './board-assets.js'
 export { slideNotes } from './slide-notes.js'
+export { mintSceneConnectionEpochForSession } from './scene-connection-epoch.js'
+export {
+  fenceBoardSceneGenerationReset,
+  publishBoardSceneGenerationReset,
+  activateBoardSceneGenerationReset,
+} from './scene-generation-reset.js'
 
 const GRACE_PERIOD_MS = 30_000
-const COMPACTION_LOCK_MS = 120_000
+// Longer than the trigger's 120s hard timeout, so a live worker cannot lose its lease.
+const COMPACTION_LOCK_MS = 180_000
 
 // These deploy-time parameters prevent an implicit fallback to a region that
 // may be far from, or incompatible with, the triggering data store.
 const rtdbFunctionRegion = defineString('RTDB_FUNCTION_REGION')
 const firestoreFunctionRegion = defineString('FIRESTORE_FUNCTION_REGION')
 const syncAccessFunctionRegion = defineString('SYNC_ACCESS_FUNCTION_REGION')
+const tombstoneCompactionEnabled = defineBoolean('SCENE_TOMBSTONE_COMPACTION_ENABLED', { default: false })
 
 type ElementDeltaRecord = { id?: string; version?: number; versionNonce?: number; data?: string }
 
@@ -90,47 +117,48 @@ export const compactAbandonedCollaborationRoom = onValueDeleted(
     await new Promise<void>((resolve) => setTimeout(resolve, GRACE_PERIOD_MS))
     if ((await presenceRef.get()).exists()) return
 
-    const lockRef = rtdb.ref(`system/compactionLocks/${boardId}`)
     const lockToken = `${event.id}-${Date.now()}`
-    const lock = await lockRef.transaction((current) => {
-      if (current && Date.now() - Number(current.startedAt ?? 0) < COMPACTION_LOCK_MS) return
-      return { startedAt: Date.now(), token: lockToken }
-    })
-    if (!lock.committed) return
-
     const elementsRef = rtdb.ref(`boards/${boardId}/elements`)
-    try {
-      const deltaSnapshot = await elementsRef.get()
-      if (!deltaSnapshot.exists()) return
+    await runWithAbandonedRoomFence({
+      rtdb,
+      boardId,
+      lockToken,
+      lockDurationMs: COMPACTION_LOCK_MS,
+      work: async () => {
+        const deltaSnapshot = await elementsRef.get()
+        const records = Object.values((deltaSnapshot.val() ?? {}) as Record<string, ElementDeltaRecord>)
 
-      const records = Object.values((deltaSnapshot.val() ?? {}) as Record<string, ElementDeltaRecord>)
-
-      const share = (await firestore.doc(`boardShares/${boardId}`).get()).data()
-      if (!share || share.deletedAt || share.pending) return
-      const actor = { uid: share.ownerId, trusted: true }
-      await ensureScene(boardId, actor, share.projectId)
-      let compacted = false
-      for (let attempt = 0; attempt < 4; attempt++) {
-        const head = (await firestore.doc(`boardScenes/${boardId}`).get()).data()!
-        // Generation 1 accepts legacy rooms; future restore generations require explicit room identity.
-        const room = (await rtdb.ref(`boards/${boardId}/generation`).get()).val()
-        if ((room == null && head.generation !== 1) || (room != null && room !== head.generation)) return
-        const { scene } = await loadSceneRevision(boardId, head)
-        try {
-          await checkpointScene(boardId, { ...scene, elements: mergeDeltas(scene.elements, records) }, head, actor)
-          compacted = true
-          break
-        } catch (error) {
-          if ((error as { code?: string }).code !== 'aborted') throw error
+        const share = (await firestore.doc(`boardShares/${boardId}`).get()).data()
+        if (!share || share.deletedAt || share.pending) return false
+        const actor = { uid: share.ownerId, trusted: true }
+        await ensureScene(boardId, actor, share.projectId)
+        let compacted = false
+        for (let attempt = 0; attempt < 4; attempt++) {
+          const head = (await firestore.doc(`boardScenes/${boardId}`).get()).data()!
+          // Generation 1 accepts legacy rooms; future restore generations require explicit room identity.
+          const room = (await rtdb.ref(`boards/${boardId}/generation`).get()).val()
+          if ((room == null && head.generation !== 1) || (room != null && room !== head.generation)) return false
+          try {
+            await checkpointScene(
+              boardId,
+              (scene) => ({ ...scene, elements: mergeDeltas(scene.elements, records) }),
+              head,
+              actor,
+              { compactTombstones: tombstoneCompactionEnabled.value() },
+            )
+            compacted = true
+            break
+          } catch (error) {
+            if ((error as { code?: string }).code !== 'aborted') throw error
+          }
         }
-      }
-      // Delete only the records actually checkpointed. A replacement under the same ID survives.
-      if (compacted && !(await presenceRef.get()).exists()) {
-        await pruneCheckpointedRecords(elementsRef, presenceRef, deltaSnapshot.val())
-      }
-    } finally {
-      await lockRef.transaction((current) => (current?.token === lockToken ? null : undefined))
-    }
+        // Delete only the records actually checkpointed. A replacement under the same ID survives.
+        if (compacted && deltaSnapshot.exists()) {
+          await pruneCheckpointedRecords(elementsRef, presenceRef, deltaSnapshot.val())
+        }
+        return compacted
+      },
+    })
   },
 )
 
@@ -164,3 +192,50 @@ export const syncBoardAccessToRtdb = onCall({ region: syncAccessFunctionRegion }
   await mirrorCurrentPolicy('board', boardId)
   return { mirrored: true }
 })
+
+/** Mints a server-owned collaboration epoch before this session may publish presence or deltas. */
+export const mintSceneConnectionEpoch = onCall({ region: rtdbFunctionRegion }, async (request) => {
+  return mintSceneConnectionEpochForSession(
+    request.auth
+      ? {
+          uid: request.auth.uid,
+          email: typeof request.auth.token.email === 'string' ? request.auth.token.email : undefined,
+          emailVerified: request.auth.token.email_verified === true,
+        }
+      : {},
+    request.data?.boardId,
+    request.data?.sessionId,
+    request.data?.sceneGeneration,
+  )
+})
+
+/** Private, dev-only canary runner. IAM invocation and a strict synthetic-board prefix keep it out of user flows. */
+export const sceneMaintenanceCanary = onRequest(
+  { region: syncAccessFunctionRegion, invoker: 'private', timeoutSeconds: 120 },
+  async (request, response) => {
+    if (process.env.GCLOUD_PROJECT !== 'open-excalidraw-dev-2') {
+      response.sendStatus(404)
+      return
+    }
+    if (request.method !== 'POST') {
+      response.sendStatus(405)
+      return
+    }
+    const { action, boardId, jobId } = request.body ?? {}
+    if (typeof boardId !== 'string' || !/^scene_maintenance_canary_[A-Za-z0-9_-]{8,120}$/.test(boardId) ||
+        (action !== 'quarantine' && action !== 'collect') ||
+        (action === 'collect' && (typeof jobId !== 'string' || !/^gc_[A-Za-z0-9_-]{8,120}$/.test(jobId)))) {
+      response.status(400).json({ error: 'Invalid canary request.' })
+      return
+    }
+    try {
+      const result = action === 'quarantine'
+        ? await quarantineSceneOrphanChunks(boardId)
+        : await collectQuarantinedOrphanChunks(boardId, jobId, { allowSyntheticCanaryFastTrack: true })
+      response.status(200).json(result)
+    } catch {
+      console.error('Scene maintenance canary operation failed.')
+      response.status(500).json({ error: 'Canary operation failed; inspect the persisted maintenance job.' })
+    }
+  },
+)

@@ -48,10 +48,16 @@
     "test:slides": "pnpm dlx tsx tests/slides-model.test.ts && node tests/run-slides-tests.mjs",
     "test:slides:prod": "pnpm --filter @agentic-whiteboard/whiteboard exec vite build --mode e2e && node tests/slides-production.test.mjs",
     "test:slides:notes": "pnpm --filter @agentic-whiteboard/functions build && firebase emulators:exec --only auth,firestore,storage,database,functions --project demo-image-persistence --config image-persistence.firebase.json 'node tests/slide-notes-access.test.mjs'",
-    "test:scenes": "node packages/mcp/node_modules/tsx/dist/cli.mjs tests/scene-codec.test.ts && node packages/mcp/node_modules/tsx/dist/cli.mjs tests/import-scene.test.ts",
-    "test:e2e:scenes": "node tests/run-regression-tests.mjs --test=chunked-scenes.test.mjs",
+    "test:scenes": "node packages/mcp/node_modules/tsx/dist/cli.mjs tests/scene-codec.test.ts && node packages/mcp/node_modules/tsx/dist/cli.mjs tests/import-scene.test.ts && node packages/mcp/node_modules/tsx/dist/cli.mjs tests/storage-scene-merge.test.ts && node packages/mcp/node_modules/tsx/dist/cli.mjs tests/scene-deletion-ledger.test.ts",
+    "test:scene-maintenance:planner": "pnpm --filter @agentic-whiteboard/functions build && node --test tests/scene-maintenance-planner.test.mjs",
+    "test:scene-maintenance:dry-run": "pnpm --filter @agentic-whiteboard/functions build && firebase emulators:exec --only firestore --project demo-regression --config regression.firebase.json 'node --test tests/scene-maintenance-dry-run.test.mjs'",
+    "test:scene-maintenance:gc": "pnpm --filter @agentic-whiteboard/functions build && firebase emulators:exec --only firestore --project demo-regression --config regression.firebase.json 'node --test tests/scene-maintenance-gc.test.mjs tests/scene-maintenance-reachability-oracle.test.mjs tests/scene-maintenance-chaos.test.mjs'",
+    "test:e2e:scenes": "E2E_REGRESSION_FILES='[\"chunked-scenes.test.mjs\",\"scene-read-security.test.mjs\",\"undo-session-lifecycle.test.mjs\"]' node tests/run-regression-tests.mjs",
+    "test:e2e:undo-session": "node tests/run-regression-tests.mjs --test=undo-session-lifecycle.test.mjs",
+    "test:e2e:tombstone-compaction": "SCENE_TOMBSTONE_COMPACTION_ENABLED=true node tests/run-regression-tests.mjs --test=tombstone-compaction-e2e.test.mjs",
+    "test:e2e:scene-generation-reset": "node tests/run-regression-tests.mjs --test=scene-generation-reset-e2e.test.mjs",
     "test:e2e:scenes:five-chunks": "node tests/run-regression-tests.mjs --test=five-chunk-scene.test.mjs",
-    "test:scenes:backend": "pnpm --filter @agentic-whiteboard/functions build && firebase emulators:exec --only firestore,database --project demo-regression --config regression.firebase.json 'node tests/scene-backend.test.mjs && node tests/scene-rtdb-cleanup.test.mjs'"
+    "test:scenes:backend": "pnpm --filter @agentic-whiteboard/functions build && node --test tests/scene-generation-transition.test.mjs && firebase emulators:exec --only auth,firestore,database --project demo-regression --config regression.firebase.json 'node tests/scene-backend.test.mjs && node tests/scene-rtdb-cleanup.test.mjs && node tests/scene-rtdb-maintenance-fence.test.mjs'"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

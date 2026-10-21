@@ -1,0 +1,18 @@
+{
+  "project": "open-excalidraw-dev-2",
+  "function": "compactAbandonedCollaborationRoom",
+  "flag": "SCENE_TOMBSTONE_COMPACTION_ENABLED=true",
+  "result": "passed",
+  "syntheticBoardId": "scene_maintenance_canary_tombstone_9a5158c28c794c88a0943b29193ead47",
+  "trigger": "Removed the final synthetic RTDB presence record and observed the deployed onValueDeleted worker.",
+  "assertions": {
+    "headAdvanced": true,
+    "newHeadContainsCompactedDeletionLedgerEntry": true,
+    "newHeadOmitsFullDeletedElement": true,
+    "priorImmutableRevisionRetainsFullTombstone": true
+  },
+  "firstAttemptFinding": "Live trigger surfaced that the checkpoint transaction evaluated the interactive reader-pin quota query even for trusted maintenance. The dev composite index was also absent/building.",
+  "fix": "Maintenance checkpoints now skip the interactive quota query; Firestore indexes and only compactAbandonedCollaborationRoom were deployed to dev.",
+  "cleanup": "Synthetic canary board and RTDB paths removed after verification.",
+  "productionChanged": false
+}

@@ -12,6 +12,7 @@ import {
   type Database,
 } from 'firebase/database'
 import { ref as storageRef, uploadBytes, type FirebaseStorage } from 'firebase/storage'
+import { mintSceneConnectionEpoch } from './connection-epoch-service'
 import type { CollaboratorPresence, CollabUser, ElementDeltaRecord } from './types'
 
 export const MAX_ELEMENT_PAYLOAD_BYTES = 262144 // 256KB
@@ -39,6 +40,8 @@ export class CollaborationService {
   private currentCursor: { x: number; y: number } | null = null
   private currentSelectedElementIds: string[] = []
   private isConnected: boolean = false
+  private activeBoardId: string | null = null
+  private connectionEpoch: string | null = null
 
   constructor(rtdb?: Database, storage?: FirebaseStorage) {
     this.rtdb = rtdb
@@ -82,23 +85,48 @@ export class CollaborationService {
    * Listens to .info/connected to automatically re-arm onDisconnect and re-publish presence
    * after OS sleep/wake, network drops, or socket reconnects.
    */
-  async joinBoardPresence(boardId: string, user: CollabUser): Promise<() => void> {
+  async joinBoardPresence(
+    boardId: string,
+    user: CollabUser,
+    onConnectionChange?: (connected: boolean) => void | Promise<void>,
+    onConnectionReady?: (connectionEpoch: string) => void | Promise<void>,
+    getSceneGeneration: () => number = () => 1,
+  ): Promise<() => void> {
     if (!this.rtdb) return () => {}
 
     this.activeSessionId = user.sessionId
+    this.activeBoardId = boardId
+    this.connectionEpoch = null
+    this.isConnected = false
     const presenceRef = ref(this.rtdb, `presence/${boardId}/${user.sessionId}`)
+    const epochTokenRef = ref(this.rtdb, `system/sceneConnectionEpochs/${boardId}/${user.sessionId}/token`)
     const connectedRef = ref(this.rtdb, '.info/connected')
+    let connectionAttempt = 0
+    let disposed = false
 
-    const publishPresence = async () => {
+    const publishPresence = async (attempt: number, refreshScene = true) => {
       if (!this.rtdb || !this.activeSessionId) return
       try {
-        // 1. Re-arm server-side cleanup when WebSocket drops
+        // Pause all deltas until this connection's fresh epoch is authorized.
+        this.connectionEpoch = null
+        if (refreshScene) await onConnectionChange?.(true)
+        if (disposed || attempt !== connectionAttempt || !this.isConnected) return
+        const sceneGeneration = getSceneGeneration()
+        const connectionEpoch = await mintSceneConnectionEpoch(boardId, user.sessionId, sceneGeneration)
+        if (disposed || attempt !== connectionAttempt || !this.isConnected) return
+
+        // Invalidate admission on disconnect before Firebase can replay queued
+        // presence/delta writes from the prior socket generation.
+        await onDisconnect(epochTokenRef).remove()
+        // Re-arm presence cleanup when the WebSocket drops.
         await onDisconnect(presenceRef).remove()
 
         // 2. Set full presence state (clean payload to prevent RTDB undefined errors)
         const presencePayload = cleanPayload({
           userId: user.uid,
           sessionId: user.sessionId,
+          connectionEpoch,
+          sceneGeneration,
           displayName: user.displayName,
           color: user.color,
           avatarUrl: user.avatarUrl,
@@ -109,7 +137,11 @@ export class CollaborationService {
           lastSeen: Date.now(),
         })
         await set(presenceRef, presencePayload)
+        if (disposed || attempt !== connectionAttempt || !this.isConnected) return
+        this.connectionEpoch = connectionEpoch
+        await onConnectionReady?.(connectionEpoch)
       } catch (err: any) {
+        this.connectionEpoch = null
         console.warn('[Collab] RTDB presence sync deferred or unavailable:', err?.message)
       }
     }
@@ -119,9 +151,17 @@ export class CollaborationService {
       connectedRef,
       (snapshot) => {
         const connected = Boolean(snapshot.val())
+        if (connected === this.isConnected) return
         this.isConnected = connected
         if (connected) {
-          void publishPresence()
+          const attempt = ++connectionAttempt
+          void publishPresence(attempt)
+        } else {
+          connectionAttempt++
+          this.connectionEpoch = null
+          void Promise.resolve(onConnectionChange?.(false)).catch((err) => {
+            console.warn('[Collab] Disconnect callback failed:', (err as any)?.message)
+          })
         }
       },
       (err) => {
@@ -137,8 +177,12 @@ export class CollaborationService {
         } catch {
           // ignore
         }
+        // Some browsers resume a socket without emitting a fresh
+        // .info/connected transition. Rotate the server epoch and restore
+        // presence explicitly so a wiped/expired record cannot stay missing.
         if (this.isConnected) {
-          void publishPresence()
+          const attempt = ++connectionAttempt
+          void publishPresence(attempt, false)
         }
       }
     }
@@ -151,7 +195,8 @@ export class CollaborationService {
           // ignore
         }
         if (this.isConnected) {
-          void publishPresence()
+          const attempt = ++connectionAttempt
+          void publishPresence(attempt, false)
         }
       }
     }
@@ -159,7 +204,7 @@ export class CollaborationService {
     const handleUnload = () => {
       if (this.rtdb && this.activeSessionId) {
         try {
-          void remove(presenceRef)
+          void Promise.all([remove(presenceRef), remove(epochTokenRef)])
         } catch {
           // ignore
         }
@@ -188,15 +233,19 @@ export class CollaborationService {
       }
       if (this.rtdb) {
         try {
-          // Trigger immediate client removal without cancelling server-side onDisconnect
-          // so if network is lost during unmount, RTDB server still purges the presence
-          void remove(presenceRef)
+          // Remove both active records; the armed onDisconnect operations remain
+          // as a fallback if the connection drops during cleanup.
+          void Promise.all([remove(presenceRef), remove(epochTokenRef)])
         } catch {
           // ignore cleanup error on unmount
         }
       }
       this.activeSessionId = null
+      this.activeBoardId = null
+      this.connectionEpoch = null
       this.isConnected = false
+      disposed = true
+      connectionAttempt++
     }
   }
 
@@ -215,6 +264,7 @@ export class CollaborationService {
     this.currentSelectedElementIds = selectedElementIds
     if (!this.rtdb) return
     try {
+      if (!this.connectionEpoch || this.activeBoardId !== boardId || this.activeSessionId !== sessionId) return
       const presenceRef = ref(this.rtdb, `presence/${boardId}/${sessionId}`)
       await update(
         presenceRef,
@@ -319,7 +369,7 @@ export class CollaborationService {
     authorUid: string,
     previousElementsMap?: Map<string, any>,
   ): Promise<void> {
-    if (!this.rtdb || elements.length === 0) return
+    if (!this.rtdb || elements.length === 0 || !this.connectionEpoch || this.activeBoardId !== boardId || !this.activeSessionId) return
 
     const now = Date.now()
     const updates: Record<string, ElementDeltaRecord> = {}
@@ -340,6 +390,8 @@ export class CollaborationService {
         version: Number(elem.version ?? 1),
         versionNonce: Number(elem.versionNonce ?? 0),
         lastModifiedBy: authorUid,
+        sessionId: this.activeSessionId,
+        connectionEpoch: this.connectionEpoch,
         updatedAt: now,
         data: serialized,
       }

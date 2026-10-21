@@ -1,5 +1,5 @@
 import type { BoardScene } from '@agentic-whiteboard/storage'
-import { reconcileElementsLWW } from '../collaboration/reconcile'
+import { reconcileElementsAndDeletionLedger } from '../collaboration/reconcile'
 
 export type SharedSceneDraft = { key: string; revision: string; scene: BoardScene; generation?: number }
 const storeName = 'drafts'
@@ -52,6 +52,14 @@ export async function saveSharedSceneDraft(
         transaction.abort()
         return
       }
+      const reconciled = previous
+        ? reconcileElementsAndDeletionLedger(
+            previous.scene.elements,
+            scene.elements,
+            previous.scene.deletionLedger ?? [],
+            scene.deletionLedger ?? [],
+          )
+        : { elements: scene.elements, deletionLedger: scene.deletionLedger ?? [] }
       draft = {
         key,
         revision: crypto.randomUUID(),
@@ -59,7 +67,8 @@ export async function saveSharedSceneDraft(
         scene: previous
           ? {
               ...scene,
-              elements: reconcileElementsLWW(previous.scene.elements, scene.elements),
+              elements: reconciled.elements,
+              deletionLedger: reconciled.deletionLedger,
               files: { ...previous.scene.files, ...scene.files },
             }
           : scene,

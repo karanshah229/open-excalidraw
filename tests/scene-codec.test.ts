@@ -45,6 +45,8 @@ assert.deepEqual(
   'Manifest loading order does not change stacking order',
 )
 assert.deepEqual(await packScene(scene, packed, budget), packed, 'Unchanged scene reuses every immutable chunk')
+assert.deepEqual(await packScene({ ...scene, deletionLedger: [] }, packed, budget), packed,
+  'An empty deletion ledger does not add an otherwise unnecessary scene record')
 const changed = structuredClone(scene)
 changed.elements[0].x = 123
 const repacked = await packScene(changed, packed, budget)
@@ -145,6 +147,19 @@ await assert.rejects(
   ),
   /file/,
 )
+
+const compactedScene: ScenePayload = {
+  elements: [{ id: 'still-live', version: 2, isDeleted: false }],
+  appState: { viewBackgroundColor: '#fff' },
+  deletionLedger: [{ id: 'old-delete', version: 19, versionNonce: 8,
+    firstObservedDeletedAt: '2026-01-01T00:00:00.000Z', compacted: true }],
+  semanticModel: { diagramType: 'class' },
+}
+assert.deepEqual(await assembleScene(await packScene(compactedScene, [], budget)), compactedScene,
+  'the immutable scene digest covers deletion metadata and semantic fields')
+await assert.rejects(packScene({ ...compactedScene, deletionLedger: [
+  ...compactedScene.deletionLedger!, compactedScene.deletionLedger![0],
+] }, [], budget), /deletion ledger/)
 
 // Seeded varying scenes verify packing independently of chunk membership/order.
 let seed = 0x600d

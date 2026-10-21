@@ -1,0 +1,29 @@
+{
+  "status": "collected-and-verified",
+  "projectId": "open-excalidraw-dev-2",
+  "boardId": "scene_maintenance_canary_2504c7e836d04a17ab495f2cf186fa52",
+  "ownerId": "canary_owner_ced7b5494d4449858cf737a84a032cc1",
+  "quarantineJobId": "gc_05868a61-7ca4-41d1-ac75-c97177484ad2",
+  "epoch": 2,
+  "candidateChunkIds": [
+    "canary_orphan_chunk"
+  ],
+  "candidateBytes": 4166,
+  "reachableChunkIds": [
+    "canary_live_chunk"
+  ],
+  "censusComplete": true,
+  "ownershipVerified": true,
+  "independentOracleMatched": true,
+  "gateClosedDurationMs": 1355,
+  "deleteNotBefore": "2026-10-23T08:14:20.545Z",
+  "collectionCommand": "node scripts/scene-maintenance-dev-canary.mjs --collect --board scene_maintenance_canary_2504c7e836d04a17ab495f2cf186fa52 --job gc_05868a61-7ca4-41d1-ac75-c97177484ad2",
+  "collection": {
+    "jobId": "collect_9a72df29-9466-43a5-9c1b-4cbd10363368",
+    "deletedChunkCount": 1,
+    "gateClosedDurationMs": 1418,
+    "independentPostCollectionOracleMatched": true,
+    "admissionReopened": true,
+    "completedAt": "2026-10-21T08:14:41.727Z"
+  }
+}

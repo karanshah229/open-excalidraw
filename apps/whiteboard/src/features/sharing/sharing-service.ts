@@ -40,6 +40,10 @@ export interface BoardShareConfig {
   projectPolicy?: ProjectPolicy
   projectRole?: 'owner' | ShareRole | null
 }
+type SharedBoardResult = { status: 'allowed' | 'restricted' | 'not-found'; config?: BoardShareConfig }
+type KnownCanonicalScene = { scene: BoardScene; revisionId: string; generation: number }
+type KnownCanonicalSceneInput = KnownCanonicalScene | undefined | Promise<KnownCanonicalScene | undefined>
+const sharedBoardReadsInFlight = new Map<string, Promise<SharedBoardResult>>()
 
 /** Matches the strongest grant used when opening a shared board. */
 export function policyRole(
@@ -220,6 +224,7 @@ export const sharingService = {
     onUpdate: (config: BoardShareConfig) => void,
     onError?: (error: any) => void,
     getKnownFiles?: () => BoardScene['files'],
+    initialConfig?: BoardShareConfig,
   ): () => void {
     const db = getFirestoreDb()
     if (!db) return () => {}
@@ -231,6 +236,8 @@ export const sharingService = {
     let boardUnsubscribe: (() => void) | undefined
     let sceneUnsubscribe: (() => void) | undefined
     let parentUnsubscribe: (() => void) | undefined
+    let firstBoardSnapshot = Boolean(initialConfig)
+    let firstSceneSnapshot = Boolean(initialConfig)
     let parentId: string | undefined
     let retryTimer: ReturnType<typeof setTimeout> | undefined
     let retryAttempt = 0
@@ -252,19 +259,52 @@ export const sharingService = {
     }
     const attachBoard = () => {
       if (disposed || boardUnsubscribe) return
-      boardUnsubscribe = onSnapshot(boardRef, refresh, (error) => {
-        boardUnsubscribe = undefined // Firestore terminates a denied listener.
-        denied(error)
-      })
+      boardUnsubscribe = onSnapshot(
+        boardRef,
+        (snapshot) => {
+          if (firstBoardSnapshot) {
+            firstBoardSnapshot = false
+            const data = snapshot.data()
+            if (
+              initialConfig &&
+              snapshot.exists() &&
+              data?.accessRevision === initialConfig.accessRevision &&
+              data?.updatedAt === initialConfig.updatedAt &&
+              data?.boardName === initialConfig.boardName
+            )
+              return
+          }
+          refresh()
+        },
+        (error) => {
+          boardUnsubscribe = undefined // Firestore terminates a denied listener.
+          denied(error)
+        },
+      )
     }
     const attachScene = () => {
       if (disposed || sceneUnsubscribe) return
-      sceneUnsubscribe = sceneService.subscribeHead(boardId, refresh, (error) => {
-        // Firestore terminates denied listeners. Recovery must reattach the
-        // scene head as well as policy listeners, or later drawing commits disappear.
-        sceneUnsubscribe = undefined
-        denied(error)
-      })
+      sceneUnsubscribe = sceneService.subscribeHead(
+        boardId,
+        (head) => {
+          if (firstSceneSnapshot) {
+            firstSceneSnapshot = false
+            if (
+              initialConfig &&
+              head?.headRevisionId === initialConfig.sceneRevisionId &&
+              head?.generation === initialConfig.sceneGeneration
+            )
+              return
+          }
+          refresh()
+        },
+        (error) => {
+          // Firestore terminates denied listeners. Recovery must reattach the
+          // scene head as well as policy listeners, or later drawing commits disappear.
+          sceneUnsubscribe = undefined
+          denied(error)
+        },
+      )
     }
     const refresh = () => {
       if (disposed) return
@@ -316,6 +356,15 @@ export const sharingService = {
     }
     attachBoard()
     attachScene()
+    // The initial snapshots may match the already-authorized config and thus
+    // skip a redundant scene read; still subscribe to inherited project policy.
+    if (initialConfig?.projectId && initialConfig.projectRole) {
+      parentId = initialConfig.projectId
+      parentUnsubscribe = onSnapshot(doc(db, 'projectShares', parentId), refresh, () => {
+        parentUnsubscribe = undefined
+        scheduleRetry()
+      })
+    }
     return () => {
       disposed = true
       generation++
@@ -328,13 +377,47 @@ export const sharingService = {
 
   async getSharedBoard(
     boardId: string,
+    currentUserEmail?: string | null,
+    currentUserId?: string | null,
+    knownFiles: BoardScene['files'] = {},
+    coalesce = false,
+    knownCanonical?: KnownCanonicalSceneInput,
+  ): Promise<SharedBoardResult> {
+    if (!coalesce)
+      return sharingService.getSharedBoardUncoalesced(
+        boardId,
+        currentUserEmail,
+        currentUserId,
+        knownFiles,
+        knownCanonical,
+      )
+    const uid = getFirebaseAuth()?.currentUser?.uid ?? currentUserId ?? 'anonymous'
+    const key = `${uid}:${boardId}`
+    const existing = sharedBoardReadsInFlight.get(key)
+    if (existing) return existing
+    const pending = sharingService.getSharedBoardUncoalesced(
+      boardId,
+      currentUserEmail,
+      currentUserId,
+      knownFiles,
+      knownCanonical,
+    )
+    sharedBoardReadsInFlight.set(key, pending)
+    try {
+      const result = await pending
+      return result
+    } finally {
+      if (sharedBoardReadsInFlight.get(key) === pending) sharedBoardReadsInFlight.delete(key)
+    }
+  },
+
+  async getSharedBoardUncoalesced(
+    boardId: string,
     _currentUserEmail?: string | null,
     _currentUserId?: string | null,
     knownFiles: BoardScene['files'] = {},
-  ): Promise<{
-    status: 'allowed' | 'restricted' | 'not-found'
-    config?: BoardShareConfig
-  }> {
+    knownCanonical?: KnownCanonicalSceneInput,
+  ): Promise<SharedBoardResult> {
     const db = getFirestoreDb()
     const requestUser = policyUser()
     let remoteData: BoardShareConfig | null = null
@@ -357,14 +440,38 @@ export const sharingService = {
       return { status: 'not-found' }
     }
 
+    // Start the canonical, server-authorized scene read while project policy is
+    // fetched. The callable independently enforces access, so scene bytes are
+    // never trusted solely because a client-side policy lookup is pending.
+    const initialSceneRead: Promise<{ ok: true; scene: KnownCanonicalScene | null } | { ok: false; error: unknown }> =
+      Promise.resolve(knownCanonical).then(async (known) => {
+        if (known) return { ok: true, scene: known }
+        try {
+          const loaded = await sceneService.load(boardId)
+          return {
+            ok: true,
+            scene: loaded
+              ? { scene: loaded.scene, revisionId: loaded.revisionId, generation: loaded.generation }
+              : null,
+          }
+        } catch (error) {
+          return { ok: false, error }
+        }
+      })
+
     const allowed = async () => {
       sharingService.rememberShareConfig(remoteData!, requestUser)
       try {
         // A committed empty scene is authoritative; never substitute legacy content.
-        let canonical = await sceneService.load(boardId)
+        const initialRead = await initialSceneRead
+        if (!initialRead.ok) throw initialRead.error
+        let canonical = initialRead.scene
         if (!canonical) {
           await sceneService.ensure(boardId, remoteData!.projectId)
-          canonical = await sceneService.load(boardId)
+          const loaded = await sceneService.load(boardId)
+          canonical = loaded
+            ? { scene: loaded.scene, revisionId: loaded.revisionId, generation: loaded.generation }
+            : null
         }
         if (canonical) {
           remoteData!.scene = await restoreSceneAssets(canonical.scene, knownFiles)
@@ -394,16 +501,23 @@ export const sharingService = {
     return allowed()
   },
 
-  async registerActiveSession(boardId: string, sessionId: string, userId: string): Promise<() => void> {
+  async registerActiveSession(
+    boardId: string,
+    sessionId: string,
+    userId: string,
+    getSceneGeneration: () => number,
+  ): Promise<() => void> {
     const regKey = `${boardId}:${sessionId}`
     activeSessionRefCount.set(regKey, (activeSessionRefCount.get(regKey) ?? 0) + 1)
 
-    const sessionData: ActiveSessionRecord = {
+    const joinedAt = Date.now()
+    const sessionData = (): ActiveSessionRecord => ({
       userId,
       sessionId,
-      joinedAt: Date.now(),
+      sceneGeneration: getSceneGeneration(),
+      joinedAt,
       lastSeen: Date.now(),
-    }
+    })
 
     // Session presence is deliberately kept in RTDB, not Firestore. A Firestore
     // heartbeat costs one document write every 15 seconds per open tab and can
@@ -441,7 +555,7 @@ export const sharingService = {
             await disconnect.cancel()
             return
           }
-          await set(sessionRef, sessionData)
+          await set(sessionRef, sessionData())
           retryAttempt = 0
           if (retryTimer) {
             clearTimeout(retryTimer)
@@ -528,7 +642,13 @@ export const sharingService = {
               if (typeof data.userId !== 'string' || !data.userId) continue
               const joinedAt = Number(data.joinedAt ?? Date.now())
               const lastSeen = Number(data.lastSeen ?? joinedAt)
-              list.push({ userId: data.userId, sessionId, joinedAt, lastSeen })
+              list.push({
+                userId: data.userId,
+                sessionId,
+                sceneGeneration: Number(data.sceneGeneration ?? 1),
+                joinedAt,
+                lastSeen,
+              })
             }
           }
           onActiveSessionsChange(list)
