@@ -1,4 +1,5 @@
 import type { BoardDocument, BoardScene } from './index'
+import { mergeBoardScenes } from './scene-merge'
 
 const RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 const CHUNK_CHARACTERS = 64 * 1024
@@ -113,18 +114,6 @@ function stable(value: unknown): string {
 async function digest(value: string): Promise<string> {
   const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
   return [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
-}
-
-function mergeScene(local: BoardScene, remote: BoardScene): BoardScene {
-  const elements = new Map(local.elements.map((element) => [String(element.id), element]))
-  for (const element of remote.elements) {
-    const current = elements.get(String(element.id))
-    if (!current || Number(element.version ?? 0) > Number(current.version ?? 0) ||
-      (Number(element.version ?? 0) === Number(current.version ?? 0) &&
-        Number(element.versionNonce ?? 0) < Number(current.versionNonce ?? 0)))
-      elements.set(String(element.id), element)
-  }
-  return { ...remote, ...local, elements: [...elements.values()], files: { ...remote.files, ...local.files } }
 }
 
 /**
@@ -375,7 +364,7 @@ export class BoardHistoryStore {
       const blocked = previous?.document.syncStatus === 'sync-blocked' || previous?.document.syncStatus === 'conflict'
       const saved: BoardDocument = {
         ...previous?.document, ...document,
-        scene: stale ? mergeScene(document.scene, previous.document.scene) : document.scene,
+        scene: stale ? mergeBoardScenes(document.scene, previous.document.scene) : document.scene,
         name: stale && !options.changedFields?.name ? previous.document.name : document.name,
         cloudRevisionId: previous?.document.cloudRevisionId ?? document.cloudRevisionId,
         cloudGeneration: previous?.document.cloudGeneration ?? document.cloudGeneration,

@@ -40,6 +40,16 @@ export function reconcileElementsLWW(localElements: readonly any[] = [], remoteE
   return Array.from(elementMap.values())
 }
 
+export type CompactDeletionRecord = {
+  id: string
+  version: number
+  versionNonce: number
+  firstObservedDeletedAt: string
+}
+
+export { reconcileElementsAndDeletionLedger } from '../../../../../functions/src/scene-deletion-ledger'
+export type { SceneDeletionRecord } from '../../../../../functions/src/scene-deletion-ledger'
+
 /**
  * Produces a durable scene from a Firestore base and the latest RTDB records.
  * RTDB records are delta patches, not independent Excalidraw elements, so a

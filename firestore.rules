@@ -94,11 +94,15 @@ service cloud.firestore {
           && (editing ? editBoard(get(sharePath).data) : readBoard(get(sharePath).data)))
         : owner(binding));
     }
+    function sceneAdmissionOpen(boardId) {
+      return sceneBinding(boardId).get('maintenanceAdmission', 'open') == 'open';
+    }
     function historyEnabled(boardId) { return sceneBinding(boardId).get('historyProtocolVersion', 0) == 1; }
     function contentUnlocked(boardId) { return sceneBinding(boardId).get('restoreOperationId', null) == null; }
     function validUpload(boardId, commitId) {
       let upload = get(/databases/$(database)/documents/boardScenes/$(boardId)/uploads/$(commitId)).data;
-      return signedIn() && sceneAccess(boardId, true) && contentUnlocked(boardId) && sceneBinding(boardId).headRevisionId != null && upload.uploaderUid == request.auth.uid
+      return signedIn() && sceneAccess(boardId, true) && sceneAdmissionOpen(boardId) && contentUnlocked(boardId) && sceneBinding(boardId).headRevisionId != null && upload.uploaderUid == request.auth.uid
+        && upload.get('maintenanceEpoch', 1) == sceneBinding(boardId).get('maintenanceEpoch', 1)
         && (!historyEnabled(boardId) || upload.keys().hasAll(['expectedFence']))
         && upload.get('expectedFence', 0) == sceneBinding(boardId).get('restoreFence', 0)
         && upload.generation == sceneBinding(boardId).generation && upload.expiresAt > request.time
@@ -121,11 +125,12 @@ service cloud.firestore {
       }
       match /uploads/{commitId} {
         allow read: if signedIn() && sceneAccess(boardId, true) && resource.data.uploaderUid == request.auth.uid;
-        allow create: if signedIn() && sceneAccess(boardId, true) && contentUnlocked(boardId) && sceneBinding(boardId).headRevisionId != null
-          && request.resource.data.keys().hasOnly(['uploaderUid', 'expectedHeadRevisionId', 'generation', 'sceneFormatVersion', 'pageCount', 'chunkCount', 'newChunkCount', 'candidateDigest', 'createdAt', 'expiresAt', 'expectedFence', 'purpose', 'sourceBaseVersionId'])
+        allow create: if signedIn() && sceneAccess(boardId, true) && sceneAdmissionOpen(boardId) && contentUnlocked(boardId) && sceneBinding(boardId).headRevisionId != null
+          && request.resource.data.keys().hasOnly(['uploaderUid', 'expectedHeadRevisionId', 'generation', 'sceneFormatVersion', 'pageCount', 'chunkCount', 'newChunkCount', 'candidateDigest', 'createdAt', 'expiresAt', 'expectedFence', 'maintenanceEpoch', 'purpose', 'sourceBaseVersionId'])
           && request.resource.data.uploaderUid == request.auth.uid
           && (!historyEnabled(boardId) || request.resource.data.keys().hasAll(['expectedFence']))
           && request.resource.data.get('expectedFence', 0) == sceneBinding(boardId).get('restoreFence', 0)
+          && request.resource.data.get('maintenanceEpoch', 1) == sceneBinding(boardId).get('maintenanceEpoch', 1)
           && request.resource.data.generation == sceneBinding(boardId).generation
           && (request.resource.data.expectedHeadRevisionId == sceneBinding(boardId).headRevisionId
             || (request.resource.data.get('purpose', '') == 'history-only'

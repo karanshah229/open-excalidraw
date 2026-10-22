@@ -166,9 +166,12 @@ async function importSnapshot(options: SyncOptions, snapshot: CommittedBoardCont
   } else {
     const head = await sceneService.load(options.boardId)
     if (!head || head.generation !== entry.generation) throw new SceneGenerationError()
+    const currentHead = await getDocFromServer(doc(db, 'boardScenes', options.boardId))
+    if (!currentHead.exists()) throw new Error('Board scene head disappeared during history upload.')
     checkedIdentity(uid, options.boardId, epoch)
     await setDoc(candidateRef, {
       uploaderUid: uid, purpose: 'history-only', expectedFence: entry.expectedFence,
+      maintenanceEpoch: currentHead.data().maintenanceEpoch ?? 1,
       sourceBaseVersionId: publication.sourceBaseVersionId,
       expectedHeadRevisionId: head.revisionId, generation: entry.generation, sceneFormatVersion: SCENE_FORMAT_VERSION,
       pageCount: pages.length, chunkCount: chunks.length, newChunkCount: fresh.length, candidateDigest,

@@ -1,5 +1,9 @@
 /** Pure wire codec shared by browser persistence and trusted scene publication. */
 export const SCENE_FORMAT_VERSION = 1;
+/** Server-enforced scene write/read-maintenance API contract, separate from payload format. */
+// Version 2 clients preserve the deletion-ledger metadata needed for tombstone
+// retention. The callable gate rejects v1 writers before they can overwrite it.
+export const SCENE_PROTOCOL_VERSION = 2;
 export const CHUNK_BUDGET_BYTES = 512 * 1024;
 export const CHUNK_ENVELOPE_RESERVE_BYTES = 4096;
 export const MANIFEST_PAGE_REFERENCES = 100;
@@ -52,6 +56,7 @@ function sceneRecords(scene) {
         throw new Error('Invalid scene.');
     if (scene.files !== undefined && !object(scene.files))
         throw new Error('Invalid scene files.');
+    validateDeletionLedger(scene.deletionLedger);
     const ids = new Set();
     const records = [
         { key: '$header', kind: 'header', value: { hasFiles: scene.files !== undefined } },
@@ -66,7 +71,8 @@ function sceneRecords(scene) {
     for (const [id, file] of Object.entries(scene.files ?? {}).sort(([a], [b]) => a.localeCompare(b)))
         records.push({ key: `file:${id}`, kind: 'file', value: file });
     for (const key of Object.keys(scene).sort()) {
-        if (key !== 'elements' && key !== 'appState' && key !== 'files' && scene[key] !== undefined)
+        if (key !== 'elements' && key !== 'appState' && key !== 'files' && scene[key] !== undefined &&
+            !(key === 'deletionLedger' && Array.isArray(scene[key]) && scene[key].length === 0))
             records.push({ key: `extra:${key}`, kind: 'extra', value: scene[key] });
     }
     return records;
@@ -195,10 +201,28 @@ export async function assembleScene(chunks) {
     elements.sort((a, b) => a.order - b.order);
     if (elements.some((element, index) => element.order !== index))
         throw new Error('Incomplete scene element order.');
-    return {
+    const scene = {
         ...Object.fromEntries(extra),
         elements: elements.map((element) => element.value),
         appState: state.value,
         ...(header.value.hasFiles ? { files: Object.fromEntries(files) } : {}),
     };
+    validateDeletionLedger(scene.deletionLedger);
+    return scene;
+}
+function validateDeletionLedger(value) {
+    if (value === undefined)
+        return;
+    if (!Array.isArray(value) || value.length > 100_000)
+        throw new Error('Invalid scene deletion ledger size.');
+    const ids = new Set();
+    for (const entry of value) {
+        if (!object(entry) || typeof entry.id !== 'string' || !entry.id || entry.id.length > 160 || ids.has(entry.id) ||
+            !Number.isSafeInteger(entry.version) || Number(entry.version) < 0 ||
+            !Number.isSafeInteger(entry.versionNonce) || Number(entry.versionNonce) < 0 ||
+            typeof entry.firstObservedDeletedAt !== 'string' || !Number.isFinite(Date.parse(entry.firstObservedDeletedAt)) ||
+            typeof entry.compacted !== 'boolean')
+            throw new Error('Invalid scene deletion ledger entry.');
+        ids.add(entry.id);
+    }
 }

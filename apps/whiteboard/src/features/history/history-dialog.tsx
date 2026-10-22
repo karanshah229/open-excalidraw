@@ -7,7 +7,6 @@ import { Excalidraw, MainMenu, restoreElements } from '@excalidraw/excalidraw'
 import { getSlides } from '../slides/slide-model'
 import { groupHistory, mergeHistoryPages, type HistoryEntry, type HistorySnapshot, type HistorySource } from './history-model'
 import './history-dialog.css'
-
 type Props = {
   open: boolean
   onOpenChange(open: boolean): void
@@ -247,4 +246,3 @@ export default function HistoryDialog({ open, onOpenChange, source, canRestore, 
     </>
   )
 }
-

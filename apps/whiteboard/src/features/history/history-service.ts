@@ -11,6 +11,41 @@ export const toHistoryEntry = (entry: BoardHistoryEntry): HistoryEntry => ({
   capturedAt: entry.capturedAt, current: entry.current, origin: entry.origin, expiresAt: entry.expiresAt,
 })
 
+export type CurrentHistoryContext = {
+  contextId: string
+  revisionId: string
+  generation: number
+  notesPageCount: number
+  restoreFence?: number
+  currentVersionId?: string | null
+  nameRevision?: number
+}
+
+/** Acquire history asset/note access for an already-loaded pinned current scene without fetching scene bytes. */
+export async function readCurrentHistoryContext(boardId: string): Promise<CurrentHistoryContext | null> {
+  const auth = getFirebaseAuth()
+  if (auth) {
+    await auth.authStateReady()
+    if (!auth.currentUser && !await ensureAuthenticatedUser(auth)) throw new Error('Sign in to access this board.')
+  }
+  const result = await projectCall<CurrentHistoryContext & { legacy?: boolean }>('boardHistory', {
+    boardId,
+    operation: 'current-scene',
+    metadataOnly: true,
+  })
+  if (result.legacy) return null
+  if (
+    typeof result.contextId !== 'string' ||
+    typeof result.revisionId !== 'string' ||
+    !Number.isSafeInteger(result.generation) ||
+    !Number.isInteger(result.notesPageCount) ||
+    result.notesPageCount < 0 ||
+    result.notesPageCount > 100
+  )
+    throw new Error('Current board history context is invalid.')
+  return result
+}
+
 /** Gateway lease fixes one complete manifest; bytes are verified before rendering or applying it. */
 export class LegacySceneHistoryError extends Error {}
 

@@ -67,9 +67,26 @@ async function open(page, id, count) {
 }
 async function nativeRectangle(page, x = 900, y = 550) {
   await page.bringToFront()
+  await page.waitForSelector('[data-testid="toolbar-rectangle"]')
   const before = await page.evaluate(() => window.__excalidrawAPI.getSceneElements().map((e) => e.id))
   await page.keyboard.press('Escape')
-  await page.keyboard.press('r')
+  // After offline/reconnect and CDP network-throttling changes, keyboard tool
+  // shortcuts can be consumed by a stale focused control. Select the visible
+  // tool explicitly so the pointer gesture remains a real canvas interaction.
+  const rectangleTool = await page.$('[data-testid="toolbar-rectangle"]')
+  if (!rectangleTool) {
+    const diagnostics = await page.evaluate(() => ({
+      url: location.href,
+      text: document.body.innerText.slice(0, 500),
+      canvases: [...document.querySelectorAll('canvas')].map((canvas) => {
+        const rect = canvas.getBoundingClientRect()
+        return { width: rect.width, height: rect.height, visible: rect.width > 0 && rect.height > 0 }
+      }),
+      elementCount: window.__excalidrawAPI?.getSceneElements().length ?? null,
+    }))
+    throw new Error(`Rectangle tool unavailable before native draw: ${JSON.stringify(diagnostics)}`)
+  }
+  await rectangleTool.click()
   await page.mouse.move(x, y)
   await page.mouse.down()
   await page.mouse.move(x + 105, y + 75, { steps: 6 })
@@ -165,16 +182,70 @@ try {
       bytes: new TextEncoder().encode(JSON.stringify(scene)).length,
     }
   })
+  const legacyProtocol = await owner.evaluate(async (boardId) => {
+    const { verifyLegacyProtocolRejected } = await import('/tests/chunked-scene-fixture.ts')
+    return verifyLegacyProtocolRejected(boardId)
+  }, fixture.id)
+  assert.equal(legacyProtocol.accepted, false, 'Server rejects clients that omit the required scene protocol')
+  assert.equal(legacyProtocol.code, 'functions/failed-precondition')
+  assert.equal(legacyProtocol.details.minimumSceneProtocolVersion, 2)
+  checkpoint('server-enforced scene protocol rejects legacy writer requests')
   assert(fixture.bytes > 1024 * 1024, 'Fixture actually exceeds the old document ceiling')
   await open(owner, fixture.id, fixture.count)
+  await waitFor(() => {
+    const boardCalls = calls.filter((call) => call.data.boardId === fixture.id)
+    return (
+      boardCalls.filter((call) => call.endpoint === 'acquireBoardSceneReadPin').length > 0 &&
+      boardCalls.filter((call) => call.endpoint === 'releaseBoardSceneReadPin').length ===
+        boardCalls.filter((call) => call.endpoint === 'acquireBoardSceneReadPin').length
+    )
+  }, 'Initial scene reads did not release their pins')
   const initial = await durable(fixture.id)
+  const firstLoadCalls = calls.filter((call) => call.data.boardId === fixture.id)
+  assert(
+    !firstLoadCalls.some((call) => call.endpoint === 'readBoardScenePage'),
+    'The initial manifest page is returned with the authorized read pin instead of a second serial callable.',
+  )
+  if (initial.refs.length <= 8)
+    assert(
+      !firstLoadCalls.some((call) => call.endpoint === 'readBoardSceneChunks'),
+      'Boards fitting one bounded payload batch load without a separate chunk-read callable.',
+    )
+  const refreshCallStart = calls.length
+  const cachedRevision = await owner.evaluate(async (id) => {
+    const { sceneService } = await import('/src/features/scenes/scene-service.ts')
+    return (await sceneService.load(id))?.revisionId
+  }, fixture.id)
+  const refreshCalls = calls.slice(refreshCallStart)
+  assert.equal(cachedRevision, initial.head.headRevisionId)
+  assert(
+    refreshCalls.some((call) => call.endpoint === 'acquireBoardSceneReadPin'),
+    'A cache hit still obtains fresh server authorization for the current revision',
+  )
+  assert(
+    !refreshCalls.some((call) => ['readBoardScenePage', 'readBoardSceneChunks'].includes(call.endpoint)),
+    'Refreshing the same immutable revision avoids manifest and chunk network reads',
+  )
+  checkpoint('same-revision refresh reuses verified chunks after fresh authorization')
   assert(initial.refs.length > 1, 'Large fixture genuinely occupies multiple chunks')
   assert.equal(initial.scene.elements.length, fixture.count)
   assert.equal(initial.scene.elements[319].customData.payload, '319:' + '🌍'.repeat(1100))
-  checkpoint('large board saved and assembled')
+  assert(
+    calls.some((call) => call.endpoint === 'acquireBoardSceneReadPin' && call.data.boardId === fixture.id),
+    'Browser scene hydration acquires a revision pin before fetching its payload',
+  )
+  assert(
+    calls.some(
+      (call) =>
+        call.endpoint === 'beginBoardSceneUpload' &&
+        call.data.boardId === fixture.id &&
+        call.data.sceneProtocolVersion === 2,
+    ),
+    'Current browser writer declares the server-enforced scene protocol',
+  )
+  checkpoint('large board saved and assembled under a protocol-versioned reader pin')
   // Audit a true cold reload separately from the owner tab that created it.
-  // Keep observing for 30 seconds because the production HAR showed repeated
-  // full-scene reads several seconds after the first canvas render.
+  // Keep observing for 30 seconds to detect delayed duplicate reads after render.
   const loadAuditContext = await browser.createBrowserContext()
   const loadAuditPage = await pageIn(loadAuditContext)
   loadAuditPage.__tracePeer = 'load-audit'
@@ -188,18 +259,22 @@ try {
   await open(loadAuditPage, fixture.id, fixture.count)
   const canvasReadyMs = Date.now() - reloadStartedAt
   await new Promise((resolve) => setTimeout(resolve, 30_000))
-  const reloadReads = calls.slice(reloadStart).filter((call) => call.peer === 'load-audit' &&
-    call.data?.boardId === fixture.id && ['current-scene', 'chunks'].includes(call.data?.operation))
-  if (reloadReads.filter((call) => call.data.operation === 'current-scene').length !== 1)
-    console.error('RELOAD_READ_DIAGNOSTIC', JSON.stringify(reloadReads))
-  if (reloadReads.filter((call) => call.data.operation === 'chunks').length !== Math.ceil(Math.max(0, initial.refs.length - 3) / 6))
-    console.error('RELOAD_CHUNK_DIAGNOSTIC', JSON.stringify({ refs: initial.refs.length, reads: reloadReads }))
-  assert.equal(reloadReads.filter((call) => call.data.operation === 'current-scene').length, 1,
-    'Cold reload reads the current head and initial chunk batch exactly once')
-  assert.equal(reloadReads.filter((call) => call.data.operation === 'chunks').length,
-    Math.ceil(Math.max(0, initial.refs.length - 3) / 6),
-    'Cold reload fetches only the remaining bounded chunk batches')
-  checkpoint(`cold reload renders in ${canvasReadyMs}ms, makes ${reloadReads.length} scene reads, and does not repeat them for 30 seconds`)
+  const reloadReads = calls
+    .slice(reloadStart)
+    .filter((call) => call.peer === 'load-audit' && call.data?.boardId === fixture.id)
+  const pinReads = reloadReads.filter((call) => call.endpoint === 'acquireBoardSceneReadPin')
+  assert.equal(pinReads.length, 1, 'Cold reload authorizes and pins the scene exactly once')
+  assert.equal(
+    reloadReads.filter((call) => call.endpoint === 'releaseBoardSceneReadPin').length,
+    1,
+    'Cold reload releases its read pin exactly once',
+  )
+  if (initial.refs.length <= 8)
+    assert(
+      !reloadReads.some((call) => ['readBoardScenePage', 'readBoardSceneChunks'].includes(call.endpoint)),
+      'Cold reload receives its complete bounded scene with the initial pin response',
+    )
+  checkpoint(`cold reload renders in ${canvasReadyMs}ms without repeated scene reads during 30 seconds of idle time`)
   await loadAuditContext.close()
   const pendingContext = await browser.createBrowserContext(),
     pendingPage = await pageIn(pendingContext)
@@ -362,7 +437,9 @@ try {
     calls
       .slice(begin)
       .filter((call) => call.endpoint === 'commitBoardScene')
-      .every((call) => Object.keys(call.data).every((key) => ['boardId', 'commitId'].includes(key))),
+      .every((call) =>
+        Object.keys(call.data).every((key) => ['boardId', 'commitId', 'sceneProtocolVersion'].includes(key)),
+      ),
     'Callable traffic contains references, never the whole scene',
   )
   assert(
@@ -385,6 +462,11 @@ try {
     'Unchanged chunks are reused after first-mount Excalidraw normalization',
   )
   checkpoint('offline native edit retains draft and recovers')
+  // Reopening after reconnect is the defined session boundary: it clears the
+  // ended undo session and hydrates the just-committed offline draft as the
+  // new canonical head before testing a separate throttled edit.
+  await open(owner, fixture.id, fixture.count + 2)
+  await owner.waitForSelector('[data-testid="toolbar-rectangle"]', { timeout: 10_000 })
   const slowCdp = await owner.createCDPSession()
   await slowCdp.send('Network.enable')
   await slowCdp.send('Network.emulateNetworkConditions', {
@@ -441,11 +523,19 @@ try {
     'Lost acknowledgement did not recover the local durable save status',
     90000,
   )
+  const pendingCandidateSnapshot = await owner.evaluate(() =>
+    Object.entries(sessionStorage).filter(([key]) => key.startsWith('scene-upload:')),
+  )
   assert(
     calls
       .slice(lostCallStart)
       .filter((call) => call.endpoint === 'commitBoardScene' && call.data.commitId === lostCommitId).length >= 2,
-    'Client retries the original ambiguous commit ID instead of blindly uploading another revision',
+    `Client retries the original ambiguous commit ID instead of blindly uploading another revision; dropped ${lostCommitId}, observed ${JSON.stringify(
+      calls
+        .slice(lostCallStart)
+        .filter((call) => call.endpoint === 'commitBoardScene')
+        .map(({ data }) => data.commitId),
+    )}, pending ${JSON.stringify(pendingCandidateSnapshot)}`,
   )
   checkpoint('lost acknowledgement recovers original receipt and local synced revision')
 
@@ -504,13 +594,43 @@ try {
     loadEvents.some((event) => event.completed === event.total && event.total > 1),
     'Complete multi-chunk load is reported',
   )
+  const concurrentReads = await viewer.evaluate(async (id) => {
+    const { sceneService } = await import('/src/features/scenes/scene-service.ts')
+    const scenes = await Promise.all(Array.from({ length: 8 }, () => sceneService.load(id)))
+    return scenes.map((scene) => scene?.revisionId)
+  }, fixture.id)
+  assert(
+    concurrentReads.every((revisionId) => revisionId === concurrentReads[0] && revisionId),
+    'Concurrent reads of one board share a single pinned scene load',
+  )
+  checkpoint('concurrent reads of one board share a single pinned load')
   // Once the revision is rendered, listener keepalives must not cause another
-  // callable read or a write when no editor changed the board.
+  // scene/history read or write when no editor changed the board.
   await new Promise((resolve) => setTimeout(resolve, 1500))
   const idleStart = calls.length
   await new Promise((resolve) => setTimeout(resolve, 5000))
-  const idleBoardCalls = calls.slice(idleStart).filter((call) => call.peer === 'viewer' && call.data?.boardId === fixture.id &&
-    ['boardHistory', 'ensureBoardScene', 'commitBoardScene', 'importBoardVersion'].includes(call.endpoint))
+  const idleBoardCalls = calls
+    .slice(idleStart)
+    .filter(
+      (call) =>
+        call.peer === 'viewer' &&
+        call.data?.boardId === fixture.id &&
+        [
+          'acquireBoardSceneReadPin',
+          'acquireNamedBoardSceneVersionReadPin',
+          'readBoardScenePage',
+          'readBoardSceneChunks',
+          'ensureBoardScene',
+          'beginBoardSceneUpload',
+          'stageBoardSceneChunk',
+          'stageBoardScenePage',
+          'commitBoardScene',
+          'boardHistory',
+          'updateBoardContent',
+          'importBoardVersion',
+          'restoreBoardVersion',
+        ].includes(call.endpoint),
+    )
   assert.deepEqual(idleBoardCalls, [], 'A loaded, untouched board must not issue further board/history calls while idle')
   checkpoint('loaded multi-chunk board remains network-idle without edits')
   const headBeforeAttack = (await durable(fixture.id)).head.headRevisionId
@@ -769,29 +889,17 @@ try {
   )
   const mergedSame = await durable(fixture.id)
   assert.equal(mergedSame.scene.elements[0].x, 3001, 'Lower nonce wins equal-version same-element writes')
-  const generationRefusal = await owner.evaluate(
-    async ({ id, scene, generation }) => {
-      const { sceneService } = await import('/src/features/scenes/scene-service.ts')
-      try {
-        await sceneService.commit(id, scene, { expectedGeneration: generation + 1 })
-        return 'allowed'
-      } catch (error) {
-        return error.message
-      }
-    },
-    { id: fixture.id, scene: mergedSame.scene, generation: mergedSame.head.generation },
-  )
-  assert.match(generationRefusal, /restored|replaced/)
-  assert.equal((await durable(fixture.id)).head.headRevisionId, mergedSame.head.headRevisionId)
-  checkpoint(
-    'client stale-head retries merge different elements and deterministic same-element conflicts; mismatched generation refuses publication',
-  )
+  checkpoint('client stale-head retries merge different elements and deterministic same-element conflicts')
   // Three real contexts enter collab, then leave one at a time; remaining edits must survive.
   await owner.evaluate(async (id) => {
     const { sharingService } = await import('/src/features/sharing/sharing-service.ts')
     const config = await sharingService.getShareConfig(id)
-    await sharingService.saveShareConfig({ ...config, generalRole: 'editor' })
+    await sharingService.saveShareConfig({ ...config, generalAccess: 'anyone_with_link', generalRole: 'editor' })
   }, fixture.id)
+  await waitFor(
+    async () => (await db.doc(`boardShares/${fixture.id}`).get()).data()?.generalRole === 'editor',
+    'Editor link role was not published',
+  )
   await open(owner, fixture.id, fixture.count + 4)
   const guestContextA = await browser.createBrowserContext(),
     guestContextB = await browser.createBrowserContext()
@@ -806,6 +914,23 @@ try {
       { polling: 100 },
     )
   }
+  for (const page of [guestA, guestB]) {
+    const access = await page.evaluate(async (id) => {
+      const { sharingService } = await import('/src/features/sharing/sharing-service.ts')
+      const { getFirebaseAuth } = await import('/src/lib/firebase.ts')
+      const result = await sharingService.getSharedBoard(id)
+      return {
+        uid: getFirebaseAuth().currentUser?.uid,
+        status: result.status,
+        role: result.config?.effectiveRole,
+        viewMode: window.__excalidrawAPI.getAppState().viewModeEnabled,
+      }
+    }, fixture.id)
+    assert(
+      access.role === 'editor' || access.role === 'owner',
+      `Collaboration participant is not authorized to edit: ${JSON.stringify(access)}`,
+    )
+  }
   const collaborative = await nativeRectangle(guestA, 950, 620)
   for (const page of [owner, guestB]) {
     await page.bringToFront()
@@ -816,6 +941,37 @@ try {
     )
   }
   await guestContextA.close()
+  await guestB.waitForFunction(
+    () => window.__lazyCollab?.isLazyCollabActive === true && !window.__lazyCollab?.isTransitioningCollab,
+    { polling: 100 },
+  )
+  try {
+    await guestB.waitForSelector('[data-testid="toolbar-rectangle"]', { timeout: 10_000 })
+  } catch {
+    const diagnostics = await guestB.evaluate(async (id) => {
+      const { sharingService } = await import('/src/features/sharing/sharing-service.ts')
+      const access = await sharingService.getSharedBoard(id)
+      return {
+        text: document.body.innerText.slice(0, 700),
+        tools: [...document.querySelectorAll('[data-testid^="toolbar-"]')].map((element) =>
+          element.getAttribute('data-testid'),
+        ),
+        editorMounted: Boolean(window.__excalidrawAPI),
+        viewMode: window.__excalidrawAPI?.getAppState().viewModeEnabled,
+        collabActive: window.__lazyCollab?.isLazyCollabActive,
+        transitioning: window.__lazyCollab?.isTransitioningCollab,
+        isEditor: window.__collab?.isEditor,
+        isSpectator: window.__collab?.isSpectator,
+        access: {
+          status: access.status,
+          role: access.config?.effectiveRole,
+          generalAccess: access.config?.generalAccess,
+          generalRole: access.config?.generalRole,
+        },
+      }
+    }, fixture.id)
+    throw new Error(`Remaining collaborator lost its toolbar after a peer disconnected: ${JSON.stringify(diagnostics)}`)
+  }
   const afterFirstDrop = await nativeRectangle(guestB, 1000, 500)
   await owner.bringToFront()
   await owner.waitForFunction(
@@ -948,6 +1104,22 @@ try {
     1234,
   )
   await importedColdContext.close()
+  const importedHead = await durable(fixture.id)
+  const generationRefusal = await importPage.evaluate(
+    async ({ id, scene, generation }) => {
+      const { sceneService } = await import('/src/features/scenes/scene-service.ts')
+      try {
+        await sceneService.commit(id, scene, { expectedGeneration: generation + 1 })
+        return 'allowed'
+      } catch (error) {
+        return error.message
+      }
+    },
+    { id: fixture.id, scene: importedHead.scene, generation: importedHead.head.generation },
+  )
+  assert.match(generationRefusal, /restored|replaced/)
+  assert.equal((await durable(fixture.id)).head.headRevisionId, importedHead.head.headRevisionId)
+  checkpoint('client refuses a mismatched board generation without publishing')
   checkpoint(
     'native file input replaces with lower-version subset; omitted elements stay deleted across durable save and cold reload',
   )

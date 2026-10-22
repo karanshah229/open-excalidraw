@@ -259,6 +259,27 @@ export const boardHistory = onCall({ region, enforceAppCheck: appCheck.value(), 
       ])
       notesReadable = !!share.data() && canReadSpeakerNotes(share.data()!, request.auth!, parent?.data())
     }
+    const manifestResponse = {
+      contextId,
+      versionId: versionId ?? null,
+      revisionId: version.sceneRevisionId,
+      generation: version.sceneGeneration,
+      boardName: version.boardName,
+      pageCount: revision.pageCount,
+      chunkCount: revision.chunkCount,
+      candidateDigest: revision.candidateDigest,
+      historyProtocolVersion: head.historyProtocolVersion ?? 1,
+      restoreFence: head.restoreFence ?? 0,
+      currentVersionId: head.currentVersionId ?? null,
+      nameRevision: head.nameRevision ?? 0,
+      notesPageCount: notesReadable ? (notes?.pageCount ?? 0) : 0,
+      expiresAt: iso(expiresAt),
+    }
+    // Sharing can already have loaded scene bytes through the stricter scene-read
+    // pin protocol. Give it the matching asset/note context without transferring
+    // the canvas payload a second time.
+    if (request.data.metadataOnly === true) return manifestResponse
+
     // Keep the initial paint response small; follow-up batches can be larger.
     const initialReferences = references.slice(0, 3)
     const initialSnapshots = await getMany(initialReferences.map((reference) => `${root}/chunks/${historyId(reference.chunkId)}`))
@@ -269,22 +290,9 @@ export const boardHistory = onCall({ region, enforceAppCheck: appCheck.value(), 
       return { chunkId: snapshot.id, digest: chunk.digest, payload: chunk.payload }
     })
     return {
-      contextId,
-      versionId: versionId ?? null,
-      revisionId: version.sceneRevisionId,
-      generation: version.sceneGeneration,
-      boardName: version.boardName,
-      pageCount: revision.pageCount,
-      chunkCount: revision.chunkCount,
-      candidateDigest: revision.candidateDigest,
+      ...manifestResponse,
       references,
       chunks,
-      historyProtocolVersion: head.historyProtocolVersion ?? 1,
-      restoreFence: head.restoreFence ?? 0,
-      currentVersionId: head.currentVersionId ?? null,
-      nameRevision: head.nameRevision ?? 0,
-      notesPageCount: notesReadable ? (notes?.pageCount ?? 0) : 0,
-      expiresAt: iso(expiresAt),
     }
   }
   const { context } = await authorizeHistoryContext(boardId, historyId(request.data.contextId), actor, false)

@@ -4,6 +4,8 @@
 - Date: 2026-10-10
 - Related: [ADR 002](002-storage-seam-and-local-indexeddb.md), [ADR 003](003-image-access-and-soft-delete.md), [ADR 005](005-live-presentation-sharing.md)
 
+Follow-up: [ADR 007](007-scene-maintenance-and-safe-garbage-collection.md) defines the implementation phases and safety/testing requirements for tombstone cleanup, chunk repacking, garbage collection and retained versions. Those maintenance features are not implied to be implemented by this ADR.
+
 ## Context
 
 Cloud board scenes currently live inside individual Firestore documents, whose maximum size is 1 MiB. A board can exceed this through elements, freehand points, text and other persisted state even though image bytes already live separately. Firestore subcollections do not count toward the parent document's size. [Limits](https://firebase.google.com/docs/firestore/quotas), [size calculation](https://firebase.google.com/docs/firestore/storage-size)
@@ -162,7 +164,7 @@ Industry evidence supports separating persistence from live sync rather than one
 | --- | --- |
 | Does overflow mean we start writing everything to the next document? | No. New content can create/split a chunk; existing content retains its identity and updates its containing chunk. Never duplicate old elements across chunks as an append-only overflow scheme. |
 | Does the client assemble the board? | Yes. The cloud adapter assembles one `BoardDocument`/scene before handing it to the existing editor. Chunking is a persistence detail. |
-| Does the app stop using Firestore directly? | No. Browsers read heads/chunks and stage payloads directly in Firestore. A callable validates and advances the head; server fallback uses its underlying commit service. No solo RTDB connection is required. |
+| Does the app stop using Firestore directly? | At ADR 006 launch, browsers read heads/chunks and staged payloads directly in Firestore. ADR 007 later moved scene payload reads and writes behind protocol-versioned callables, with pinned reads; browsers still read head metadata directly. Solo editing still needs no RTDB connection. |
 | Why add a callable to B? | It validates all referenced chunks and publishes under fresh authorization without unbounded Firestore-rule checks. It receives IDs, not a full board, and runs per debounced cloud save rather than per stroke. The extra save latency/read cost is accepted. |
 | Where is the source of truth? | `boardScenes/{boardId}.headRevisionId`. Workspace and sharing documents reference that board ID and hold metadata/policy; neither owns another scene head. |
 | Does a solo board require RTDB? | Not for persistence. Shared boards currently keep an RTDB active-session lobby even when scene collaboration is disabled; removing that connection requires a separate discovery change. |

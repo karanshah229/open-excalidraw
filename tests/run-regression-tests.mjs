@@ -20,7 +20,11 @@ const all = [
   'board-history-image-ui.test.mjs',
   'board-history-legacy-ui.test.mjs',
   'chunked-scenes.test.mjs',
+  'undo-session-lifecycle.test.mjs',
+  'tombstone-compaction-e2e.test.mjs',
+  'scene-read-security.test.mjs',
   'five-chunk-scene.test.mjs',
+  'scene-generation-reset-e2e.test.mjs',
   'sharing-flow-audit.test.mjs',
   'export-retry.test.mjs',
   'presentation-access.test.mjs',
@@ -83,7 +87,7 @@ if (!process.argv.includes('--inside-emulators')) {
     await symlink(resolve(root, 'functions/node_modules'), resolve(functions, 'node_modules'), 'dir')
     await writeFile(
       resolve(functions, '.env.demo-regression'),
-      'RTDB_FUNCTION_REGION=us-central1\nFIRESTORE_FUNCTION_REGION=us-central1\nSYNC_ACCESS_FUNCTION_REGION=us-central1\nASSET_ENFORCE_APP_CHECK=false\n',
+      `RTDB_FUNCTION_REGION=us-central1\nFIRESTORE_FUNCTION_REGION=us-central1\nSYNC_ACCESS_FUNCTION_REGION=us-central1\nASSET_ENFORCE_APP_CHECK=false\nSCENE_TOMBSTONE_COMPACTION_ENABLED=${process.env.SCENE_TOMBSTONE_COMPACTION_ENABLED === 'true' ? 'true' : 'false'}\nSCENE_COMPACTION_TEST_HOLD_MS=${process.env.SCENE_COMPACTION_TEST_HOLD_MS ?? '0'}\n`,
     )
     const config = JSON.parse(await readFile(resolve(root, 'regression.firebase.json'), 'utf8'))
     config.functions.source = 'functions'

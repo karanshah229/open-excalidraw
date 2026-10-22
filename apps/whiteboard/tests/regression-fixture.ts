@@ -1,7 +1,8 @@
 import { setWorkspaceIdentity } from '@agentic-whiteboard/storage'
-import { createUserWithEmailAndPassword, signInAnonymously, type Auth } from 'firebase/auth'
+import { createUserWithEmailAndPassword, signInAnonymously, signInWithCustomToken, type Auth } from 'firebase/auth'
 import { doc, getDoc, getDocFromServer } from 'firebase/firestore'
-import { getFirebaseAuth, getFirebaseApp, getFirestoreDb } from '../src/lib/firebase'
+import { get, ref, set } from 'firebase/database'
+import { getFirebaseAuth, getFirebaseApp, getFirebaseRtdb, getFirestoreDb } from '../src/lib/firebase'
 import { sharingService, type BoardShareConfig } from '../src/features/sharing/sharing-service'
 import { workspaceApi } from '../src/features/workspace/workspace-api'
 export { updateProfile, signOut, signInAnonymously } from 'firebase/auth'
@@ -25,6 +26,14 @@ export async function signInOwner(auth: Auth) {
     'fixture-password',
   )
   localStorage.removeItem('agentic-whiteboard:e2e-user')
+  await workspaceApi.activateCloudWorkspace(credential.user.uid)
+  return credential
+}
+
+/** Authenticate an isolated browser context as an existing fixture owner. */
+export async function signInOwnerWithToken(auth: Auth, token: string) {
+  requireDemoEmulators()
+  const credential = await signInWithCustomToken(auth, token)
   await workspaceApi.activateCloudWorkspace(credential.user.uid)
   return credential
 }
@@ -92,4 +101,31 @@ export async function signInGuest() {
 export async function readBoardSharePolicy(boardId: string) {
   requireDemoEmulators()
   return (await getDocFromServer(doc(getFirestoreDb()!, 'boardShares', boardId))).data()
+}
+
+/** Read RTDB session records through the app's Firebase bundle in browser tests. */
+export async function readActiveSessionsForRegression(boardId: string) {
+  requireDemoEmulators()
+  const db = getFirebaseRtdb()!
+  return (await get(ref(db, `activeSessions/${boardId}`))).val()
+}
+
+/** Replay an old session epoch to verify RTDB rules reject stale writes. */
+export async function replayRegressionSession(boardId: string, sessionId: string, uid: string, epoch: number, elementId: string) {
+  requireDemoEmulators()
+  const db = getFirebaseRtdb()!
+  const stalePresence = { uid, sessionId, connectionEpoch: epoch }
+  const staleDelta = {
+    id: elementId,
+    version: 999,
+    versionNonce: 1,
+    lastModifiedBy: uid,
+    sessionId,
+    connectionEpoch: epoch,
+    data: JSON.stringify({ id: elementId, type: 'rectangle', x: 0, y: 0, width: 40, height: 40, isDeleted: false, version: 999, versionNonce: 1 }),
+  }
+  return Promise.all([
+    set(ref(db, `presence/${boardId}/${sessionId}`), stalePresence).then(() => 'allowed', (error) => error.code),
+    set(ref(db, `boards/${boardId}/elements/${elementId}`), staleDelta).then(() => 'allowed', (error) => error.code),
+  ])
 }

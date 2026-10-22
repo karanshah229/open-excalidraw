@@ -73,6 +73,8 @@ try {
     headRef = db.doc(root)
   const head = (await headRef.get()).data()
   assert.equal(head.historyProtocolVersion, 1)
+  assert.equal(head.maintenanceAdmission ?? 'open', 'open')
+  assert.equal(head.maintenanceEpoch ?? 1, 1)
   const revision = (await db.doc(`${root}/revisions/${head.headRevisionId}/pages/000000`).get()).data()
   const chunkId = revision.references[0].chunkId
   await db.doc(`boardShares/${seed.id}/history/legacy-secret`).set({ scene: { secret: true } })
@@ -105,6 +107,7 @@ try {
     expectedHeadRevisionId: string(head.headRevisionId),
     generation: integer(head.generation),
     expectedFence: integer(head.restoreFence ?? 0),
+    maintenanceEpoch: integer(head.maintenanceEpoch ?? 1),
     sceneFormatVersion: integer(1),
     pageCount: integer(1),
     chunkCount: integer(1),
@@ -131,6 +134,16 @@ try {
     'Own active candidate is resumable',
   )
   assert.equal((await read(`${root}/chunks/${commitId}_0`, guestToken)).status, 403)
+  const closedCommitId = `${commitId}_closed`,
+    closedCandidate = { ...candidate, maintenanceEpoch: integer(head.maintenanceEpoch ?? 1) }
+  await headRef.update({ maintenanceAdmission: 'closed', maintenanceEpoch: (head.maintenanceEpoch ?? 1) + 1 })
+  assert.equal((await write(`${root}/uploads/${closedCommitId}`, seed.token, closedCandidate)).status, 403,
+    'Maintenance closure blocks direct client upload admission')
+  assert.equal((await write(`${root}/chunks/${commitId}_1`, seed.token, stagedChunk)).status, 403,
+    'Maintenance epoch invalidates in-flight chunk writes')
+  await headRef.update({ maintenanceAdmission: 'open' })
+  assert.equal((await write(`${root}/chunks/${commitId}_1`, seed.token, stagedChunk)).status, 403,
+    'Reopening admission does not revive an old upload epoch')
   await headRef.update({ restoreOperationId: 'rules_blocked', restoreFence: (head.restoreFence ?? 0) + 1 })
   assert.equal(
     (await write(`${root}/chunks/${commitId}_1`, seed.token, stagedChunk)).status,

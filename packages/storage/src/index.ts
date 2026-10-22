@@ -1,4 +1,6 @@
 import { boardHistoryStore, setBoardHistoryIdentity, type HistorySaveOptions } from './board-history'
+import { mergeBoardScenes } from './scene-merge'
+export { mergeBoardScenes } from './scene-merge'
 export * from './board-history'
 import { addRxPlugin, createRxDatabase } from 'rxdb'
 import { getRxStorageLocalstorage } from 'rxdb/plugins/storage-localstorage'
@@ -58,6 +60,14 @@ export type BoardScene = {
   appState: Record<string, unknown>
   /** Includes deleted elements' assets so undo remains possible. */
   files?: Record<string, BoardFile>
+  /** Server-authored compact tombstones; these are metadata, never Excalidraw elements. */
+  deletionLedger?: Array<{
+    id: string
+    version: number
+    versionNonce: number
+    firstObservedDeletedAt: string
+    compacted: boolean
+  }>
 }
 export type BoardDocument = Board & { scene: BoardScene; formatVersion: 1 }
 export type WorkspaceBootstrap = { project: Project | null; board: BoardDocument | null }
@@ -214,22 +224,6 @@ const database = () => {
     return instance
   })
   return databasePromise
-}
-
-function mergeSceneElements(local: BoardScene, remote: BoardScene): BoardScene {
-  const elements = new Map<string, Record<string, unknown>>()
-  for (const element of local.elements) elements.set(String(element.id), element)
-  for (const element of remote.elements) {
-    const current = elements.get(String(element.id))
-    if (
-      !current ||
-      Number(element.version ?? 0) > Number(current.version ?? 0) ||
-      (Number(element.version ?? 0) === Number(current.version ?? 0) &&
-        Number(element.versionNonce ?? 0) < Number(current.versionNonce ?? 0))
-    )
-      elements.set(String(element.id), element)
-  }
-  return { ...remote, ...local, elements: [...elements.values()], files: { ...remote.files, ...local.files } }
 }
 
 const plain = <T>(document: { toJSON: () => T }) => document.toJSON()
@@ -446,6 +440,7 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
     const db = await database()
     const existing = await (db.boards as any).findOne(boardId).exec()
     if (existing) await boardHistoryStore.reconcileDocument(plain<BoardDocument>(existing))
+
   }
 
   async upsertProject(project: Project): Promise<void> {
@@ -600,7 +595,7 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
         current.cloudRevisionId !== cloudRevisionId
       return {
         ...current,
-        scene: blocked || headChanged ? current.scene : laterEdits ? mergeSceneElements(current.scene, scene) : scene,
+        scene: blocked || headChanged ? current.scene : laterEdits ? mergeBoardScenes(current.scene, scene) : scene,
         name: blocked || headChanged || laterEdits || pendingRename ? current.name : options?.cloudBoardName ?? current.name,
         cloudRevisionId: headChanged || blocked ? current.cloudRevisionId : cloudRevisionId,
         cloudGeneration: headChanged || blocked ? current.cloudGeneration : cloudGeneration,
@@ -655,7 +650,7 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
       }
       return {
         ...current,
-        scene: pending ? mergeSceneElements(current.scene, scene) : scene,
+        scene: pending ? mergeBoardScenes(current.scene, scene) : scene,
         cloudRevisionId,
         cloudGeneration,
         cloudVersionId: options?.cloudVersionId ?? current.cloudVersionId,

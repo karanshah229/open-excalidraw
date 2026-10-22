@@ -1,6 +1,20 @@
 {
   "indexes": [
     {
+      "collectionGroup": "readerPins",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "uid",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "expiresAt",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
       "collectionGroup": "restoreOperations",
       "queryScope": "COLLECTION_GROUP",
       "fields": [

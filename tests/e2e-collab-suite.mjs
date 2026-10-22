@@ -161,16 +161,12 @@ async function runLiveE2ECollaborationSuite() {
       const readiness = await Promise.all(
         [page1, page2].map((page) =>
           page.evaluate(async () => {
-            const { getFirebaseAuth, getFirebaseRtdb } = await import('/src/lib/firebase.ts')
-            const { get, ref } = await import('firebase/database')
+            const { getFirebaseAuth, readActiveSessionsForRegression } = await import('/tests/regression-fixture.ts')
             const user = getFirebaseAuth()?.currentUser
-            const rtdb = getFirebaseRtdb()
             let directRead
             let tokenClaims = null
             try {
-              directRead = rtdb
-                ? (await get(ref(rtdb, `activeSessions/${location.pathname.split('/').pop()}`))).val()
-                : null
+              directRead = await readActiveSessionsForRegression(location.pathname.split('/').pop())
               tokenClaims = user ? (await user.getIdTokenResult()).claims : null
             } catch (error) {
               directRead = { error: error instanceof Error ? error.message : String(error) }
@@ -424,7 +420,7 @@ async function runLiveE2ECollaborationSuite() {
     await page3.goto(boardUrl, { waitUntil: 'domcontentloaded' })
     await page3.waitForSelector('.excalidraw', { timeout: 15000 })
     await page3.waitForFunction(() => Boolean(window.__excalidrawAPI))
-    await sleep(3000)
+    await page2.waitForFunction(() => document.querySelectorAll('.collab-avatar').length >= 2, { timeout: 15000 })
 
     {
       const guestViewCollabCount = await page2.evaluate(() => {
@@ -527,6 +523,20 @@ async function runLiveE2ECollaborationSuite() {
       await page2.mouse.down()
       await page2.mouse.move(canvasBox.x + 110, canvasBox.y + 80, { steps: 5 })
       await page2.mouse.up()
+
+      await page2.waitForFunction(
+        (knownIds) => window.__excalidrawAPI.getSceneElements().some((e) => !knownIds.includes(e.id)),
+        { timeout: 10_000 },
+        [...idsBefore],
+      ).catch(async (error) => {
+        const diagnostics = await page2.evaluate(() => ({
+          ids: window.__excalidrawAPI?.getSceneElements().map((element) => element.id) ?? [],
+          collabActive: window.__lazyCollab?.isLazyCollabActive ?? false,
+          activeSessions: window.__lazyCollab?.activeSessions?.length ?? 0,
+          transitioning: window.__lazyCollab?.isTransitioningCollab ?? false,
+        }))
+        throw new Error(`Guest did not create the test rectangle: ${JSON.stringify(diagnostics)}; ${error.message}`)
+      })
 
       await page1.waitForFunction(
         (knownIds) => window.__excalidrawAPI.getSceneElements().some((e) => !knownIds.includes(e.id)),

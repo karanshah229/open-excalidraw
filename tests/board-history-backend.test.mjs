@@ -86,6 +86,17 @@ await db.doc('system/boardHistoryRollout').set({ migrationEnabled: true })
 assert.deepEqual((await loadSceneRevision(boardId, current)).scene.elements.map((e) => e.id).sort(), ['A', 'B'])
 const initialVersion = current.currentVersionId
 const manifest = await call(boardHistory, editor, { boardId, operation: 'manifest', versionId: initialVersion })
+const sceneContext = await call(boardHistory, editor, { boardId, operation: 'current-scene', metadataOnly: true })
+assert.equal(sceneContext.revisionId, current.headRevisionId)
+assert.equal(sceneContext.generation, current.generation)
+assert.equal(sceneContext.notesPageCount, 1)
+assert.equal(typeof sceneContext.contextId, 'string')
+assert.equal('chunks' in sceneContext, false, 'Metadata-only context must not duplicate the pinned scene payload.')
+assert.equal('references' in sceneContext, false)
+assert.equal(
+  (await call(boardHistory, editor, { boardId, operation: 'notes', contextId: sceneContext.contextId, page: 0 })).notes.A.text,
+  'Original protected notes',
+)
 const notes = await call(boardHistory, editor, { boardId, operation: 'notes', contextId: manifest.contextId, page: 0 })
 assert.equal(notes.notes.A.text, 'Original protected notes')
 const renamed = await call(updateBoardContent, editor, {
@@ -659,9 +670,11 @@ await db.doc(`${root}/uploads/${noopStage}`).set({
   generation: noopHead.generation,
   expectedFence: noopHead.restoreFence,
   sceneFormatVersion: 1,
+  sceneProtocolVersion: 2,
   pageCount: paginateReferences(noopReferences).length,
   chunkCount: noopReferences.length,
   newChunkCount: 0,
+  maintenanceEpoch: (await db.doc(`${root}/maintenance/control`).get()).data().epoch,
   candidateDigest: await manifestDigest(noopReferences, noopHead.generation),
   createdAt: Timestamp.now(),
   expiresAt: Timestamp.fromMillis(Date.now() + 600000),

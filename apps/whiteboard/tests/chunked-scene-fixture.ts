@@ -1,8 +1,8 @@
 /** Emulator-only adversarial protocol fixture; not bundled with the app. */
-import { doc, getDocFromServer, setDoc, updateDoc, Timestamp, serverTimestamp } from 'firebase/firestore'
+import { doc, getDocFromServer, updateDoc } from 'firebase/firestore'
 import { projectCall } from '../src/features/sharing/project-service'
 import { getFirebaseApp, getFirebaseAuth, getFirestoreDb } from '../src/lib/firebase'
-import { packScene, paginateReferences, manifestDigest } from '../../../functions/src/scene-codec'
+import { packScene, paginateReferences, manifestDigest, SCENE_PROTOCOL_VERSION } from '../../../functions/src/scene-codec'
 
 function environment() {
   const app = getFirebaseApp()!
@@ -26,18 +26,18 @@ export async function stageScene(boardId: string, scene: any, base?: { headRevis
   }))
   const pages = paginateReferences(refs)
   try {
-    await setDoc(doc(db, 'boardScenes', boardId, 'uploads', commitId), {
-      uploaderUid: uid,
+    await projectCall('beginBoardSceneUpload', {
+      boardId,
+      commitId,
       expectedHeadRevisionId: head.headRevisionId,
       generation: head.generation,
       sceneFormatVersion: 1,
+      sceneProtocolVersion: SCENE_PROTOCOL_VERSION,
       pageCount: pages.length,
       chunkCount: refs.length,
       newChunkCount: refs.length,
       candidateDigest: await manifestDigest(refs, head.generation),
       expectedFence: head.restoreFence ?? 0,
-      createdAt: serverTimestamp(),
-      expiresAt: Timestamp.fromMillis(Date.now() + 600000),
     })
   } catch (error) {
     const current = (await getDocFromServer(doc(db, 'boardScenes', boardId))).data()
@@ -57,24 +57,57 @@ export async function stageScene(boardId: string, scene: any, base?: { headRevis
     )
   }
   for (let slot = 0; slot < chunks.length; slot++)
-    await setDoc(doc(db, 'boardScenes', boardId, 'chunks', refs[slot].chunkId), {
+    await projectCall('stageBoardSceneChunk', {
+      boardId,
+      commitId,
+      sceneProtocolVersion: SCENE_PROTOCOL_VERSION,
+      slot,
       payload: chunks[slot].payload,
       digest: chunks[slot].digest,
-      uploadId: commitId,
-      slot,
-      uploaderUid: uid,
-      generation: head.generation,
-      kind: 'records',
     })
   for (let index = 0; index < pages.length; index++)
-    await setDoc(doc(db, 'boardScenes', boardId, 'uploads', commitId, 'pages', String(index).padStart(6, '0')), {
+    await projectCall('stageBoardScenePage', {
+      boardId,
+      commitId,
+      sceneProtocolVersion: SCENE_PROTOCOL_VERSION,
+      pageIndex: index,
       references: pages[index],
     })
   return { boardId, commitId, refs }
 }
 export async function commitCandidate(candidate: { boardId: string; commitId: string }) {
   environment()
-  return projectCall('commitBoardScene', { boardId: candidate.boardId, commitId: candidate.commitId })
+  return projectCall('commitBoardScene', {
+    boardId: candidate.boardId,
+    commitId: candidate.commitId,
+    sceneProtocolVersion: SCENE_PROTOCOL_VERSION,
+  })
+}
+export async function verifyLegacyProtocolRejected(boardId: string) {
+  const { db } = environment()
+  const { doc, getDoc } = await import('firebase/firestore')
+  const head = (await getDoc(doc(db, 'boardScenes', boardId))).data()
+  if (!head?.headRevisionId || !head?.generation) throw new Error('Fixture board scene head is missing.')
+  try {
+    await projectCall('beginBoardSceneUpload', {
+      boardId,
+      commitId: crypto.randomUUID(),
+      expectedHeadRevisionId: head.headRevisionId,
+      generation: head.generation,
+      sceneFormatVersion: 1,
+      pageCount: 1,
+      chunkCount: 1,
+      newChunkCount: 1,
+      candidateDigest: '0'.repeat(64),
+    })
+    return { accepted: true }
+  } catch (error) {
+    return {
+      accepted: false,
+      code: (error as any).code,
+      details: (error as any).details,
+    }
+  }
 }
 export async function forbiddenHeadWrite(boardId: string) {
   const { db } = environment()
@@ -84,9 +117,25 @@ export async function forbiddenChunkRewrite(boardId: string, chunkId: string) {
   const { db } = environment()
   await updateDoc(doc(db, 'boardScenes', boardId, 'chunks', chunkId), { payload: '[]' })
 }
-export async function readChunk(boardId: string, chunkId: string) {
+export async function directSceneReadProbe(boardId: string, revisionId: string, chunkId: string) {
   const { db } = environment()
-  return (await getDocFromServer(doc(db, 'boardScenes', boardId, 'chunks', chunkId))).data()
+  const attempt = async (path: string[]) => {
+    try {
+      await getDocFromServer(doc(db, ...path))
+      return { allowed: true }
+    } catch (error) {
+      return { allowed: false, code: (error as any).code }
+    }
+  }
+  const head = await getDocFromServer(doc(db, 'boardScenes', boardId))
+  return {
+    headAllowed: head.exists(),
+    revision: await attempt(['boardScenes', boardId, 'revisions', revisionId]),
+    page: await attempt(['boardScenes', boardId, 'revisions', revisionId, 'pages', '000000']),
+    version: await attempt(['boardScenes', boardId, 'versions', 'legacy-read-probe']),
+    upload: await attempt(['boardScenes', boardId, 'uploads', 'legacy-read-probe']),
+    chunk: await attempt(['boardScenes', boardId, 'chunks', chunkId]),
+  }
 }
 
 export async function signInExistingOwner(email: string) {
