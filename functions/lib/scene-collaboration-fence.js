@@ -4,7 +4,7 @@
  * after a transaction confirms this invocation still owns the lock.
  */
 export async function runWithAbandonedRoomFence(args) {
-    const { rtdb, boardId, lockToken, lockDurationMs, work } = args;
+    const { rtdb, boardId, lockToken, lockDurationMs, firestore, work } = args;
     const lockRef = rtdb.ref(`system/compactionLocks/${boardId}`);
     const maintenanceRef = rtdb.ref(`system/sceneMaintenance/${boardId}`);
     const lock = await lockRef.transaction((current) => {
@@ -16,23 +16,73 @@ export async function runWithAbandonedRoomFence(args) {
         return { status: 'lock-contended' };
     let gateClaimed = false;
     try {
-        // Claim gate ownership and close admission atomically. A later invocation
-        // that takes an expired lock replaces this owner token; the old invocation
-        // then cannot reopen the newer owner's gate in its finally block.
+        let recoveredOwner = null;
+        if (firestore) {
+            const oldGate = (await maintenanceRef.get()).val();
+            const oldOwner = oldGate?.admissionOwner;
+            if (oldGate?.admissionClosed === true && typeof oldOwner === 'string' && oldOwner !== lockToken) {
+                const headRef = firestore.doc(`boardScenes/${boardId}`);
+                const controlRef = firestore.doc(`boardScenes/${boardId}/maintenance/control`);
+                const [controlSnapshot, headSnapshot] = await Promise.all([controlRef.get(), headRef.get()]);
+                const control = controlSnapshot.data(), head = headSnapshot.data();
+                if (control?.admission === 'closed' && control.abandonedRoomOwner === oldOwner &&
+                    typeof control.leaseUntil?.toMillis === 'function' && control.leaseUntil.toMillis() <= Date.now() &&
+                    Number.isSafeInteger(control.epoch) && head?.maintenanceAdmission === 'closed' &&
+                    head.maintenanceEpoch === control.epoch)
+                    recoveredOwner = oldOwner;
+            }
+        }
+        // Take over the still-closed RTDB gate before reopening Firestore. This keeps
+        // RTDB admission continuously closed throughout cross-store crash recovery.
         const gate = await maintenanceRef.transaction((current) => {
             // A generation reset may hold a durable closed gate across invocations.
-            // An abandoned-room checkpoint must never replace that owner and reopen it.
-            if (current?.admissionClosed === true && current?.admissionOwner !== lockToken)
+            // An abandoned-room checkpoint must never replace that owner.
+            if (current?.admissionClosed === true && current?.admissionOwner !== lockToken &&
+                current?.admissionOwner !== recoveredOwner)
                 return;
+            if (current?.admissionClosed === true && current?.admissionOwner === lockToken)
+                return current;
+            const admissionEpoch = Number.isSafeInteger(current?.admissionEpoch) && current.admissionEpoch >= 0
+                ? current.admissionEpoch + 1
+                : 1;
             return {
                 ...(current ?? {}),
                 admissionClosed: true,
                 admissionOwner: lockToken,
+                admissionEpoch,
             };
         });
         if (!gate.committed)
             throw new Error(`Could not close scene admission gate for ${boardId}`);
         gateClaimed = gate.snapshot.child('admissionOwner').val() === lockToken;
+        if (recoveredOwner && firestore) {
+            const headRef = firestore.doc(`boardScenes/${boardId}`);
+            const controlRef = firestore.doc(`boardScenes/${boardId}/maintenance/control`);
+            const recovered = await firestore.runTransaction(async (tx) => {
+                const control = (await tx.get(controlRef)).data(), head = (await tx.get(headRef)).data();
+                if (control?.admission !== 'closed' || control?.abandonedRoomOwner !== recoveredOwner ||
+                    typeof control.leaseUntil?.toMillis !== 'function' || control.leaseUntil.toMillis() > Date.now() ||
+                    !Number.isSafeInteger(control.epoch) || head?.maintenanceAdmission !== 'closed' ||
+                    head.maintenanceEpoch !== control.epoch)
+                    return false;
+                const nextEpoch = control.epoch + 1;
+                tx.update(controlRef, {
+                    admission: 'open', epoch: nextEpoch, token: null, abandonedRoomOwner: null,
+                    leaseUntil: null, jobId: null, phase: null, recoveredAt: new Date(), updatedAt: new Date(),
+                });
+                tx.update(headRef, { maintenanceAdmission: 'open', maintenanceEpoch: nextEpoch });
+                return true;
+            });
+            if (!recovered) {
+                await maintenanceRef.transaction((current) => {
+                    if (current?.admissionOwner !== lockToken)
+                        return;
+                    return { ...current, admissionClosed: true, admissionOwner: recoveredOwner };
+                });
+                gateClaimed = false;
+                throw new Error(`Expired Firestore compaction fence changed during recovery for ${boardId}`);
+            }
+        }
         const [presence, activeSessions] = await Promise.all([
             rtdb.ref(`presence/${boardId}`).get(),
             rtdb.ref(`activeSessions/${boardId}`).get(),
@@ -62,6 +112,22 @@ export async function runWithAbandonedRoomFence(args) {
             : null;
         if (ownership?.committed && ownership.snapshot.val()?.token === lockToken) {
             try {
+                if (firestore) {
+                    const headRef = firestore.doc(`boardScenes/${boardId}`);
+                    const controlRef = firestore.doc(`boardScenes/${boardId}/maintenance/control`);
+                    await firestore.runTransaction(async (tx) => {
+                        const control = (await tx.get(controlRef)).data(), head = (await tx.get(headRef)).data();
+                        if (control?.admission !== 'closed' || control?.abandonedRoomOwner !== lockToken ||
+                            !Number.isSafeInteger(control.epoch) || head?.maintenanceAdmission !== 'closed' ||
+                            head.maintenanceEpoch !== control.epoch)
+                            return;
+                        tx.update(controlRef, {
+                            admission: 'open', token: null, abandonedRoomOwner: null, leaseUntil: null,
+                            jobId: null, phase: null, updatedAt: new Date(),
+                        });
+                        tx.update(headRef, { maintenanceAdmission: 'open', maintenanceEpoch: control.epoch });
+                    });
+                }
                 if (gateClaimed && maintenanceSnapshot.child('admissionOwner').val() === lockToken) {
                     await maintenanceRef.transaction((current) => {
                         if (current == null)

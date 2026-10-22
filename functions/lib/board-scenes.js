@@ -1,7 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { getFirestore, Timestamp, } from 'firebase-admin/firestore';
+import { getDatabase } from 'firebase-admin/database';
+import { getFirestore, Timestamp, FieldValue, } from 'firebase-admin/firestore';
 import { HttpsError, onCall } from 'firebase-functions/v2/https';
 import { defineBoolean, defineString } from 'firebase-functions/params';
+import { indexSceneAssets, validateSceneAssetResources } from './board-history-assets.js';
+import { assertContentWritable, publishContentVersion } from './board-history-model.js';
+import { loadNoteSnapshot, writeNoteSnapshot } from './board-history-notes.js';
 import { authorizeScene } from './scene-access.js';
 import { compactFencedTombstones, observeSceneTombstones, reconcileElementsAndDeletionLedger, } from './scene-deletion-ledger.js';
 import { packScene, assembleScene, canonicalStringify, digestString, manifestDigest, paginateReferences, SCENE_FORMAT_VERSION, SCENE_PROTOCOL_VERSION, CHUNK_BUDGET_BYTES, chunkDocumentBytes, } from './scene-codec.js';
@@ -32,6 +36,10 @@ function validateControl(data) {
 function assertControlOpen(control) {
     if (control.admission !== 'open')
         throw maintenanceError();
+}
+function syncHeadMaintenance(tx, headRef, head, control) {
+    if (head.maintenanceAdmission !== control.admission || head.maintenanceEpoch !== control.epoch)
+        tx.update(headRef, { maintenanceAdmission: control.admission, maintenanceEpoch: control.epoch });
 }
 function initializeControl(tx, ref, data) {
     if (!data)
@@ -160,12 +168,32 @@ export async function loadSceneRevision(boardId, head) {
 export async function ensureScene(boardId, actor, requestedProjectId) {
     const db = getFirestore(), root = `boardScenes/${boardId}`, ref = db.doc(root);
     const existing = (await ref.get()).data();
+    // A coordinated rollout closes this server-only gate before installing services/rules.
+    // Already-started migrations and protocol-1 recovery must remain able to finish.
+    if (existing?.historyProtocolVersion !== 1 &&
+        !existing?.restoreOperationId &&
+        (await db.doc('system/boardHistoryRollout').get()).data()?.migrationEnabled === false)
+        throw new HttpsError('unavailable', 'Board history deployment is in progress. Retry shortly.');
     if (existing) {
         if (requestedProjectId && existing.projectId !== requestedProjectId)
             throw new HttpsError('permission-denied', 'Scene project binding does not match the requested project.');
         await authorizeScene(boardId, existing, actor, undefined, false);
-        if (existing.headRevisionId)
-            return existing;
+        if (existing.headRevisionId) {
+            // A read-only viewer can read an already-published legacy scene, but must
+            // not start the history migration because that operation checkpoints the
+            // live collaboration room and changes the board protocol.
+            if (existing.historyProtocolVersion !== 1) {
+                try {
+                    await authorizeScene(boardId, existing, actor);
+                }
+                catch (error) {
+                    if (error.code === 'permission-denied')
+                        return existing;
+                    throw error;
+                }
+            }
+            return initializeBoardHistory(boardId, actor);
+        }
     }
     for (let attempt = 0; attempt < 4; attempt++) {
         const shareSnapshot = await db.doc(`boardShares/${boardId}`).get(), share = shareSnapshot.data();
@@ -198,11 +226,15 @@ export async function ensureScene(boardId, actor, requestedProjectId) {
             touchControl(tx, controlRefFor(boardId), controlData);
             if (reserved && (reserved.ownerId !== ownerId || reserved.projectId !== projectId))
                 throw new HttpsError('permission-denied', 'This board ID is bound to another owner or project.');
+            if (reserved)
+                syncHeadMaintenance(tx, ref, reserved, control);
             if (!reserved)
                 tx.create(ref, {
                     ...binding,
                     headRevisionId: null,
                     generation: 1,
+                    maintenanceAdmission: control.admission,
+                    maintenanceEpoch: control.epoch,
                     sceneFormatVersion: SCENE_FORMAT_VERSION,
                     updatedAt: new Date().toISOString(),
                 });
@@ -228,6 +260,7 @@ export async function ensureScene(boardId, actor, requestedProjectId) {
                 throw new HttpsError('aborted', 'Board bootstrap reservation changed.');
             await authorizeScene(boardId, binding, actor, tx, false);
             touchControl(tx, controlRef, controlData);
+            syncHeadMaintenance(tx, ref, current, control);
             if (!existingJob)
                 tx.create(jobRef, {
                     status: 'running',
@@ -328,8 +361,20 @@ export async function ensureScene(boardId, actor, requestedProjectId) {
                     tx.update(shareNow.ref, { sceneId: boardId });
                 return head;
             });
-            if (result)
-                return result;
+            if (result) {
+                // Read access may bootstrap a public legacy scene for the callable
+                // reader, but only an editor may perform the history migration that
+                // checkpoints its live room and changes the board protocol.
+                try {
+                    await authorizeScene(boardId, result, actor);
+                }
+                catch (error) {
+                    if (error.code === 'permission-denied')
+                        return result;
+                    throw error;
+                }
+                return initializeBoardHistory(boardId, actor);
+            }
             await retireBootstrapJob();
         }
         catch (error) {
@@ -340,7 +385,7 @@ export async function ensureScene(boardId, actor, requestedProjectId) {
     }
     throw new HttpsError('aborted', 'The board changed during migration. Retry registration.');
 }
-export async function commitSceneCandidate(boardId, commitId, actor) {
+export async function commitSceneCandidate(boardId, commitId, actor, restoreOperationId, maintenanceFenceToken) {
     const db = getFirestore(), root = `boardScenes/${boardId}`, headRef = db.doc(root), candidateRef = db.doc(`${root}/uploads/${commitId}`), controlRef = controlRefFor(boardId), leaseId = randomUUID();
     const state = await db.runTransaction(async (tx) => {
         const controlData = (await tx.get(controlRef)).data(), head = (await tx.get(headRef)).data(), candidate = (await tx.get(candidateRef)).data();
@@ -355,6 +400,11 @@ export async function commitSceneCandidate(boardId, commitId, actor) {
             ? (await tx.get(db.doc(`${root}/maintenanceJobs/${candidate.maintenanceJobId}`))).data()
             : undefined;
         initializeControl(tx, controlRef, controlData);
+        assertContentWritable(actor.trusted && restoreOperationId === head.restoreOperationId ? { ...head, restoreOperationId: null } : head, candidate.generation, candidate.expectedFence ?? 0);
+        if (head.historyProtocolVersion === 1 && !Number.isInteger(candidate.expectedFence))
+            throw new HttpsError('failed-precondition', 'Update this tab before saving; restore fence is required.');
+        if (candidate.purpose === 'history-only')
+            dataError('Use importBoardVersion for historical candidates.');
         if (candidate.uploaderUid !== actor.uid)
             throw new HttpsError('permission-denied', 'Upload belongs to another actor.');
         if (candidate.receipt)
@@ -445,7 +495,12 @@ export async function commitSceneCandidate(boardId, commitId, actor) {
             canonicalStringify(scene.deletionLedger ?? []) !== canonicalStringify(base.scene.deletionLedger ?? []))
             dataError('Deletion metadata is server managed; reload the board and retry.');
         validateAssets(boardId, head.ownerId, scene);
-        const revisionId = commitId;
+        const revisionId = commitId, assetResources = await indexSceneAssets(boardId, commitId, scene);
+        const reverseWriter = db.bulkWriter();
+        references.forEach((reference) => reverseWriter.set(db.doc(`${root}/chunkReferences/${reference.chunkId}/revisions/${revisionId}`), {
+            createdAt: new Date().toISOString(),
+        }));
+        await reverseWriter.close();
         // Stage immutable server manifests once; retries preserve the original timestamp and bytes.
         const createdAt = await db.runTransaction(async (tx) => {
             const revisionRef = db.doc(`${root}/revisions/${revisionId}`), controlData = (await tx.get(controlRef)).data(), headNow = (await tx.get(headRef)).data(), uploadNow = (await tx.get(candidateRef)).data(), previous = (await tx.get(revisionRef)).data(), maintenanceJob = uploadNow?.maintenanceJobId
@@ -500,6 +555,7 @@ export async function commitSceneCandidate(boardId, commitId, actor) {
                             : {}),
                     }
                     : {}),
+                assetResourceIds: assetResources.map((resource) => resource.id),
                 createdAt,
             });
             return createdAt;
@@ -512,6 +568,9 @@ export async function commitSceneCandidate(boardId, commitId, actor) {
             assertControlOpen(control);
             await authorizeScene(boardId, latest, actor, tx);
             initializeControl(tx, controlRef, controlData);
+            assertContentWritable(actor.trusted && restoreOperationId === latest.restoreOperationId
+                ? { ...latest, restoreOperationId: null }
+                : latest, candidate.generation, candidate.expectedFence ?? 0);
             if (upload.receipt)
                 return upload.receipt;
             if (upload.maintenanceEpoch !== control.epoch ||
@@ -529,20 +588,61 @@ export async function commitSceneCandidate(boardId, commitId, actor) {
                     currentHeadRevisionId: latest.headRevisionId,
                     generation: latest.generation,
                 });
+            const canonical = (await tx.get(db.doc(`${root}/revisions/${latest.headRevisionId}`))).data();
+            if (canonical && canonical.candidateDigest === candidate.candidateDigest) {
+                const receipt = {
+                    revisionId: latest.headRevisionId,
+                    generation: latest.generation,
+                    candidateDigest: canonical.candidateDigest,
+                    committedAt: canonical.createdAt,
+                    versionId: latest.currentVersionId,
+                    contentSequence: latest.contentSequence,
+                    branchId: latest.currentBranchId,
+                    branchSequence: latest.branchSequence,
+                };
+                tx.update(candidateRef, { receipt, status: 'committed', leaseId: null, leaseUntil: null });
+                return receipt;
+            }
+            const resources = await tx.getAll(...references.map((reference) => db.doc(`${root}/chunks/${reference.chunkId}`)), { fieldMask: ['digest', 'generation', 'deletionFence'] });
+            resources.forEach((resource, slot) => {
+                const chunk = resource.data();
+                if (!chunk ||
+                    chunk.deletionFence ||
+                    chunk.digest !== references[slot].digest ||
+                    chunk.generation !== latest.generation)
+                    dataError('Chunk was collected during validation. Restage this save.');
+            });
+            await validateSceneAssetResources(tx, boardId, assetResources);
             const receipt = {
                 revisionId,
                 generation: latest.generation,
                 candidateDigest: candidate.candidateDigest,
                 committedAt: createdAt,
             };
-            tx.update(headRef, {
+            const closesAdmission = Boolean(maintenanceFenceToken && actor.trusted && upload.closeAdmissionOwner === maintenanceFenceToken);
+            if (upload.closeAdmissionOwner && !closesAdmission)
+                throw new HttpsError('permission-denied', 'Only the matching trusted compaction can close scene admission.');
+            const history = publishContentVersion(tx, boardId, latest, actor, revisionId, {
                 headRevisionId: revisionId,
-                updatedAt: createdAt,
+                ...(closesAdmission ? { maintenanceAdmission: 'closed', maintenanceEpoch: control.epoch + 1 } : {}),
                 ...(candidate.maintenanceReason === 'layout-repack' ? { lastLayoutRepackAt: Timestamp.now() } : {}),
+            }, actor.trusted ? 'collaboration-checkpoint' : 'scene-save');
+            Object.assign(receipt, history);
+            tx.update(candidateRef, {
+                receipt, status: 'committed', leaseId: null, leaseUntil: null,
+                ...(closesAdmission ? { maintenanceEpoch: control.epoch + 1 } : {}),
             });
-            tx.update(candidateRef, { receipt, status: 'committed', leaseId: null, leaseUntil: null });
             if (jobRef && job?.exists)
-                tx.update(jobRef, { status: 'complete', leaseUntil: null, completedAt: Timestamp.now() });
+                tx.update(jobRef, {
+                    status: 'complete', leaseUntil: null, completedAt: Timestamp.now(), ...(closesAdmission ? { epoch: control.epoch + 1 } : {}),
+                });
+            if (closesAdmission) {
+                tx.update(controlRef, {
+                    admission: 'closed', epoch: control.epoch + 1, token: maintenanceFenceToken,
+                    abandonedRoomOwner: maintenanceFenceToken,
+                    leaseUntil: Timestamp.fromMillis(Date.now() + 180_000), updatedAt: Timestamp.now(),
+                });
+            }
             return receipt;
         });
     }
@@ -555,7 +655,7 @@ export async function commitSceneCandidate(boardId, commitId, actor) {
         });
     }
 }
-function validateAssets(boardId, ownerId, scene) {
+export function validateAssets(boardId, ownerId, scene) {
     for (const file of Object.values(scene.files ?? {})) {
         if (!file || typeof file !== 'object')
             dataError('Invalid file descriptor.');
@@ -568,7 +668,9 @@ function validateAssets(boardId, ownerId, scene) {
             dataError('Asset belongs to another board.');
     }
 }
-export async function checkpointScene(boardId, updateScene, head, actor, options = {}) {
+export async function checkpointScene(boardId, sceneOrUpdater, head, actor, optionsOrRestoreOperationId = {}) {
+    const options = typeof optionsOrRestoreOperationId === 'string' ? {} : optionsOrRestoreOperationId;
+    const restoreOperationId = typeof optionsOrRestoreOperationId === 'string' ? optionsOrRestoreOperationId : undefined;
     const db = getFirestore(), root = `boardScenes/${boardId}`, commitId = `checkpoint_${randomUUID()}`;
     // Pin the exact base before the trusted Admin reader fetches pages and chunks.
     const controlRef = controlRefFor(boardId), headRef = db.doc(root), readPinId = randomUUID(), readPinRef = db.doc(`${root}/readerPins/${readPinId}`);
@@ -579,6 +681,7 @@ export async function checkpointScene(boardId, updateScene, head, actor, options
         await authorizeScene(boardId, latest, actor, tx, false);
         const control = validateControl(controlData);
         assertControlOpen(control);
+        assertContentWritable(actor.trusted && restoreOperationId === latest.restoreOperationId ? { ...latest, restoreOperationId: null } : latest, latest.generation, latest.restoreFence ?? 0);
         if (latest.headRevisionId !== head.headRevisionId ||
             latest.generation !== head.generation ||
             !latest.headRevisionId)
@@ -620,7 +723,7 @@ export async function checkpointScene(boardId, updateScene, head, actor, options
     try {
         // This is the trusted reader's first payload read; the pin above protects it.
         base = await loadSceneRevision(boardId, head);
-        const updated = updateScene(base.scene);
+        const updated = typeof sceneOrUpdater === 'function' ? sceneOrUpdater(base.scene) : sceneOrUpdater;
         const observed = observeSceneTombstones(base.scene.elements, updated.elements, base.scene.deletionLedger ?? [], Date.now());
         const compacted = options.compactTombstones
             ? compactFencedTombstones(observed.elements, observed.deletionLedger, observed.deletionLedger.filter((record) => !record.compacted).map((record) => record.id))
@@ -676,6 +779,28 @@ export async function checkpointScene(boardId, updateScene, head, actor, options
         throw error;
     }
     const references = chunks.map(({ chunkId, digest }) => ({ chunkId, digest })), pages = paginateReferences(references);
+    const candidateDigest = await manifestDigest(references, head.generation);
+    if (candidateDigest === (await manifestDigest(base.references, head.generation))) {
+        return db.runTransaction(async (tx) => {
+            const latest = (await tx.get(db.doc(root))).data();
+            await authorizeScene(boardId, latest, actor, tx);
+            assertContentWritable(actor.trusted && restoreOperationId === latest.restoreOperationId
+                ? { ...latest, restoreOperationId: null }
+                : latest, head.generation, head.restoreFence ?? 0);
+            if (latest.headRevisionId !== head.headRevisionId)
+                throw new HttpsError('aborted', 'Scene revision changed.');
+            return {
+                revisionId: latest.headRevisionId,
+                generation: latest.generation,
+                candidateDigest,
+                committedAt: (await tx.get(db.doc(`${root}/revisions/${latest.headRevisionId}`))).data().createdAt,
+                versionId: latest.currentVersionId,
+                contentSequence: latest.contentSequence,
+                branchId: latest.currentBranchId,
+                branchSequence: latest.branchSequence,
+            };
+        });
+    }
     const oldIds = new Set(base.references.map((ref) => ref.chunkId)), newChunks = chunks.filter((chunk) => !oldIds.has(chunk.chunkId)), writer = db.bulkWriter(), now = Timestamp.now();
     const uploadRef = db.doc(`${root}/uploads/${commitId}`);
     const maintenanceJobId = `checkpoint_${commitId}`, maintenanceJobToken = randomUUID(), jobRef = db.doc(`${root}/maintenanceJobs/${maintenanceJobId}`);
@@ -687,6 +812,7 @@ export async function checkpointScene(boardId, updateScene, head, actor, options
             if (!latest || latest.headRevisionId !== head.headRevisionId || latest.generation !== head.generation)
                 throw new HttpsError('aborted', 'Scene revision changed before checkpoint staging.');
             await authorizeScene(boardId, latest, actor, tx);
+            assertContentWritable(actor.trusted && restoreOperationId === latest.restoreOperationId ? { ...latest, restoreOperationId: null } : latest, head.generation, head.restoreFence ?? 0);
             if (!pin.exists ||
                 pin.data()?.uid !== actor.uid ||
                 pin.data()?.generation !== head.generation ||
@@ -695,6 +821,7 @@ export async function checkpointScene(boardId, updateScene, head, actor, options
                 milliseconds(pin.data()?.expiresAt) <= Date.now())
                 throw new HttpsError('failed-precondition', 'Checkpoint base read pin expired.');
             touchControl(tx, controlRef, controlData);
+            syncHeadMaintenance(tx, headRef, latest, control);
             if (existingUpload)
                 throw new HttpsError('already-exists', 'Checkpoint ID is already in use.');
             tx.create(jobRef, {
@@ -716,6 +843,8 @@ export async function checkpointScene(boardId, updateScene, head, actor, options
                 uploaderUid: actor.uid,
                 expectedHeadRevisionId: head.headRevisionId,
                 generation: head.generation,
+                expectedFence: head.restoreFence ?? 0,
+                ...(restoreOperationId ? { restoreOperationId } : {}),
                 sceneFormatVersion: SCENE_FORMAT_VERSION,
                 sceneProtocolVersion: SCENE_PROTOCOL_VERSION,
                 pageCount: pages.length,
@@ -723,6 +852,7 @@ export async function checkpointScene(boardId, updateScene, head, actor, options
                 newChunkCount: newChunks.length,
                 candidateDigest: await manifestDigest(references, head.generation),
                 maintenanceEpoch: control.epoch,
+                ...(options.closeAdmissionOwner ? { closeAdmissionOwner: options.closeAdmissionOwner } : {}),
                 maintenanceJobId,
                 maintenanceJobToken,
                 ...(options.layoutRepack || options.compactTombstones
@@ -770,7 +900,7 @@ export async function checkpointScene(boardId, updateScene, head, actor, options
         pages.forEach((page, slot) => writer.create(db.doc(`${root}/uploads/${commitId}/pages/${scenePageId(slot)}`), { references: page }));
         await writer.close();
         writerSettled = true;
-        return await commitSceneCandidate(boardId, commitId, actor);
+        return await commitSceneCandidate(boardId, commitId, actor, restoreOperationId, options.closeAdmissionOwner);
     }
     catch (error) {
         if (!writerSettled) {
@@ -805,6 +935,7 @@ export async function repackBoardSceneNow(boardId, actor) {
 export const beginBoardSceneUpload = onCall({ region, enforceAppCheck: appCheck.value() }, async (request) => {
     const boardId = id(request.data?.boardId), commitId = id(request.data?.commitId), actor = actorOf(request);
     const expectedHeadRevisionId = id(request.data?.expectedHeadRevisionId);
+    const expectedFence = request.data?.expectedFence;
     const { generation, sceneFormatVersion, pageCount, chunkCount, newChunkCount, candidateDigest } = request.data ?? {};
     requireSceneProtocol(request.data?.sceneProtocolVersion);
     if (!Number.isSafeInteger(generation) ||
@@ -832,7 +963,11 @@ export const beginBoardSceneUpload = onCall({ region, enforceAppCheck: appCheck.
         await authorizeScene(boardId, head, actor, tx);
         const control = validateControl(controlData);
         assertControlOpen(control);
+        if (head.historyProtocolVersion === 1 && !Number.isSafeInteger(expectedFence))
+            throw new HttpsError('failed-precondition', 'Update this tab before saving; restore fence is required.');
+        assertContentWritable(head, generation, expectedFence ?? 0);
         initializeControl(tx, controlRef, controlData);
+        syncHeadMaintenance(tx, headRef, head, control);
         if (!head.headRevisionId || head.headRevisionId !== expectedHeadRevisionId || head.generation !== generation)
             throw new HttpsError('aborted', 'Scene revision changed.', {
                 currentHeadRevisionId: head.headRevisionId ?? null,
@@ -856,6 +991,7 @@ export const beginBoardSceneUpload = onCall({ region, enforceAppCheck: appCheck.
             uploaderUid: actor.uid,
             expectedHeadRevisionId,
             generation,
+            expectedFence: expectedFence ?? (head.restoreFence ?? 0),
             sceneFormatVersion,
             pageCount,
             chunkCount,
@@ -895,6 +1031,7 @@ export const stageBoardSceneChunk = onCall({ region, enforceAppCheck: appCheck.v
             upload.maintenanceEpoch !== control.epoch ||
             milliseconds(upload.expiresAt) <= Date.now() ||
             upload.generation !== head.generation ||
+            upload.expectedFence !== (head.restoreFence ?? 0) ||
             upload.sceneProtocolVersion !== SCENE_PROTOCOL_VERSION ||
             !head.headRevisionId ||
             upload.expectedHeadRevisionId !== head.headRevisionId ||
@@ -951,6 +1088,7 @@ export const stageBoardScenePage = onCall({ region, enforceAppCheck: appCheck.va
             upload.maintenanceEpoch !== control.epoch ||
             milliseconds(upload.expiresAt) <= Date.now() ||
             upload.generation !== head.generation ||
+            upload.expectedFence !== (head.restoreFence ?? 0) ||
             upload.sceneProtocolVersion !== SCENE_PROTOCOL_VERSION ||
             !head.headRevisionId ||
             upload.expectedHeadRevisionId !== head.headRevisionId ||
@@ -1511,6 +1649,11 @@ export const ensureBoardScene = onCall({ region, enforceAppCheck: appCheck.value
         headRevisionId: head.headRevisionId,
         generation: head.generation,
         sceneFormatVersion: head.sceneFormatVersion,
+        restoreFence: head.restoreFence ?? 0,
+        currentVersionId: head.currentVersionId ?? null,
+        boardName: head.boardName,
+        nameRevision: head.nameRevision ?? 0,
+        historyProtocolVersion: head.historyProtocolVersion ?? 0,
     };
 });
 export const commitBoardScene = onCall({
@@ -1528,3 +1671,153 @@ export const repackBoardScene = onCall({ region, enforceAppCheck: appCheck.value
     requireSceneProtocol(request.data?.sceneProtocolVersion);
     return repackBoardSceneNow(id(request.data?.boardId), actorOf(request));
 });
+/** Upgrade an existing canonical scene and fence legacy RTDB traffic before advertising history. */
+export async function initializeBoardHistory(boardId, actor) {
+    const db = getFirestore(), root = `boardScenes/${boardId}`, ref = db.doc(root), migrationId = `migration_${boardId}`, leaseId = randomUUID();
+    let head = await db.runTransaction(async (tx) => {
+        const head = (await tx.get(ref)).data();
+        await authorizeScene(boardId, head, actor, tx, false);
+        if (head.historyProtocolVersion === 1 && !head.restoreOperationId)
+            return head;
+        if (!head.restoreOperationId &&
+            (await tx.get(db.doc('system/boardHistoryRollout'))).data()?.migrationEnabled === false)
+            throw new HttpsError('unavailable', 'Board history deployment is in progress. Retry shortly.');
+        // Viewers may read legacy content, but cannot initiate a migration that checkpoints edits.
+        await authorizeScene(boardId, head, actor, tx);
+        if (head.restoreOperationId && head.restoreOperationId !== migrationId)
+            throw new HttpsError('unavailable', 'A restore is in progress.');
+        if (head.migrationLeaseUntil?.toMillis?.() > Date.now())
+            throw new HttpsError('unavailable', 'Board history migration is in progress.');
+        const privateBoard = head.projectId
+            ? (await tx.get(db.doc(`users/${head.ownerId}/projects/${head.projectId}/boards/${boardId}`))).data()
+            : null, share = (await tx.get(db.doc(`boardShares/${boardId}`))).data(), notes = !head.currentVersionId ? await loadNoteSnapshot(boardId, null, tx) : null;
+        const patch = {
+            restoreOperationId: migrationId,
+            restoreFence: (head.restoreFence ?? 0) + 1,
+            migrationLeaseId: leaseId,
+            migrationLeaseUntil: Timestamp.fromMillis(Date.now() + 120_000),
+        };
+        if (!head.currentVersionId) {
+            const history = publishContentVersion(tx, boardId, head, actor, `baseline_${randomUUID()}`, {
+                ...patch,
+                boardName: privateBoard?.name ?? share?.boardName ?? share?.name ?? 'Untitled board',
+                nameRevision: 0,
+                notesRevisionId: writeNoteSnapshot(tx, boardId, notes),
+            }, 'history-baseline');
+            return { ...head, ...patch, ...history, currentVersionId: history.versionId, currentBranchId: history.branchId };
+        }
+        tx.update(ref, patch);
+        return { ...head, ...patch };
+    });
+    if (head.historyProtocolVersion === 1 && !head.restoreOperationId)
+        return head;
+    head = (await ref.get()).data();
+    const reverseWriter = db.bulkWriter(), currentManifest = await loadSceneManifest(boardId, head);
+    currentManifest.references.forEach((reference) => reverseWriter.set(db.doc(`${root}/chunkReferences/${reference.chunkId}/revisions/${head.headRevisionId}`), {
+        createdAt: new Date().toISOString(),
+    }));
+    await reverseWriter.close();
+    const currentScene = await loadSceneRevision(boardId, head);
+    const initialAssetResources = await indexSceneAssets(boardId, head.headRevisionId, currentScene.scene);
+    await db
+        .doc(`${root}/revisions/${head.headRevisionId}`)
+        .update({ assetResourceIds: initialAssetResources.map((resource) => resource.id) });
+    const room = getDatabase().ref(`boards/${boardId}`), holdRoom = () => { };
+    room.on('value', holdRoom);
+    try {
+        await room.once('value');
+        const locked = await room.transaction((current) => {
+            if ((current?.restoreFence ?? 0) > head.restoreFence)
+                return;
+            return {
+                ...current,
+                generation: head.generation,
+                restoreFence: head.restoreFence,
+                restoreOperationId: migrationId,
+            };
+        });
+        if (!locked.committed)
+            throw new HttpsError('aborted', 'Migration transport fence was superseded.');
+        const data = (await room.get()).val() ?? {}, legacy = head.generation === 1 ? (data.elements ?? {}) : {}, scoped = data.generations?.[head.generation]?.elements ?? {};
+        if (head.historyProtocolVersion !== 1 && (Object.keys(legacy).length || Object.keys(scoped).length)) {
+            const { scene } = await loadSceneRevision(boardId, head), elements = new Map(scene.elements.map((element) => [element.id, element]));
+            for (const record of Object.values({ ...legacy, ...scoped })) {
+                let element;
+                try {
+                    element = typeof record.data === 'string' ? JSON.parse(record.data) : (record.element ?? record);
+                }
+                catch {
+                    continue;
+                }
+                const previous = elements.get(element.id);
+                if (element.id &&
+                    (!previous ||
+                        element.version > previous.version ||
+                        (element.version === previous.version && element.versionNonce < previous.versionNonce)))
+                    elements.set(element.id, element);
+            }
+            await checkpointScene(boardId, { ...scene, elements: [...elements.values()] }, head, { uid: head.ownerId, trusted: true }, migrationId);
+        }
+        // Fence new transport before publishing the client-visible protocol switch.
+        const switched = await room.transaction((current) => {
+            if (current?.restoreOperationId !== migrationId || current.restoreFence !== head.restoreFence)
+                return;
+            const generations = {
+                ...current.generations,
+                [head.generation]: { ...current.generations?.[head.generation], elements: { ...legacy, ...scoped } },
+            };
+            const next = { ...current, historyProtocolVersion: 1, generation: head.generation, generations };
+            delete next.elements;
+            return next;
+        });
+        if (!switched.committed)
+            throw new HttpsError('aborted', 'Migration switch fence was superseded.');
+        await db.runTransaction(async (tx) => {
+            const latest = (await tx.get(ref)).data();
+            await authorizeScene(boardId, latest, actor, tx);
+            const privateRef = latest.projectId
+                ? db.doc(`users/${latest.ownerId}/projects/${latest.projectId}/boards/${boardId}`)
+                : null, privateDoc = privateRef ? await tx.get(privateRef) : null, shareDoc = await tx.get(db.doc(`boardShares/${boardId}`));
+            if (latest.restoreOperationId !== migrationId ||
+                latest.migrationLeaseId !== leaseId ||
+                latest.migrationLeaseUntil.toMillis() <= Date.now())
+                throw new HttpsError('aborted', 'Migration lease was superseded.');
+            if (privateDoc?.data()?.scene) {
+                tx.set(db.doc(`${root}/legacyArchive/private`), {
+                    scene: privateDoc.data().scene,
+                    archivedAt: Timestamp.now(),
+                    expiresAt: Timestamp.fromMillis(Date.now() + 30 * 24 * 60 * 60 * 1000),
+                });
+                tx.update(privateRef, { scene: FieldValue.delete() });
+            }
+            if (shareDoc.data()?.scene) {
+                tx.set(db.doc(`${root}/legacyArchive/share`), {
+                    scene: shareDoc.data().scene,
+                    archivedAt: Timestamp.now(),
+                    expiresAt: Timestamp.fromMillis(Date.now() + 30 * 24 * 60 * 60 * 1000),
+                });
+                tx.update(shareDoc.ref, { scene: FieldValue.delete() });
+            }
+            tx.update(ref, { historyProtocolVersion: 1, chunkReferencesReady: true });
+        });
+        const unlocked = await room.transaction((current) => {
+            if (current?.restoreOperationId !== migrationId || current.restoreFence !== head.restoreFence)
+                return;
+            return { ...current, restoreOperationId: null };
+        });
+        if (!unlocked.committed)
+            throw new HttpsError('aborted', 'Migration unlock fence was superseded.');
+        await db.runTransaction(async (tx) => {
+            const latest = (await tx.get(ref)).data();
+            if (latest.restoreOperationId !== migrationId ||
+                latest.migrationLeaseId !== leaseId ||
+                latest.migrationLeaseUntil.toMillis() <= Date.now())
+                throw new HttpsError('aborted', 'Migration unlock lease was superseded.');
+            tx.update(ref, { restoreOperationId: null, migrationLeaseUntil: null });
+        });
+        return (await ref.get()).data();
+    }
+    finally {
+        room.off('value', holdRoom);
+    }
+}

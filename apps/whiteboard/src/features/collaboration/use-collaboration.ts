@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ExcalidrawImperativeAPI } from '@excalidraw/excalidraw/types'
 import type { Collaborator } from '@excalidraw/excalidraw/types'
-import { reconcileElements } from '@excalidraw/excalidraw'
+import { reconcileElementsLWW } from './reconcile'
 import { type User } from 'firebase/auth'
 import { getFirebaseAuth, getFirebaseRtdb, getFirebaseStorage } from '../../lib/firebase'
 import { onValue, ref } from 'firebase/database'
@@ -18,6 +18,9 @@ import type { CollaboratorPresence, CollabUser } from './types'
 export interface UseCollaborationOptions {
   boardId: string
   enabled: boolean
+  generation?: number
+  expectedFence?: number
+  restorationBlocked?: boolean
   sessionId?: string
   authUser?: User | null
   isAuthLoading?: boolean
@@ -27,6 +30,7 @@ export interface UseCollaborationOptions {
   appStateRef: React.MutableRefObject<Record<string, unknown>>
   onConnectionChange?: (connected: boolean) => void | Promise<void>
   getSceneGeneration?: () => number
+  onRemoteSceneApply?: (elements: readonly any[], phase: 'before' | 'after') => void
 }
 
 export function getFullSceneElements(
@@ -43,6 +47,9 @@ export function getFullSceneElements(
 export function useCollaboration({
   boardId,
   enabled,
+  generation,
+  expectedFence = 0,
+  restorationBlocked = false,
   sessionId,
   authUser,
   isAuthLoading,
@@ -52,6 +59,7 @@ export function useCollaboration({
   appStateRef,
   onConnectionChange,
   getSceneGeneration = () => 1,
+  onRemoteSceneApply,
 }: UseCollaborationOptions) {
   // Session ID stays fixed for the lifetime of this tab
   const sessionIdRef = useRef<string>(sessionId || generateSessionId())
@@ -91,6 +99,10 @@ export function useCollaboration({
   // Collaboration service singleton ref
   const collabServiceRef = useRef<CollaborationService>(new CollaborationService())
 
+  const restorationBlockedRef = useRef(restorationBlocked)
+  restorationBlockedRef.current = restorationBlocked
+  collabServiceRef.current.setBoardContext(boardId, generation, expectedFence, restorationBlocked)
+
   // Keep track of known element versions to only broadcast actual deltas
   const knownElementVersionsRef = useRef<Map<string, { version: number; versionNonce: number }>>(new Map())
 
@@ -119,6 +131,15 @@ export function useCollaboration({
       }
     }
   }, [enabled, elementsRef, apiRef])
+
+  useEffect(() => {
+    knownElementVersionsRef.current.clear()
+    lastBroadcastElementsRef.current.clear()
+    pendingDragElementsRef.current.clear()
+    isDraggingRef.current = false
+    seededConnectionEpochRef.current = null
+    setConnectionEpoch(null)
+  }, [boardId, generation])
 
   // Throttling pointer updates (max 30 updates per second / 33ms)
   const lastPointerBroadcastRef = useRef<number>(0)
@@ -207,7 +228,7 @@ export function useCollaboration({
 
   // 2. Join presence and subscribe to remote collaborators
   useEffect(() => {
-    if (!enabled || !collabUser || !boardId || !isAuthReady) return
+    if (!enabled || !collabUser || !boardId || !isAuthReady || restorationBlocked) return
 
     const service = collabServiceRef.current
     let isCancelled = false
@@ -240,7 +261,7 @@ export function useCollaboration({
       if (leavePresence) leavePresence()
       setActiveCollaborators([])
     }
-  }, [enabled, collabUser, boardId, isAuthReady, onConnectionChange, getSceneGeneration])
+  }, [enabled, collabUser, boardId, isAuthReady, onConnectionChange, getSceneGeneration, generation, expectedFence, restorationBlocked])
 
   // Seed after the current socket epoch is authorized. Re-seeding after a
   // reconnect is safe because the element records are versioned and ensures a
@@ -253,15 +274,15 @@ export function useCollaboration({
     if (scene.length > 0) {
       void collabServiceRef.current.broadcastElementDeltas(boardId, scene, collabUser.uid)
     }
-  }, [enabled, connectionEpoch, isAuthReady, collabUser, isSpectator, isReadOnly, boardId, apiRef, elementsRef])
+  }, [enabled, connectionEpoch, isAuthReady, collabUser, isSpectator, isReadOnly, boardId, apiRef, elementsRef, generation, expectedFence, restorationBlocked])
 
   // 3. Subscribe to remote element deltas and reconcile
   useEffect(() => {
-    if (!enabled || !boardId || !isAuthReady) return
+    if (!enabled || !boardId || !isAuthReady || restorationBlocked) return
 
     const service = collabServiceRef.current
     const unsubElements = service.subscribeToElements(boardId, (remotePatch, meta) => {
-      if (!remotePatch || !remotePatch.id) return
+      if (restorationBlockedRef.current || !remotePatch || !remotePatch.id) return
 
       // Don't reconcile if we already have this exact version or newer
       const known = knownElementVersionsRef.current.get(remotePatch.id)
@@ -304,19 +325,43 @@ export function useCollaboration({
       lastBroadcastElementsRef.current.set(mergedElement.id, { ...mergedElement })
 
       // Reconcile with live scene elements using Excalidraw's engine
-      const appState = appStateRef.current
-      const reconciled = reconcileElements(local, [mergedElement], appState as any)
+      // Excalidraw's multiplayer reconciler can retain a locally normalized
+      // intermediate gesture frame when a higher-version final element arrives
+      // over RTDB. Use the same version/nonce ordering as the canonical scene
+      // merge, then let Excalidraw render that winning full element.
+      const reconciled = reconcileElementsLWW(local, [mergedElement])
 
       elementsRef.current = reconciled
+      // Establish the editor's remote baseline before updateScene can invoke
+      // onChange. NEVER excludes undo history, not application autosaves.
+      // updateScene may synchronously call Excalidraw's onChange and can
+      // normalize version/index metadata. Bracket it so the editor absorbs the
+      // actual rendered result without mistaking normalization for a local edit.
+      onRemoteSceneApply?.(reconciled, 'before')
       // Remote state is authoritative for rendering but must never become a
       // local undo/redo entry in Excalidraw's multiplayer history.
-      apiRef.current?.updateScene({ elements: reconciled, captureUpdate: 'NEVER' })
+      try {
+        apiRef.current?.updateScene({ elements: reconciled, captureUpdate: 'NEVER' })
+      } finally {
+        const rendered = getFullSceneElements(apiRef.current, reconciled)
+        onRemoteSceneApply?.(rendered, 'after')
+      }
     })
 
     return () => {
       unsubElements()
     }
-  }, [enabled, boardId, isAuthReady, elementsRef, appStateRef, apiRef])
+  }, [
+    enabled,
+    boardId,
+    isAuthReady,
+    elementsRef,
+    appStateRef,
+    apiRef,
+    generation,
+    restorationBlocked,
+    onRemoteSceneApply,
+  ])
 
   // 4. Convert active collaborators to Excalidraw's native Collaborator Map
   const excalidrawCollaborators = useMemo(() => {
@@ -354,7 +399,13 @@ export function useCollaboration({
 
   // Task 2: Commit pending drag elements on pointerUp / drag completion
   const commitPendingDrag = useCallback(() => {
-    if (pendingDragElementsRef.current.size === 0 || !collabUserRef.current || isSpectatorRef.current || isReadOnly) {
+    if (
+      restorationBlockedRef.current ||
+      pendingDragElementsRef.current.size === 0 ||
+      !collabUserRef.current ||
+      isSpectatorRef.current ||
+      isReadOnly
+    ) {
       return
     }
     const pending = Array.from(pendingDragElementsRef.current.values())
@@ -495,7 +546,7 @@ export function useCollaboration({
   // 6. Broadcast local changes (called from Excalidraw onChange)
   const broadcastChanges = useCallback(
     (currentElements: readonly any[]) => {
-      if (!enabled || !collabUser || isReadOnly || isSpectatorRef.current) {
+      if (restorationBlockedRef.current || !enabled || !collabUser || isReadOnly || isSpectatorRef.current) {
         // Even when dormant (solo mode), track latest element snapshots and versions
         // so that when collaboration activates, our baseline is 100% accurate and
         // subsequent local edits, undos, or redos detect accurate deltas.
@@ -523,28 +574,27 @@ export function useCollaboration({
         const prev = known.get(elem.id)
         const last = lastBroadcastElementsRef.current.get(elem.id)
 
-        const isForwardVersion =
-          !prev ||
-          elem.version > prev.version ||
-          (elem.version === prev.version && elem.versionNonce !== prev.versionNonce)
+        // A different nonce or a higher local Excalidraw version alone does not
+        // prove this authored state wins over a peer's state at that version.
+        // Tombstones and local resurrection must be unambiguous: a remote active
+        // copy at the same version must not resurrect a deletion. Ordinary
+        // concurrent edits keep Excalidraw's same-version nonce tie-break; local
+        // undo/reverts at or below our known version still get a monotonic bump.
+        const isResurrected = Boolean(last?.isDeleted) && !elem.isDeleted
+        const hasStateChanged = Boolean(last && haveElementPropertiesChanged(last, elem))
+        const isDeleted = Boolean(last && !last.isDeleted && elem.isDeleted)
+        const isForwardVersion = !prev || Number(elem.version ?? 1) > prev.version
 
-        if (isForwardVersion) {
+        if (last && (isDeleted || isResurrected || (hasStateChanged && !isForwardVersion))) {
+          const bumpedVersion = Math.max(Number(elem.version ?? 1), Number(prev?.version ?? 1)) + 1
+          const bumpedNonce = Math.floor(Math.random() * 1000000)
+          const bumpedElem = { ...elem, version: bumpedVersion, versionNonce: bumpedNonce }
+          changedElements.push(bumpedElem)
+          known.set(elem.id, { version: bumpedVersion, versionNonce: bumpedNonce })
+          hasVersionBumps = true
+        } else if (isForwardVersion) {
           changedElements.push(elem)
           known.set(elem.id, { version: Number(elem.version ?? 1), versionNonce: Number(elem.versionNonce ?? 0) })
-        } else if (last) {
-          // Detect if an element was resurrected or reverted locally (e.g. via Undo)
-          // where Excalidraw restored an older or matching version number
-          const isResurrected = Boolean(last.isDeleted) && !elem.isDeleted
-          const hasStateChanged = haveElementPropertiesChanged(last, elem)
-
-          if (isResurrected || hasStateChanged) {
-            const bumpedVersion = Math.max(Number(elem.version ?? 1), Number(prev?.version ?? 1)) + 1
-            const bumpedNonce = Math.floor(Math.random() * 1000000)
-            const bumpedElem = { ...elem, version: bumpedVersion, versionNonce: bumpedNonce }
-            changedElements.push(bumpedElem)
-            known.set(elem.id, { version: bumpedVersion, versionNonce: bumpedNonce })
-            hasVersionBumps = true
-          }
         }
       }
 
@@ -611,7 +661,7 @@ export function useCollaboration({
         const sid = collabUserRef.current?.sessionId
         if (rtdb && sid) {
           const { ref, remove } = await import('firebase/database')
-          await remove(ref(rtdb, `presence/${bid}/${sid}`))
+          await remove(ref(rtdb, collabServiceRef.current.presencePath(bid, sid)))
         }
       },
     }

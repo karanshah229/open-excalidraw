@@ -45,6 +45,7 @@ async function runSoloCollabBannerTest() {
         id,
         projectId: proj.id,
         name: 'Solo Test Canvas',
+        active: true,
         scene: {
           elements: [
             {

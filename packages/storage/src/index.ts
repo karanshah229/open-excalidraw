@@ -1,3 +1,7 @@
+import { boardHistoryStore, setBoardHistoryIdentity, type HistorySaveOptions } from './board-history'
+import { mergeBoardScenes } from './scene-merge'
+export { mergeBoardScenes } from './scene-merge'
+export * from './board-history'
 import { addRxPlugin, createRxDatabase } from 'rxdb'
 import { getRxStorageLocalstorage } from 'rxdb/plugins/storage-localstorage'
 import { getRxStorageDexie } from 'rxdb/plugins/storage-dexie'
@@ -33,6 +37,9 @@ export type Board = {
   /** Canonical cloud head identity; independent of this device's local revision. */
   cloudRevisionId?: string
   cloudGeneration?: number
+  cloudVersionId?: string
+  cloudRestoreFence?: number
+  cloudNameRevision?: number
   /** Metadata discovered, but no complete local scene has been hydrated yet. */
   cloudScenePending?: boolean
   syncAttempts: number
@@ -74,7 +81,7 @@ export interface WorkspaceStore {
   listBoards(projectId: string): Promise<Board[]>
   createBoard(projectId: string, name: string): Promise<BoardDocument>
   loadBoard(boardId: string): Promise<BoardDocument | null>
-  saveBoard(document: BoardDocument): Promise<BoardDocument>
+  saveBoard(document: BoardDocument, options?: HistorySaveOptions): Promise<BoardDocument>
   upsertProject(project: Project): Promise<void>
   upsertBoard(document: BoardDocument): Promise<void>
   upsertBoardMetadata(document: BoardDocument): Promise<void>
@@ -86,14 +93,14 @@ export interface WorkspaceStore {
     scene: BoardScene,
     cloudRevisionId: string,
     cloudGeneration: number,
-    options?: { expectedCloudRevisionId: string | undefined },
+    options?: { expectedCloudRevisionId: string | undefined; cloudVersionId?: string; cloudRestoreFence?: number; cloudNameRevision?: number; cloudBoardName?: string },
   ): Promise<void>
   applyCloudBoardScene(
     boardId: string,
     scene: BoardScene,
     cloudRevisionId: string,
     cloudGeneration: number,
-    options?: { expectedCloudRevisionId: string | undefined },
+    options?: { expectedCloudRevisionId: string | undefined; cloudVersionId?: string; cloudRestoreFence?: number; cloudNameRevision?: number; cloudBoardName?: string; legacyGenerationAdvance?: boolean },
   ): Promise<void>
   markBoardConflict(boardId: string, error: string, expectedGeneration?: number): Promise<void>
   markBoardSyncFailed(boardId: string, error: string, nextSyncAt: string): Promise<void>
@@ -109,6 +116,7 @@ const LOCAL_PRINCIPAL_ID = 'local-user'
 let workspaceIdentity = LOCAL_PRINCIPAL_ID
 export function setWorkspaceIdentity(userId: string | null) {
   workspaceIdentity = userId ?? LOCAL_PRINCIPAL_ID
+  setBoardHistoryIdentity(userId)
 }
 const DATABASE_NAME = 'agentic-whiteboard-v2'
 const LEGACY_DATABASE_NAME = 'agentic-whiteboard-v1'
@@ -138,7 +146,7 @@ const projectSchema: RxJsonSchema<Project> = {
 
 const boardSchema: RxJsonSchema<BoardDocument> = {
   title: 'board schema',
-  version: 2,
+  version: 3,
   primaryKey: 'id',
   type: 'object',
   properties: {
@@ -153,6 +161,9 @@ const boardSchema: RxJsonSchema<BoardDocument> = {
     baseRevision: { type: 'number', minimum: 0 },
     cloudRevisionId: { type: 'string' },
     cloudGeneration: { type: 'number', minimum: 0 },
+    cloudVersionId: { type: 'string' },
+    cloudRestoreFence: { type: 'number', minimum: 0 },
+    cloudNameRevision: { type: 'number', minimum: 0 },
     cloudScenePending: { type: 'boolean' },
     syncAttempts: { type: 'number', minimum: 0 },
     nextSyncAt: { type: ['string', 'null'] },
@@ -205,6 +216,7 @@ const database = () => {
         migrationStrategies: {
           1: (document: BoardDocument) => ({ ...document, active: document.active ?? true }),
           2: (document: BoardDocument) => document,
+          3: (document: BoardDocument) => document,
         },
       },
     })
@@ -212,69 +224,6 @@ const database = () => {
     return instance
   })
   return databasePromise
-}
-
-export function mergeBoardScenes(local: BoardScene, remote: BoardScene): BoardScene {
-  type LedgerEntry = NonNullable<BoardScene['deletionLedger']>[number]
-  type State = { element?: Record<string, unknown>; deletion?: LedgerEntry }
-  const states = new Map<string, State>()
-  const compareAndMerge = (incoming: State) => {
-    const candidate = incoming.element ?? incoming.deletion!
-    const id = String(candidate.id)
-    const current = states.get(id)
-    if (!current) { states.set(id, incoming); return }
-    const previous = current.element ?? current.deletion!
-    const candidateVersion = Number(candidate.version ?? 0), previousVersion = Number(previous.version ?? 0)
-    const candidateNonce = Number(candidate.versionNonce ?? 0), previousNonce = Number(previous.versionNonce ?? 0)
-    if (candidateVersion > previousVersion || (candidateVersion === previousVersion && candidateNonce < previousNonce)) {
-      states.set(id, incoming)
-    } else if (candidateVersion === previousVersion && candidateNonce === previousNonce && incoming.deletion && current.deletion &&
-        incoming.deletion.compacted === current.deletion.compacted &&
-        Date.parse(incoming.deletion.firstObservedDeletedAt) < Date.parse(current.deletion.firstObservedDeletedAt)) {
-      states.set(id, { ...current, deletion: incoming.deletion })
-    } else if (candidateVersion === previousVersion && candidateNonce === previousNonce && incoming.deletion?.compacted &&
-        current.element?.isDeleted === true) {
-      states.set(id, { deletion: incoming.deletion })
-    } else if (candidateVersion === previousVersion && candidateNonce === previousNonce && incoming.deletion &&
-        !incoming.deletion.compacted && current.element?.isDeleted === true) {
-      states.set(id, { ...current, deletion: incoming.deletion })
-    } else if (candidateVersion === previousVersion && candidateNonce === previousNonce && current.deletion?.compacted &&
-        incoming.element?.isDeleted === true) {
-      // Equivalent full tombstones cannot inflate a canonical compact record.
-    } else if (candidateVersion === previousVersion && candidateNonce === previousNonce && current.deletion &&
-        !current.deletion.compacted && incoming.element?.isDeleted === true) {
-      // Preserve the server-observed deletion clock attached to this same tombstone.
-    }
-  }
-  const addSide = (scene: BoardScene) => {
-    const seen = new Set<string>()
-    for (const entry of scene.deletionLedger ?? []) {
-      if (!entry || typeof entry.id !== 'string' || !entry.id || seen.has(entry.id) ||
-          !Number.isSafeInteger(entry.version) || entry.version < 0 ||
-          !Number.isSafeInteger(entry.versionNonce) || entry.versionNonce < 0 ||
-          typeof entry.firstObservedDeletedAt !== 'string' || !Number.isFinite(Date.parse(entry.firstObservedDeletedAt)) ||
-          typeof entry.compacted !== 'boolean') throw new Error('Invalid board scene deletion ledger.')
-      seen.add(entry.id)
-    }
-    const side = new Map<string, State>()
-    for (const element of scene.elements ?? []) if (element && typeof element.id === 'string' && element.id)
-      side.set(element.id, { element })
-    for (const deletion of scene.deletionLedger ?? []) {
-      const element = side.get(deletion.id)?.element
-      if (deletion.compacted && element) throw new Error('A compact deletion cannot also contain its full element.')
-      if (!deletion.compacted && (!element || element.isDeleted !== true || Number(element.version ?? 0) !== deletion.version ||
-          Number(element.versionNonce ?? 0) !== deletion.versionNonce))
-        throw new Error('An observed full tombstone must match its scene element.')
-      side.set(deletion.id, { element, deletion })
-    }
-    for (const state of side.values()) compareAndMerge(state)
-  }
-  addSide(local)
-  addSide(remote)
-  return { ...remote, ...local,
-    elements: Array.from(states.values()).flatMap((state) => state.element ? [state.element] : []),
-    deletionLedger: Array.from(states.values()).flatMap((state) => state.deletion ? [state.deletion] : []),
-    files: { ...remote.files, ...local.files } }
 }
 
 const plain = <T>(document: { toJSON: () => T }) => document.toJSON()
@@ -376,6 +325,12 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
 
     const legitimateDocs: any[] = documents
 
+    const claimedProjects = new Set(legitimateDocs.map((document: any) => plain<Project>(document).id))
+    const allBoards = await (db.boards as any).find().exec()
+    await boardHistoryStore.claimLocalBoards(
+      allBoards.map(plain<BoardDocument>).filter((board: BoardDocument) => claimedProjects.has(board.projectId)).map((board: BoardDocument) => board.id),
+      ownerId,
+    )
     await Promise.all(
       legitimateDocs.map(async (document: any) => {
         const project = plain<Project>(document)
@@ -389,7 +344,7 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
       }),
     )
 
-    return legitimateDocs.map((document: any) => plain<Project>(document).id)
+    return [...claimedProjects] as string[]
   }
 
   async createProject(name: string, ownerId: string): Promise<Project> {
@@ -410,10 +365,15 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
   async listBoards(projectId: string): Promise<Board[]> {
     const db = await database()
     if (!(await this.listProjects()).some((project) => project.id === projectId)) return []
-    const documents = await (db.boards as any).find({ selector: { projectId, active: true } }).exec()
-    return documents
-      .map((document: any) => toBoard(plain<BoardDocument>(document)))
-      .toSorted((left: Board, right: Board) => right.updatedAt.localeCompare(left.updatedAt))
+    const documents = await (db.boards as any).find({ selector: { projectId } }).exec()
+    const boards = new Map<string, BoardDocument>(documents.map((document: any) => {
+      const board = plain<BoardDocument>(document)
+      return [board.id, board]
+    }))
+    for (const document of await boardHistoryStore.listCurrentDocuments())
+      if (document.projectId === projectId) boards.set(document.id, document)
+    return [...boards.values()].filter((board) => board.active).map(toBoard)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
   }
 
   async createBoard(projectId: string, name: string): Promise<BoardDocument> {
@@ -436,63 +396,51 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
       formatVersion: 1,
       scene: defaultScene(),
     }
-    const db = await database()
-    await (db.boards as any).insert(document)
-    return document
+    const committed = await boardHistoryStore.initialize(document)
+    await this.projectCommittedBoard(committed.document).catch(() => undefined)
+    return committed.document
   }
 
   async loadBoard(boardId: string): Promise<BoardDocument | null> {
     const db = await database()
     const document = await (db.boards as any).findOne(boardId).exec()
-    if (!document) return null
-    const board = plain<BoardDocument>(document)
+    const committed = await boardHistoryStore.getCommittedContent(boardId)
+    if (!document && !committed) return null
+    const board = committed?.document ?? plain<BoardDocument>(document)
     const parent = (await this.listProjects(true)).find((project) => project.id === board.projectId)
-    return parent ? board : null
+    if (!parent) return null
+    if (!committed) return board
+    await this.projectCommittedBoard(committed.document).catch(() => undefined)
+    return committed.document
   }
 
-  async saveBoard(document: BoardDocument): Promise<BoardDocument> {
+  async saveBoard(document: BoardDocument, options?: HistorySaveOptions): Promise<BoardDocument> {
     if (!(await this.listProjects(true)).some((project) => project.id === document.projectId))
       throw new Error('Project is unavailable.')
     const db = await database()
-    let existingDocument = await (db.boards as any).findOne(document.id).exec()
-    const update = (current: BoardDocument): BoardDocument => {
-      if (current.active === false) throw new Error('Board was deleted.')
-      if (current.cloudScenePending || document.cloudScenePending)
-        throw new Error('Load the complete board before saving.')
-      if ((document.cloudGeneration ?? 1) !== (current.cloudGeneration ?? 1))
-        throw new Error('BOARD_GENERATION_CONFLICT')
-      const stale = document.revision < current.revision
-      const protectedStatus = current.syncStatus === 'sync-blocked' || current.syncStatus === 'conflict'
-      return {
-        ...current,
-        ...document,
-        // Cloud identities belong to the latest atomic local state, not the React snapshot.
-        cloudRevisionId: current.cloudRevisionId,
-        cloudGeneration: current.cloudGeneration,
-        cloudScenePending: current.cloudScenePending,
-        scene: stale ? mergeBoardScenes(document.scene, current.scene) : document.scene,
-        name: stale ? current.name : document.name,
-        active: current.active,
-        updatedAt: now(),
-        syncStatus: protectedStatus ? current.syncStatus : 'local-only',
-        revision: Math.max(current.revision ?? 0, document.revision ?? 0) + 1,
-        baseRevision: current.baseRevision,
-        syncAttempts: protectedStatus ? current.syncAttempts : 0,
-        nextSyncAt: null,
-        lastSyncError: protectedStatus ? current.lastSyncError : null,
-      }
-    }
-    if (!existingDocument) {
-      try {
-        const inserted = await (db.boards as any).insert(update(normalizedBoard(document)))
-        return plain<BoardDocument>(inserted)
-      } catch (error) {
-        existingDocument = await (db.boards as any).findOne(document.id).exec()
-        if (!existingDocument) throw error
-      }
-    }
-    const updated = await existingDocument.incrementalModify(update)
-    return plain<BoardDocument>(updated)
+    const existing = await (db.boards as any).findOne(document.id).exec()
+    if (existing && !(await boardHistoryStore.getCommittedContent(document.id)))
+      await boardHistoryStore.initialize(plain<BoardDocument>(existing))
+    const committed = await boardHistoryStore.save(document, options)
+    // Once the native transaction succeeds, a projection failure cannot turn a
+    // durable save into an apparent failure. Authoritative reads repair it later.
+    await this.projectCommittedBoard(committed.document).catch(() => undefined)
+    return committed.document
+  }
+
+  private async projectCommittedBoard(document: BoardDocument): Promise<void> {
+    const db = await database()
+    const existing = await (db.boards as any).findOne(document.id).exec()
+    if (existing) await existing.incrementalModify((current: BoardDocument) =>
+      current.revision > document.revision ? current : document)
+    else await (db.boards as any).insert(document)
+  }
+
+  private async reconcileProjectedBoard(boardId: string): Promise<void> {
+    const db = await database()
+    const existing = await (db.boards as any).findOne(boardId).exec()
+    if (existing) await boardHistoryStore.reconcileDocument(plain<BoardDocument>(existing))
+
   }
 
   async upsertProject(project: Project): Promise<void> {
@@ -508,6 +456,7 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
     const normalized = normalizedBoard(document)
     if (existing) await existing.incrementalPatch(normalized)
     else await (db.boards as any).insert(normalized)
+    await this.reconcileProjectedBoard(document.id)
   }
 
   /** Metadata discovery must not erase a scene/save that arrived after its network read. */
@@ -543,18 +492,23 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
         updatedAt: pending ? current.updatedAt : metadata.updatedAt,
       }
     })
+    await this.reconcileProjectedBoard(metadata.id)
   }
 
   async listBoardsForSync(includeDeletedProjects?: boolean): Promise<Board[]> {
     const db = await database()
     const documents = await (db.boards as any).find().exec()
     const projects = new Set((await this.listProjects(includeDeletedProjects)).map((project) => project.id))
-    return documents
-      .map((document: any) => toBoard(plain<BoardDocument>(document)))
-      .filter((board: Board) => projects.has(board.projectId))
+    const boards = new Map<string, BoardDocument>(documents.map((document: any) => {
+      const board = plain<BoardDocument>(document)
+      return [board.id, board]
+    }))
+    for (const document of await boardHistoryStore.listCurrentDocuments()) boards.set(document.id, document)
+    return [...boards.values()].filter((board) => projects.has(board.projectId)).map(toBoard)
   }
 
   async deleteBoard(boardId: string): Promise<void> {
+    await this.loadBoard(boardId)
     const db = await database()
     const document = await (db.boards as any).findOne(boardId).exec()
     if (!document) return
@@ -568,15 +522,19 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
       nextSyncAt: null,
       lastSyncError: null,
     })
+    await this.reconcileProjectedBoard(boardId)
   }
 
   async updateBoardSyncStatus(boardId: string, syncStatus: BoardSyncStatus): Promise<void> {
+    await this.loadBoard(boardId)
     const db = await database()
     const document = await (db.boards as any).findOne(boardId).exec()
     if (document) await document.incrementalPatch({ syncStatus })
+    await this.reconcileProjectedBoard(boardId)
   }
 
   async markBoardSynced(boardId: string, revision: number): Promise<void> {
+    await this.loadBoard(boardId)
     const db = await database()
     const document = await (db.boards as any).findOne(boardId).exec()
     if (document) {
@@ -584,6 +542,7 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
       // A project tombstone can arrive while an earlier write is being acknowledged.
       if (current.syncStatus === 'sync-blocked') {
         await document.incrementalPatch({ baseRevision: Math.max(current.baseRevision, revision) })
+        await this.reconcileProjectedBoard(boardId)
         return
       }
       // Sync runs asynchronously. A newer local edit may have been saved while
@@ -596,6 +555,7 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
           baseRevision: Math.max(current.baseRevision, revision),
           syncStatus: current.syncStatus === 'sync-failed' ? 'sync-failed' : 'local-only',
         })
+        await this.reconcileProjectedBoard(boardId)
         return
       }
       await document.incrementalPatch({
@@ -607,6 +567,7 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
         lastSyncError: null,
       })
     }
+    await this.reconcileProjectedBoard(boardId)
   }
 
   /** Atomic ACK: a slow save must never overwrite edits made while it was uploading. */
@@ -616,11 +577,14 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
     scene: BoardScene,
     cloudRevisionId: string,
     cloudGeneration: number,
-    options?: { expectedCloudRevisionId: string | undefined },
+    options?: { expectedCloudRevisionId: string | undefined; cloudVersionId?: string; cloudRestoreFence?: number; cloudNameRevision?: number; cloudBoardName?: string },
   ): Promise<void> {
+    await this.loadBoard(boardId)
     const db = await database()
     const document = await (db.boards as any).findOne(boardId).exec()
     if (!document) return
+    const pendingRename = (await boardHistoryStore.listOutbox(boardId))
+      .some((entry) => !entry.headAcknowledged && entry.changedFields.name)
     await document.incrementalModify((current: BoardDocument) => {
       if (current.cloudGeneration !== undefined && current.cloudGeneration !== cloudGeneration) return current
       const laterEdits = current.revision > revision
@@ -632,8 +596,12 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
       return {
         ...current,
         scene: blocked || headChanged ? current.scene : laterEdits ? mergeBoardScenes(current.scene, scene) : scene,
+        name: blocked || headChanged || laterEdits || pendingRename ? current.name : options?.cloudBoardName ?? current.name,
         cloudRevisionId: headChanged || blocked ? current.cloudRevisionId : cloudRevisionId,
         cloudGeneration: headChanged || blocked ? current.cloudGeneration : cloudGeneration,
+        cloudVersionId: headChanged || blocked ? current.cloudVersionId : options?.cloudVersionId ?? current.cloudVersionId,
+        cloudRestoreFence: headChanged || blocked ? current.cloudRestoreFence : options?.cloudRestoreFence ?? current.cloudRestoreFence,
+        cloudNameRevision: headChanged || blocked ? current.cloudNameRevision : options?.cloudNameRevision ?? current.cloudNameRevision,
         cloudScenePending: false,
         baseRevision: Math.max(current.baseRevision, revision),
         syncStatus: blocked ? current.syncStatus : laterEdits ? 'local-only' : 'synced',
@@ -642,6 +610,7 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
         lastSyncError: laterEdits || blocked ? current.lastSyncError : null,
       }
     })
+    await this.reconcileProjectedBoard(boardId)
   }
 
   /** Apply an active board's cloud head without erasing pending local changes. */
@@ -650,17 +619,23 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
     scene: BoardScene,
     cloudRevisionId: string,
     cloudGeneration: number,
-    options?: { expectedCloudRevisionId: string | undefined },
+    options?: { expectedCloudRevisionId: string | undefined; cloudVersionId?: string; cloudRestoreFence?: number; cloudNameRevision?: number; cloudBoardName?: string; legacyGenerationAdvance?: boolean },
   ): Promise<void> {
+    await this.loadBoard(boardId)
     const db = await database()
     const document = await (db.boards as any).findOne(boardId).exec()
     if (!document) return
     await document.incrementalModify((current: BoardDocument) => {
-      if (
-        (current.cloudRevisionId === cloudRevisionId && !current.cloudScenePending) ||
-        current.syncStatus === 'sync-blocked'
-      )
-        return current
+      if (current.syncStatus === 'sync-blocked') return current
+      if (current.cloudRevisionId === cloudRevisionId && !current.cloudScenePending && current.syncStatus === 'synced')
+        return {
+          ...current,
+          cloudGeneration,
+          cloudVersionId: options?.cloudVersionId ?? current.cloudVersionId,
+          cloudRestoreFence: options?.cloudRestoreFence ?? current.cloudRestoreFence,
+          cloudNameRevision: options?.cloudNameRevision ?? current.cloudNameRevision,
+          name: options?.cloudBoardName ?? current.name,
+        }
       if (options && current.cloudRevisionId !== options.expectedCloudRevisionId) return current
       const pending = current.syncStatus !== 'synced'
       if (
@@ -678,15 +653,28 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
         scene: pending ? mergeBoardScenes(current.scene, scene) : scene,
         cloudRevisionId,
         cloudGeneration,
+        cloudVersionId: options?.cloudVersionId ?? current.cloudVersionId,
+        cloudRestoreFence: options?.cloudRestoreFence ?? current.cloudRestoreFence,
+        cloudNameRevision: options?.cloudNameRevision ?? current.cloudNameRevision,
         cloudScenePending: false,
         // Hydration advances the local optimistic token, never substitutes another device's token.
         revision: current.revision + 1,
         baseRevision: pending ? current.baseRevision : current.revision + 1,
       }
     })
+    const updated = await (db.boards as any).findOne(boardId).exec()
+    if (updated) {
+      const value = plain<BoardDocument>(updated)
+      const local = await boardHistoryStore.getCommittedContent(boardId)
+      if (!local || (local.document.cloudGeneration ?? 1) === (value.cloudGeneration ?? 1))
+        await this.reconcileProjectedBoard(boardId)
+      else if (options?.legacyGenerationAdvance)
+        await boardHistoryStore.reconcileDocument(value, { allowLegacyGenerationAdvance: true })
+    }
   }
 
   async markBoardConflict(boardId: string, error: string, expectedGeneration?: number): Promise<void> {
+    await this.loadBoard(boardId)
     const db = await database()
     const document = await (db.boards as any).findOne(boardId).exec()
     if (!document) return
@@ -695,9 +683,11 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
       if (expectedGeneration !== undefined && (current.cloudGeneration ?? 1) !== expectedGeneration) return current
       return { ...current, syncStatus: 'conflict', nextSyncAt: null, lastSyncError: error }
     })
+    await this.reconcileProjectedBoard(boardId)
   }
 
   async markBoardSyncFailed(boardId: string, error: string, nextSyncAt: string): Promise<void> {
+    await this.loadBoard(boardId)
     const db = await database()
     const document = await (db.boards as any).findOne(boardId).exec()
     if (document) {
@@ -709,16 +699,20 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
         lastSyncError: error,
       })
     }
+    await this.reconcileProjectedBoard(boardId)
   }
 
   async markBoardSyncBlocked(boardId: string, error: string): Promise<void> {
+    await this.loadBoard(boardId)
     const db = await database()
     const document = await (db.boards as any).findOne(boardId).exec()
     if (document)
       await document.incrementalPatch({ syncStatus: 'sync-blocked', lastSyncError: error, nextSyncAt: null })
+    await this.reconcileProjectedBoard(boardId)
   }
 
   async resumeBoardSync(boardId: string): Promise<void> {
+    await this.loadBoard(boardId)
     const db = await database()
     const document = await (db.boards as any).findOne(boardId).exec()
     if (document)
@@ -728,9 +722,11 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
         nextSyncAt: null,
         lastSyncError: null,
       })
+    await this.reconcileProjectedBoard(boardId)
   }
 
   async requeueConflictedBoard(boardId: string, remoteRevision: number): Promise<void> {
+    await this.loadBoard(boardId)
     const db = await database()
     const document = await (db.boards as any).findOne(boardId).exec()
     if (!document) return
@@ -744,5 +740,6 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
       lastSyncError: null,
       updatedAt: now(),
     })
+    await this.reconcileProjectedBoard(boardId)
   }
 }

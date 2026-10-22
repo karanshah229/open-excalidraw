@@ -1,5 +1,7 @@
 # Board version history: feasibility and recommended design
 
+> Historical research: this document predates canonical chunk persistence. Its checkpoint frequency, manual versions, retention limits, and restore-through-merge recommendations are superseded by [ADR 007: Automatic board history and coordinated restore](../decisions/007-board-version-history-and-restore.md), which records the user's current requirements and a proposed implementation against the current code.
+
 ## Recommendation
 
 Ship **server-authoritative, immutable checkpoints** first: create a version after a durable save has been idle for 30 seconds (with a 2-minute maximum during sustained work), on an explicit “Save version”, before restore, and when the final collaborator leaves. Keep the current board as the mutable head. A restore creates a **new** version from the chosen content; it never rewrites or deletes history.

@@ -21,6 +21,11 @@ const auditCalls = [],
   auditFlows = []
 let auditPhase = null
 const auditStarts = new WeakMap()
+const isContentOrAccessMutation = (call) =>
+  !(
+    (call.endpoint === 'boardHistory' && ['manifest', 'pages', 'chunks', 'notes', 'list', 'restore-status'].includes(call.operation)) ||
+    (call.endpoint === 'boardAsset' && ['read', 'stat'].includes(call.operation))
+  )
 owner.on('request', (request) => {
   if (!auditPhase || request.method() !== 'POST' || !request.url().includes(':45001/')) return
   let data
@@ -182,7 +187,7 @@ try {
   await menuChoice('General access role', 'Present')
   await checkCanvas()
   assert.equal(
-    auditCalls.filter((c) => c.phase === auditPhase).length,
+    auditCalls.filter((c) => c.phase === auditPhase && c.endpoint === 'manageBoardAccess' && c.operation === 'share').length,
     1,
     'Presentation permission change makes one callable request',
   )
@@ -217,7 +222,7 @@ try {
   auditPhase = 'copy-restricted-presentation'
   await owner.click('.google-share-copy-btn')
   await new Promise((resolve) => setTimeout(resolve, 200))
-  assert.equal(auditCalls.filter((c) => c.phase === auditPhase).length, 0)
+  assert.equal(auditCalls.filter((c) => c.phase === auditPhase && isContentOrAccessMutation(c)).length, 0)
   assert.equal(
     await owner.$eval('[aria-label="General access setting"]', (n) => n.textContent.includes('Restricted')),
     true,
@@ -287,7 +292,7 @@ try {
   await viewer.screenshot({ path: '.system_generated/slides/shared-start-combo-dark.png' })
 
   assert.equal(
-    auditCalls.filter((c) => c.phase === 'copy-existing-presentation').length,
+    auditCalls.filter((c) => c.phase === 'copy-existing-presentation' && isContentOrAccessMutation(c)).length,
     0,
     'Copy link should make zero API calls',
   )

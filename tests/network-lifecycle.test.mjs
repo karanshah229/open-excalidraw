@@ -53,6 +53,7 @@ async function runNetworkLifecycleTest() {
         id,
         projectId: proj.id,
         name: 'Network Test Canvas',
+        active: true,
         scene: {
           elements: [
             {
@@ -131,6 +132,7 @@ async function runNetworkLifecycleTest() {
 
     const p1RtdbSockets = new Map() // requestId -> { url, open: true }
     const p1HttpRequests = []
+    const p1BoardWrites = []
     const p1WsFramesSent = []
 
     cdp1.on('Network.webSocketCreated', (e) => {
@@ -161,6 +163,10 @@ async function runNetworkLifecycleTest() {
           postData: e.request.postData,
         })
       }
+      const endpoint = e.request.url.match(/:45001\/[^?]*\/([^/?]+)/)?.[1]
+      if (e.request.method === 'POST' && ['commitBoardScene', 'importBoardVersion', 'updateBoardContent'].includes(endpoint)) {
+        p1BoardWrites.push({ endpoint, url: e.request.url, postData: e.request.postData })
+      }
     })
 
     await page1.goto(boardUrl, { waitUntil: 'domcontentloaded' })
@@ -177,6 +183,7 @@ async function runNetworkLifecycleTest() {
     // -------------------------------------------------------------
     console.log('\n▶ Step 2: Make changes in Window 1 (Solo mode)...')
     p1HttpRequests.length = 0
+    p1BoardWrites.length = 0
     p1WsFramesSent.length = 0
 
     await page1.evaluate(() => {
@@ -364,6 +371,7 @@ async function runNetworkLifecycleTest() {
     // -------------------------------------------------------------
     console.log('\n▶ Step 6: Make changes in Window 1 after downgrade (Solo mode)...')
     p1HttpRequests.length = 0
+    p1BoardWrites.length = 0
     p1WsFramesSent.length = 0
 
     await page1.evaluate(() => {
@@ -381,14 +389,16 @@ async function runNetworkLifecycleTest() {
     let step6RestCalled = false
     for (let i = 0; i < 6; i++) {
       await sleep(500)
-      if (p1HttpRequests.length > 0) {
+      if (p1BoardWrites.length > 0) {
         step6RestCalled = true
         break
       }
     }
 
-    console.log(`   P1 HTTP requests made: ${p1HttpRequests.length}`)
-    assert.ok(step6RestCalled, 'Step 6 Failed: Expected normal REST API call updating board state')
+    console.log(`   P1 board persistence calls made: ${p1BoardWrites.length}`)
+    assert.ok(step6RestCalled, 'Step 6 Failed: Expected a board persistence callable after returning to solo mode')
+    assert.ok(p1BoardWrites.some((call) => ['commitBoardScene', 'importBoardVersion'].includes(call.endpoint)),
+      'Step 6 Failed: the solo edit must persist the scene head or its immutable history version')
     assert.equal(await page1.evaluate(() => window.__lazyCollab?.isLazyCollabActive), false)
     console.log('   ✓ Step 6 Passed: solo changes persist while live scene collaboration stays disabled')
 

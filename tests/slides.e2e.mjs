@@ -72,7 +72,12 @@ try {
       })
     } else await request.continue()
   }
-  page.on('request', injectLoadFailure)
+  const pendingInterceptions = new Set()
+  const interceptRequest = (request) => {
+    const pending = injectLoadFailure(request).finally(() => pendingInterceptions.delete(pending))
+    pendingInterceptions.add(pending)
+  }
+  page.on('request', interceptRequest)
   await page.goto(`${base}/boards/${id}`)
   await page.waitForSelector('.access-denied-title')
   assert.equal(await page.$eval('.access-denied-title', (node) => node.textContent), 'Could not load board')
@@ -83,8 +88,10 @@ try {
   await page.click('.access-denied-card button')
   await page.waitForFunction(() => !!window.__excalidrawAPI)
   await page.waitForSelector('.excalidraw canvas')
+  await page.waitForNetworkIdle()
+  page.off('request', interceptRequest)
+  await Promise.all([...pendingInterceptions])
   await page.setRequestInterception(false)
-  page.off('request', injectLoadFailure)
   assert.equal(await page.$('.slides-controls'), null, 'No slide controls on a board without slides')
   await page.click('.board-panel-rail [aria-label="Library"]')
   await page.waitForSelector('.board-sidebar')
@@ -113,10 +120,113 @@ try {
   await page.click('[data-testid="sidebar-close"]')
   await page.waitForSelector('.sidebar', { hidden: true })
 
+  const batchConversion = await page.evaluate(async () => {
+    const { convertSelectedFramesToSlides } = await import('/src/features/slides/slide-commands.ts')
+    const { getSlides } = await import('/src/features/slides/slide-model.ts')
+    const { convertToExcalidrawElements } = await import('/tests/frame-reload-fixture.ts')
+    let elements = convertToExcalidrawElements(
+      [
+        {
+          type: 'frame',
+          id: 'ordinary-a',
+          x: 0,
+          y: 0,
+          width: 400,
+          height: 300,
+          children: [],
+          customData: { other: 'keep', agenticWhiteboard: { other: 'also keep' } },
+        },
+        { type: 'frame', id: 'ordinary-b', x: 500, y: 0, width: 400, height: 300, children: [] },
+        {
+          type: 'frame',
+          id: 'existing',
+          x: 1000,
+          y: 0,
+          width: 400,
+          height: 300,
+          children: [],
+          customData: { agenticWhiteboard: { slide: { schemaVersion: 1, orderKey: '5/1' } } },
+        },
+        { type: 'rectangle', id: 'drawing', x: 0, y: 400, width: 100, height: 100 },
+      ],
+      { regenerateIds: false },
+    )
+    let commits = 0
+    const api = {
+      getSceneElementsIncludingDeleted: () => elements,
+      getAppState: () => ({
+        selectedElementIds: { 'ordinary-a': true, 'ordinary-b': true, existing: true, drawing: true },
+      }),
+      updateScene: (scene) => {
+        elements = scene.elements
+        commits++
+      },
+    }
+    convertSelectedFramesToSlides(api)
+    convertSelectedFramesToSlides(api)
+    return { commits, slides: getSlides(elements).map((slide) => ({ id: slide.id, customData: slide.customData })) }
+  })
+  assert.equal(batchConversion.commits, 1, 'Multiple frames convert together; repeating is a no-op')
+  assert.deepEqual(
+    batchConversion.slides.map((slide) => slide.id),
+    ['existing', 'ordinary-a', 'ordinary-b'],
+  )
+  assert.equal(batchConversion.slides[0].customData.agenticWhiteboard.slide.orderKey, '5/1')
+  assert.equal(batchConversion.slides[1].customData.other, 'keep')
+  assert.equal(batchConversion.slides[1].customData.agenticWhiteboard.other, 'also keep')
+
   await page.click('[data-testid="toolbar-rectangle"]')
   await draw(350, 260, 500, 360)
   await page.waitForFunction(() => window.__excalidrawAPI.getSceneElements().length === 1)
   const rectangle = await page.evaluate(() => window.__excalidrawAPI.getSceneElements()[0])
+  await tool('frame')
+  await draw(300, 210, 560, 420)
+  const ordinaryFrame = await page.evaluate(() =>
+    window.__excalidrawAPI.getSceneElements().find((element) => element.type === 'frame'),
+  )
+  assert(ordinaryFrame && !ordinaryFrame.customData?.agenticWhiteboard?.slide)
+  await tool('slide')
+  await page.waitForFunction(
+    (id) =>
+      !!window.__excalidrawAPI.getSceneElements().find((element) => element.id === id)?.customData?.agenticWhiteboard
+        ?.slide,
+    {},
+    ordinaryFrame.id,
+  )
+  const convertedFrame = await page.evaluate(() => {
+    const api = window.__excalidrawAPI
+    return {
+      frame: api.getSceneElements().find((element) => element.type === 'frame'),
+      child: api.getSceneElements().find((element) => element.type === 'rectangle'),
+      selected: api.getAppState().selectedElementIds,
+      tool: api.getAppState().activeTool.type,
+    }
+  })
+  for (const field of ['id', 'x', 'y', 'width', 'height', 'name'])
+    assert.equal(convertedFrame.frame[field], ordinaryFrame[field], `Conversion preserves ${field}`)
+  assert.equal(convertedFrame.child.frameId, ordinaryFrame.id, 'Conversion preserves frame membership')
+  assert.equal(convertedFrame.selected[ordinaryFrame.id], true, 'Converted frame stays selected')
+  assert.equal(convertedFrame.tool, 'selection', 'Conversion keeps the selection tool')
+  await tool('slide')
+  assert.equal(
+    await page.evaluate(
+      () => window.__excalidrawAPI.getSceneElements().filter((element) => element.type === 'frame').length,
+    ),
+    1,
+    'Selecting Slide again does not duplicate the frame',
+  )
+  await undo()
+  await page.waitForFunction(() => {
+    const frame = window.__excalidrawAPI.getSceneElements().find((element) => element.type === 'frame')
+    return frame && !frame.customData?.agenticWhiteboard?.slide
+  })
+  await undo(true)
+  await page.waitForFunction(() =>
+    window.__excalidrawAPI.getSceneElements().some((element) => element.customData?.agenticWhiteboard?.slide),
+  )
+  await undo()
+  await undo()
+  await page.waitForFunction(() => window.__excalidrawAPI.getSceneElements().length === 1)
   await page.waitForSelector('.slides-toggle')
   await page.click('.slides-toggle')
   await page.waitForSelector('.slides-create')

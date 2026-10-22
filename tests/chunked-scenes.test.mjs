@@ -43,7 +43,7 @@ async function pageIn(context) {
     } catch {
       return
     }
-    calls.push({ endpoint: request.url().split('/').pop(), data, at: Date.now() })
+    calls.push({ endpoint: request.url().split('/').pop(), data, peer: page.__tracePeer, at: Date.now() })
   })
   return page
 }
@@ -148,6 +148,7 @@ async function durable(id) {
 try {
   const ownerContext = await browser.createBrowserContext()
   const owner = await pageIn(ownerContext)
+  owner.__tracePeer = 'owner'
   await owner.goto(base)
   const fixture = await owner.evaluate(async () => {
     const { getFirebaseAuth } = await import('/src/lib/firebase.ts')
@@ -243,6 +244,38 @@ try {
     'Current browser writer declares the server-enforced scene protocol',
   )
   checkpoint('large board saved and assembled under a protocol-versioned reader pin')
+  // Audit a true cold reload separately from the owner tab that created it.
+  // Keep observing for 30 seconds to detect delayed duplicate reads after render.
+  const loadAuditContext = await browser.createBrowserContext()
+  const loadAuditPage = await pageIn(loadAuditContext)
+  loadAuditPage.__tracePeer = 'load-audit'
+  await loadAuditPage.goto(base)
+  await loadAuditPage.evaluate(async (email) => {
+    const { signInExistingOwner } = await import('/tests/chunked-scene-fixture.ts')
+    await signInExistingOwner(email)
+  }, fixture.email)
+  const reloadStart = calls.length
+  const reloadStartedAt = Date.now()
+  await open(loadAuditPage, fixture.id, fixture.count)
+  const canvasReadyMs = Date.now() - reloadStartedAt
+  await new Promise((resolve) => setTimeout(resolve, 30_000))
+  const reloadReads = calls
+    .slice(reloadStart)
+    .filter((call) => call.peer === 'load-audit' && call.data?.boardId === fixture.id)
+  const pinReads = reloadReads.filter((call) => call.endpoint === 'acquireBoardSceneReadPin')
+  assert.equal(pinReads.length, 1, 'Cold reload authorizes and pins the scene exactly once')
+  assert.equal(
+    reloadReads.filter((call) => call.endpoint === 'releaseBoardSceneReadPin').length,
+    1,
+    'Cold reload releases its read pin exactly once',
+  )
+  if (initial.refs.length <= 8)
+    assert(
+      !reloadReads.some((call) => ['readBoardScenePage', 'readBoardSceneChunks'].includes(call.endpoint)),
+      'Cold reload receives its complete bounded scene with the initial pin response',
+    )
+  checkpoint(`cold reload renders in ${canvasReadyMs}ms without repeated scene reads during 30 seconds of idle time`)
+  await loadAuditContext.close()
   const pendingContext = await browser.createBrowserContext(),
     pendingPage = await pageIn(pendingContext)
   await pendingPage.goto(base)
@@ -294,12 +327,18 @@ try {
     /complete|load/i,
     'Unhydrated metadata placeholder cannot be saved as an empty board',
   )
-  assert.equal((await durable(fixture.id)).head.headRevisionId, initial.head.headRevisionId)
+  const stillDurable = await durable(fixture.id)
+  assert.equal(stillDurable.scene.elements.length, initial.scene.elements.length,
+    'A rejected metadata-only offline save cannot replace the canonical scene with an empty placeholder')
+  assert.deepEqual(stillDurable.scene.elements.map((element) => element.id).sort(), initial.scene.elements.map((element) => element.id).sort())
+  assert.equal(stillDurable.scene.elements.find((element) => element.id === 'large-319')?.customData.payload,
+    initial.scene.elements.find((element) => element.id === 'large-319').customData.payload)
   await pendingContext.close()
   checkpoint('cold metadata discovery cannot edit an unhydrated scene offline')
   assert.equal(await owner.evaluate(() => window.__lazyCollab?.isLazyCollabActive), false)
   const mountedElements = await owner.evaluate(() => window.__excalidrawAPI.getSceneElementsIncludingDeleted())
   const remotePage = await pageIn(ownerContext)
+  remotePage.__tracePeer = 'remote'
   await remotePage.goto(base)
   await remotePage.evaluate(
     async ({ id, scene }) => {
@@ -354,7 +393,7 @@ try {
             version: local.scene.elements.find((e) => e.id === 'large-0').version,
           },
         },
-        status: document.querySelector('.sync-status-pill')?.textContent,
+        status: document.querySelector('[data-testid="board-info-open"]')?.getAttribute('data-sync-status'),
         trace: window.__sceneTrace,
       }
     }, fixture.id)
@@ -367,7 +406,7 @@ try {
     false,
     'A private head update reaches the mounted editor without an active live scene room',
   )
-  await waitFor(async () => {
+  try { await waitFor(async () => {
     const local = await owner.evaluate(async (id) => {
       const { localBoard } = await import('/tests/chunked-scene-fixture.ts')
       return localBoard(id)
@@ -376,7 +415,16 @@ try {
       local?.cloudRevisionId === externalSnapshot.head.headRevisionId &&
       local?.scene.elements.find((e) => e.id === 'large-0')?.x === 777
     )
-  }, 'Owned shared head did not reach durable local cache')
+  }, 'Owned shared head did not reach durable local cache') } catch (error) {
+    const local = await owner.evaluate(async (id) => {
+      const { localBoard } = await import('/tests/chunked-scene-fixture.ts')
+      const value = await localBoard(id)
+      return { revisionId: value?.cloudRevisionId, generation: value?.cloudGeneration, status: value?.syncStatus,
+        sceneX: value?.scene.elements.find((e) => e.id === 'large-0')?.x }
+    }, fixture.id)
+    console.error('DURABLE HEAD DIAGNOSTIC', JSON.stringify({ expected: externalSnapshot.head.headRevisionId, local }))
+    throw error
+  }
   await remotePage.close()
   checkpoint('private mounted editor receives external head commit without collab activation')
   const begin = calls.length
@@ -509,11 +557,26 @@ try {
   )
   const viewerContext = await browser.createBrowserContext()
   const viewer = await pageIn(viewerContext)
+  viewer.__tracePeer = 'viewer'
   await viewer.evaluateOnNewDocument((id) => {
     window.__chunkLoadEvents = []
     window.addEventListener(`board-load:${id}`, (event) => window.__chunkLoadEvents.push(event.detail))
   }, fixture.id)
+  const coldReadStart = calls.length
   await open(viewer, fixture.id, fixture.count + 4)
+  const firstCanvasAt = Date.now()
+  const coldReads = calls.slice(coldReadStart).filter((call) => call.peer === 'viewer' && call.at <= firstCanvasAt &&
+    call.endpoint === 'boardHistory' && call.data?.boardId === fixture.id &&
+    ['current-scene', 'chunks', 'pages', 'manifest'].includes(call.data?.operation),
+  )
+  const expectedSceneReads = 1 + Math.ceil(Math.max(0, initial.refs.length - 3) / 6)
+  assert.equal(coldReads.filter((call) => call.data.operation === 'current-scene').length, 1,
+    'Cold current-scene request combines head, references, and initial bounded chunk batch')
+  assert.equal(coldReads.filter((call) => call.data.operation === 'pages' || call.data.operation === 'manifest').length, 0,
+    'Cold current-scene load does not fetch page references in follow-up calls')
+  assert.equal(coldReads.length, expectedSceneReads,
+    'Cold board render fetches exactly one combined request plus only the remaining chunk batches')
+  checkpoint(`cold board draw uses ${coldReads.length} history calls for ${initial.refs.length} chunks`)
   assert.equal(
     await viewer.evaluate(() =>
       window.__excalidrawAPI.getSceneElements().some((e) => e.customData?.payload === '319:' + '🌍'.repeat(1100)),
@@ -541,6 +604,35 @@ try {
     'Concurrent reads of one board share a single pinned scene load',
   )
   checkpoint('concurrent reads of one board share a single pinned load')
+  // Once the revision is rendered, listener keepalives must not cause another
+  // scene/history read or write when no editor changed the board.
+  await new Promise((resolve) => setTimeout(resolve, 1500))
+  const idleStart = calls.length
+  await new Promise((resolve) => setTimeout(resolve, 5000))
+  const idleBoardCalls = calls
+    .slice(idleStart)
+    .filter(
+      (call) =>
+        call.peer === 'viewer' &&
+        call.data?.boardId === fixture.id &&
+        [
+          'acquireBoardSceneReadPin',
+          'acquireNamedBoardSceneVersionReadPin',
+          'readBoardScenePage',
+          'readBoardSceneChunks',
+          'ensureBoardScene',
+          'beginBoardSceneUpload',
+          'stageBoardSceneChunk',
+          'stageBoardScenePage',
+          'commitBoardScene',
+          'boardHistory',
+          'updateBoardContent',
+          'importBoardVersion',
+          'restoreBoardVersion',
+        ].includes(call.endpoint),
+    )
+  assert.deepEqual(idleBoardCalls, [], 'A loaded, untouched board must not issue further board/history calls while idle')
+  checkpoint('loaded multi-chunk board remains network-idle without edits')
   const headBeforeAttack = (await durable(fixture.id)).head.headRevisionId
   const denial = await viewer.evaluate(
     async ({ id, commitId }) => {
@@ -914,18 +1006,24 @@ try {
     )
   await finalContext.close()
   checkpoint('three-context native collab edits, sequential dropout, solo continuation and cold reload')
-  // Inject an acknowledged RTDB delta after every browser is gone. This isolates
-  // the server fallback from normal browser flushing and exercises the real 30s grace.
+  // Inject an acknowledged RTDB delta after every browser is gone. History
+  // boards use immutable generation-scoped rooms; delete the matching presence
+  // record to exercise the generation fallback's real 30s grace.
   const beforeFallback = await durable(fixture.id)
+  const activeGeneration = (await db.doc(`boardScenes/${fixture.id}`).get()).data().generation
+  const generationRoom = `boards/${fixture.id}/generations/${activeGeneration}`
+  const generationPresence = `presence/${fixture.id}/generations/${activeGeneration}`
   const crashedEdit = { ...beforeFallback.scene.elements[0], x: 2026, version: 10000, versionNonce: 1 }
-  await rtdb.ref(`boards/${fixture.id}/elements/${crashedEdit.id}`).set({
+  await rtdb.ref(`${generationRoom}/elements/${crashedEdit.id}`).set({
     id: crashedEdit.id,
     version: crashedEdit.version,
     versionNonce: 1,
+    generation: activeGeneration,
+    restoreFence: beforeFallback.head.restoreFence,
     data: JSON.stringify(crashedEdit),
   })
-  await rtdb.ref(`presence/${fixture.id}/crashed-session`).set({ uid: fixture.uid })
-  await rtdb.ref(`presence/${fixture.id}/crashed-session`).remove()
+  await rtdb.ref(`${generationPresence}/crashed-session`).set({ uid: fixture.uid, generation: activeGeneration })
+  await rtdb.ref(`${generationPresence}/crashed-session`).remove()
   const fallback = await waitFor(
     async () => {
       const snapshot = await durable(fixture.id)
@@ -939,7 +1037,7 @@ try {
     'Fallback preserves existing browser checkpoint edits',
   )
   await waitFor(
-    async () => !(await rtdb.ref(`boards/${fixture.id}/elements/${crashedEdit.id}`).get()).exists(),
+    async () => !(await rtdb.ref(`${generationRoom}/elements/${crashedEdit.id}`).get()).exists(),
     'Captured unchanged RTDB delta was not pruned after checkpoint',
   )
   checkpoint('last-client-loss fallback commits RTDB delta after real grace and prunes captured record')

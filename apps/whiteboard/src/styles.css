@@ -4326,7 +4326,11 @@ button {
 .board-canvas .excalidraw .help-icon {
   display: none;
 }
-.board-panel-rail .board-panel-help {
+.board-panel-footer {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
   margin-top: auto;
   margin-bottom: 12px;
 }
@@ -4363,6 +4367,10 @@ button {
 }
 .board-panel-rail .board-panel-button:hover {
   background: var(--color-surface-high);
+}
+.board-panel-rail .board-panel-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 .board-panel-rail .board-panel-button[aria-pressed='true'] {
   background: var(--color-primary);
@@ -5100,3 +5108,19 @@ button {
   color: var(--text-primary);
   cursor: pointer;
 }
+
+.header-info-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.header-info-trigger:hover { background: var(--bg-surface-hover); }
+.header-info-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

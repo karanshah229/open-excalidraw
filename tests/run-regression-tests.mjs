@@ -1,12 +1,24 @@
 import { createRequire } from 'node:module'
 import { cp, readFile, writeFile, mkdir, mkdtemp, rm, symlink } from 'node:fs/promises'
 import { createWriteStream } from 'node:fs'
-import { spawn } from 'node:child_process'
+import { spawn, execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { resolve } from 'node:path'
+import { resolve, dirname } from 'node:path'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const all = [
+  'board-history-divergence-ui.test.mjs',
+  'board-rail-ui.test.mjs',
+  'board-history-ui.test.mjs',
+  'board-history-cloud-ui.test.mjs',
+  'board-history-timeline-ui.test.mjs',
+  'board-history-sync-status-ui.test.mjs',
+  'board-history-outbox-ui.test.mjs',
+  'board-history-rollout-ui.test.mjs',
+  'board-history-chaos-ui.test.mjs',
+  'board-history-rules.test.mjs',
+  'board-history-image-ui.test.mjs',
+  'board-history-legacy-ui.test.mjs',
   'chunked-scenes.test.mjs',
   'undo-session-lifecycle.test.mjs',
   'tombstone-compaction-e2e.test.mjs',
@@ -40,7 +52,9 @@ const all = [
   'e2e-visual-screenshots.mjs',
 ]
 const filter = process.argv.find((arg) => arg.startsWith('--test='))?.slice(7)
-const files = process.env.E2E_REGRESSION_FILES ? JSON.parse(process.env.E2E_REGRESSION_FILES) : filter ? [filter] : all
+const legacyFunctions = process.argv.includes('--legacy-functions') || process.env.E2E_LEGACY_FUNCTIONS === 'true'
+const legacyFunctionsRef = '4cd058ecf6dff522d5c7ba8aa8698d470e27d20a'
+const files = process.env.E2E_REGRESSION_FILES ? JSON.parse(process.env.E2E_REGRESSION_FILES) : filter ? [filter] : process.argv.includes('--history') ? all.filter((name) => name.startsWith('board-history-') && name !== 'board-history-legacy-ui.test.mjs') : all.filter((name) => name !== 'board-history-legacy-ui.test.mjs')
 if (
   !files.length ||
   files.some((name) => !all.includes(name) && !['sharing-flow-audit.test.mjs', 'scene-backend.test.mjs'].includes(name))
@@ -60,17 +74,32 @@ if (!process.argv.includes('--inside-emulators')) {
     await run('pnpm', ['--filter', '@agentic-whiteboard/mcp', 'build'])
     const functions = resolve(runtime, 'functions')
     await mkdir(functions)
-    await cp(resolve(root, 'functions/lib'), resolve(functions, 'lib'), { recursive: true })
+    if (legacyFunctions) {
+      console.log(`Legacy functions/rules snapshot: ${legacyFunctionsRef}`)
+      const paths = execFileSync('git', ['ls-tree', '-r', '--name-only', legacyFunctionsRef, 'functions/lib'], { cwd: root, encoding: 'utf8' }).trim().split('\n')
+      for (const path of paths) {
+        const destination = resolve(runtime, path)
+        await mkdir(dirname(destination), { recursive: true })
+        await writeFile(destination, execFileSync('git', ['show', `${legacyFunctionsRef}:${path}`], { cwd: root }))
+      }
+    } else await cp(resolve(root, 'functions/lib'), resolve(functions, 'lib'), { recursive: true })
     await cp(resolve(root, 'functions/package.json'), resolve(functions, 'package.json'))
     await symlink(resolve(root, 'functions/node_modules'), resolve(functions, 'node_modules'), 'dir')
     await writeFile(
       resolve(functions, '.env.demo-regression'),
-      `RTDB_FUNCTION_REGION=us-central1\nFIRESTORE_FUNCTION_REGION=us-central1\nSYNC_ACCESS_FUNCTION_REGION=us-central1\nASSET_ENFORCE_APP_CHECK=false\nSCENE_TOMBSTONE_COMPACTION_ENABLED=${process.env.SCENE_TOMBSTONE_COMPACTION_ENABLED === 'true' ? 'true' : 'false'}\n`,
+      `RTDB_FUNCTION_REGION=us-central1\nFIRESTORE_FUNCTION_REGION=us-central1\nSYNC_ACCESS_FUNCTION_REGION=us-central1\nASSET_ENFORCE_APP_CHECK=false\nSCENE_TOMBSTONE_COMPACTION_ENABLED=${process.env.SCENE_TOMBSTONE_COMPACTION_ENABLED === 'true' ? 'true' : 'false'}\nSCENE_COMPACTION_TEST_HOLD_MS=${process.env.SCENE_COMPACTION_TEST_HOLD_MS ?? '0'}\n`,
     )
     const config = JSON.parse(await readFile(resolve(root, 'regression.firebase.json'), 'utf8'))
     config.functions.source = 'functions'
-    for (const service of ['firestore', 'database', 'storage'])
-      config[service].rules = resolve(root, config[service].rules)
+    for (const service of ['firestore', 'database', 'storage']) {
+      if (legacyFunctions) {
+        const path = config[service].rules
+        const destination = resolve(runtime, path)
+        await mkdir(dirname(destination), { recursive: true })
+        await writeFile(destination, execFileSync('git', ['show', `${legacyFunctionsRef}:${path}`], { cwd: root }))
+        config[service].rules = destination
+      } else config[service].rules = resolve(root, config[service].rules)
+    }
     const configPath = resolve(runtime, 'firebase.json')
     await writeFile(configPath, JSON.stringify(config))
     await run(
@@ -85,7 +114,8 @@ if (!process.argv.includes('--inside-emulators')) {
         configPath,
         'node tests/run-regression-tests.mjs --inside-emulators',
       ],
-      { ...process.env, E2E_REGRESSION_FILES: JSON.stringify(files) },
+      { ...process.env, E2E_REGRESSION_FILES: JSON.stringify(files),
+        E2E_LEGACY_FUNCTIONS: String(legacyFunctions), E2E_DATABASE_RULES: config.database.rules },
     )
   } finally {
     await rm(runtime, { recursive: true, force: true })
@@ -111,7 +141,7 @@ if (!process.argv.includes('--inside-emulators')) {
     VITE_RECAPTCHA_SITE_KEY: '',
     VITE_FIREBASE_APPCHECK_KEY: '',
   })
-  const rules = await readFile(resolve(root, 'database.rules.json'), 'utf8')
+  const rules = await readFile(process.env.E2E_DATABASE_RULES || resolve(root, 'database.rules.json'), 'utf8')
   const response = await fetch('http://127.0.0.1:49000/.settings/rules.json?ns=demo-regression', {
     method: 'PUT',
     headers: { Authorization: 'Bearer owner' },

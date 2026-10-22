@@ -45,6 +45,7 @@ async function runUnauthenticatedOwnerHiddenTest() {
         id,
         projectId: proj.id,
         name: 'Unauth Owner Test Board',
+        active: true,
         scene: {
           elements: [
             {
@@ -137,7 +138,7 @@ async function runUnauthenticatedOwnerHiddenTest() {
 
     // Click the sync status pill (or board info pill if viewer)
     console.log('▶ Finding and clicking status dropdown...')
-    const pill = await guestPage.waitForSelector('.sync-status-pill, .board-info-pill', {
+    const pill = await guestPage.waitForSelector('[data-testid="board-info-open"]', {
       timeout: 10000,
     })
     assert.ok(pill, 'Status pill should be visible')
@@ -187,7 +188,7 @@ async function runUnauthenticatedOwnerHiddenTest() {
     await page.goto(boardUrl, { waitUntil: 'domcontentloaded' })
     await sleep(2500)
 
-    const seedPill = await page.waitForSelector('.sync-status-pill, .board-info-pill', {
+    const seedPill = await page.waitForSelector('[data-testid="board-info-open"]', {
       timeout: 10000,
     })
     await seedPill.click()

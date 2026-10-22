@@ -45,6 +45,26 @@ async function eventually(read, message) {
   }
   throw new Error(message)
 }
+async function hasDurableFixtureElements(id) {
+  const head = (await db.doc(`boardScenes/${id}`).get()).data()
+  if (!head?.headRevisionId) return false
+  const revision = (await db.doc(`boardScenes/${id}/revisions/${head.headRevisionId}`).get()).data()
+  if (!revision) return false
+  const records = []
+  for (let i = 0; i < revision.pageCount; i++) {
+    const page = (
+      await db.doc(`boardScenes/${id}/revisions/${head.headRevisionId}/pages/${String(i).padStart(6, '0')}`).get()
+    ).data()
+    if (!page) return false
+    for (const reference of page.references) {
+      const chunk = (await db.doc(`boardScenes/${id}/chunks/${reference.chunkId}`).get()).data()
+      if (!chunk) return false
+      records.push(...JSON.parse(chunk.payload))
+    }
+  }
+  const elements = records.filter((record) => record.kind === 'element')
+  return elements.length === 20 && new Set(elements.map((record) => record.value?.id)).size === 20
+}
 // Independent record/hash oracle: never uses the application's scene codec.
 async function durable(id) {
   const head = (await db.doc(`boardScenes/${id}`).get()).data()
@@ -73,6 +93,7 @@ async function durable(id) {
   }
   assert.equal(new Set(records.map((record) => record.key)).size, records.length)
   const elements = records.filter((record) => record.kind === 'element').sort((a, b) => a.order - b.order)
+  assert.equal(elements.length, 20, `Expected 20 durable elements, found ${elements.length}; record sample: ${JSON.stringify(records.slice(0, 12).map((record) => ({ kind: record.kind, key: record.key, order: record.order, valueKeys: Object.keys(record.value ?? {}), id: record.value?.id })))}`)
   assert.deepEqual(
     elements.map((record) => record.order),
     elements.map((_, i) => i),
@@ -157,11 +178,16 @@ try {
   fixture = await owner.evaluate(async () => {
     const { getFirebaseAuth } = await import('/src/lib/firebase.ts')
     const { signInOwner } = await import('/tests/regression-fixture.ts')
-    const { workspaceApi } = await import('/src/features/workspace/workspace-api.ts')
+    const { workspaceApi, workspaceStore } = await import('/src/features/workspace/workspace-api.ts')
     const { convertToExcalidrawElements } = await import('/tests/frame-reload-fixture.ts')
     await signInOwner(getFirebaseAuth())
     const project = await workspaceApi.createProject('Five chunk E2E')
     const board = await workspaceApi.createBoard(project.id, 'Exactly five chunks')
+    // Let the queued empty-board registration finish before racing it with the
+    // large content save. This keeps the fixture focused on chunk persistence.
+    await workspaceApi.flushCloud()
+    const currentBoard = await workspaceStore.loadBoard(board.id)
+    if (!currentBoard) throw new Error('Created board was not available locally.')
     const scene = {
       elements: convertToExcalidrawElements(
         Array.from({ length: 20 }, (_, i) => ({
@@ -177,15 +203,25 @@ try {
       ),
       appState: { viewBackgroundColor: '#ffffff' },
     }
-    await workspaceApi.saveBoard({ ...board, scene })
+    await workspaceApi.saveBoard({ ...currentBoard, scene })
     await workspaceApi.flushCloud()
+    const savedBoard = await workspaceStore.loadBoard(board.id)
+    if (savedBoard?.scene.elements.length !== 20)
+      throw new Error(`Large scene save was not durable locally: ${savedBoard?.scene.elements.length ?? 'missing'} elements.`)
     return {
       id: board.id,
       ownerUid: getFirebaseAuth().currentUser.uid,
       bytes: new TextEncoder().encode(JSON.stringify(scene)).length,
+      localSyncStatus: savedBoard.syncStatus,
+      localSyncError: savedBoard.lastSyncError,
+      localSceneElementCount: savedBoard.scene.elements.length,
     }
   })
   diagnosticOwner = owner
+  await eventually(
+    () => hasDurableFixtureElements(fixture.id),
+    'Timed out waiting for all 20 fixture elements to reach the committed board head.',
+  )
   const initial = await durable(fixture.id)
   assert.equal(initial.refs.length, 5, 'Fixture must publish exactly five chunks')
   assert(fixture.bytes > 1024 * 1024)

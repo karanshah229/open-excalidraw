@@ -36,10 +36,14 @@ export async function mintSceneConnectionEpochForSession(
   const root = database.ref()
   const [boardSnapshot, gateSnapshot, roomGenerationSnapshot] = await Promise.all([
     root.child(`boardAccess/${boardId}`).get(),
-    root.child(`system/sceneMaintenance/${boardId}/admissionClosed`).get(),
+    root.child(`system/sceneMaintenance/${boardId}`).get(),
     root.child(`boards/${boardId}/generation`).get(),
   ])
-  if (gateSnapshot.val() === true) throw new HttpsError('unavailable', 'Board collaboration is temporarily paused.')
+  const gate = gateSnapshot.val()
+  if (gate?.admissionClosed === true) throw new HttpsError('unavailable', 'Board collaboration is temporarily paused.')
+  const admissionEpoch = Number.isSafeInteger(gate?.admissionEpoch) && gate.admissionEpoch >= 0
+    ? gate.admissionEpoch
+    : 0
   const roomGeneration = roomGenerationSnapshot.val() ?? 1
   if (!Number.isSafeInteger(roomGeneration) || roomGeneration !== sceneGeneration)
     throw new HttpsError('failed-precondition', 'This board changed generations. Reload it before reconnecting.', {
@@ -54,7 +58,7 @@ export async function mintSceneConnectionEpochForSession(
   const epochRef = root.child(`system/sceneConnectionEpochs/${boardId}/${sessionId}`)
   const result = await epochRef.transaction((current) => {
     const generation = Number.isSafeInteger(current?.generation) && current.generation >= 0 ? current.generation + 1 : 1
-    return { userId: input.uid, generation, sceneGeneration, token: randomUUID(), issuedAt: Date.now() }
+    return { userId: input.uid, generation, sceneGeneration, admissionEpoch, token: randomUUID(), issuedAt: Date.now() }
   })
   if (!result.committed || typeof result.snapshot.val()?.token !== 'string') {
     throw new HttpsError('unavailable', 'Could not authorize the collaboration connection.')

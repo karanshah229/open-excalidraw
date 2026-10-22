@@ -823,73 +823,113 @@ async function runLiveE2ECollaborationSuite() {
     // =================================================================
     console.log('\n🧪 Test 13: Delete Element & Real-Time Cmd+Z Undo Resurrection')
     {
-      const undoShapeId = 'e2e_undo_test_rect'
+      const idsBefore = await page1.evaluate(() => window.__excalidrawAPI.getSceneElements().map((element) => element.id))
+      const drawPoint = await page1.evaluate(() => {
+        const rect = document.querySelector('canvas')?.getBoundingClientRect()
+        return rect ? { x: rect.left + 420, y: rect.top + 340 } : null
+      })
+      assert.ok(drawPoint, 'Host canvas must be available for a native draw action')
+      await page1.bringToFront()
+      await page1.keyboard.press('r')
+      await page1.mouse.move(drawPoint.x, drawPoint.y)
+      await page1.mouse.down()
+      await page1.mouse.move(drawPoint.x + 110, drawPoint.y + 80, { steps: 5 })
+      await page1.mouse.up()
+      await page1.waitForFunction(
+        (knownIds) => window.__excalidrawAPI.getSceneElements().some((element) => !knownIds.includes(element.id)),
+        {},
+        idsBefore,
+      )
+      const undoShape = await page1.evaluate(
+        (knownIds) => {
+          const element = window.__excalidrawAPI.getSceneElements().find((candidate) => !knownIds.includes(candidate.id))
+          if (!element) return null
+          const state = window.__excalidrawAPI.getAppState()
+          return {
+            id: element.id,
+            x: (element.x + element.width / 2 + state.scrollX) * state.zoom.value + state.offsetLeft,
+            y: (element.y + element.height / 2 + state.scrollY) * state.zoom.value + state.offsetTop,
+          }
+        },
+        idsBefore,
+      )
+      assert.ok(undoShape, 'Native draw must create a shape to delete and undo')
+      await page2.waitForFunction(
+        (id) => window.__excalidrawAPI.getSceneElements().some((e) => e.id === id && !e.isDeleted),
+        { timeout: 15000 },
+        undoShape.id,
+      )
 
-      // Host creates a shape
+      // Use the actual selection and Delete key so Excalidraw's undo stack
+      // records the deletion exactly as it does for a person editing a board.
+      // Drawing leaves the new element selected in Excalidraw; restore that
+      // explicit selection through the public API if toolbar focus changed.
       await page1.evaluate((id) => {
-        const api = window.__excalidrawAPI
-        const newElem = {
-          id,
-          type: 'rectangle',
-          x: 600,
-          y: 200,
-          width: 150,
-          height: 80,
-          strokeColor: '#dc2626',
-          backgroundColor: '#fecaca',
-          fillStyle: 'solid',
-          strokeWidth: 2,
-          roughness: 1,
-          opacity: 100,
-          isDeleted: false,
-          version: 1,
-          versionNonce: 7771,
-        }
-        api.updateScene({ elements: [...api.getSceneElements(), newElem] })
-        window.__collab?.broadcastChanges?.(api.getSceneElements())
-      }, undoShapeId)
+        window.__excalidrawAPI.updateScene({ appState: { selectedElementIds: { [id]: true } } })
+      }, undoShape.id)
+      await page1.keyboard.press('Delete')
+      await page1.waitForFunction(
+        (id) => window.__excalidrawAPI.getSceneElementsIncludingDeleted().some((element) => element.id === id && element.isDeleted),
+        { timeout: 15000 },
+        undoShape.id,
+      )
 
-      await sleep(1500)
+      try {
+        await page2.waitForFunction(
+          (id) => !window.__excalidrawAPI.getSceneElements().some((e) => e.id === id && !e.isDeleted),
+          { timeout: 15000 },
+          undoShape.id,
+        )
+      } catch (error) {
+        const diagnostics = await Promise.all([page1, page2].map((page) => page.evaluate(async (id) => {
+          const api = window.__excalidrawAPI
+          const elements = api?.getSceneElementsIncludingDeleted?.() ?? api?.getSceneElements() ?? []
+          return {
+            element: elements.find((element) => element.id === id),
+            collab: window.__collab ? {
+              user: window.__collab.collabUser?.uid,
+              isSpectator: window.__collab.isSpectator,
+              editorCount: window.__collab.editorCount,
+            } : null,
+          }
+        }, undoShape.id)))
+        console.error('Delete propagation diagnostics (owner, guest):', JSON.stringify(diagnostics))
+        throw error
+      }
 
-      // Verify shape visible on Guest
-      const guestSawShape = await page2.evaluate((id) => {
-        return window.__excalidrawAPI.getSceneElements().some((e) => e.id === id && !e.isDeleted)
-      }, undoShapeId)
-      assert.equal(guestSawShape, true, 'Shape must be visible on Guest canvas')
+      await page1.keyboard.down('Meta')
+      await page1.keyboard.press('KeyZ')
+      await page1.keyboard.up('Meta')
+      await page1.waitForFunction(
+        (id) => window.__excalidrawAPI.getSceneElements().some((element) => element.id === id && !element.isDeleted),
+        { timeout: 15000 },
+        undoShape.id,
+      )
 
-      // Host deletes shape
-      await page1.evaluate((id) => {
-        const api = window.__excalidrawAPI
-        const all = api.getSceneElementsIncludingDeleted()
-        const updated = all.map((e) => (e.id === id ? { ...e, isDeleted: true, version: e.version + 1 } : e))
-        api.updateScene({ elements: updated })
-        window.__collab?.broadcastChanges?.(updated)
-      }, undoShapeId)
-
-      await sleep(1500)
-
-      // Verify shape deleted on Guest
-      const guestSawDelete = await page2.evaluate((id) => {
-        return !window.__excalidrawAPI.getSceneElements().some((e) => e.id === id && !e.isDeleted)
-      }, undoShapeId)
-      assert.equal(guestSawDelete, true, 'Shape must be deleted on Guest canvas')
-
-      // Host restores shape via Undo (resurrection)
-      await page1.evaluate((id) => {
-        const api = window.__excalidrawAPI
-        const all = api.getSceneElementsIncludingDeleted()
-        const updated = all.map((e) => (e.id === id ? { ...e, isDeleted: false, version: e.version + 1 } : e))
-        api.updateScene({ elements: updated })
-        window.__collab?.broadcastChanges?.(updated)
-      }, undoShapeId)
-
-      await sleep(1500)
-
-      // Verify shape resurrected on Guest
-      const guestSawResurrection = await page2.evaluate((id) => {
-        return window.__excalidrawAPI.getSceneElements().some((e) => e.id === id && !e.isDeleted)
-      }, undoShapeId)
-      assert.equal(guestSawResurrection, true, 'Shape must be resurrected on Guest canvas via Undo!')
+      // RTDB delivery is asynchronous. Assert the required state with a bounded
+      // condition wait instead of a fixed delay that can fail under suite load.
+      try {
+        await page2.waitForFunction(
+          (id) => window.__excalidrawAPI.getSceneElements().some((element) => element.id === id && !element.isDeleted),
+          { timeout: 15000 },
+          undoShape.id,
+        )
+      } catch (error) {
+        const diagnostics = await Promise.all([page1, page2].map((page) => page.evaluate(async (id) => {
+          const api = window.__excalidrawAPI
+          const elements = api?.getSceneElementsIncludingDeleted?.() ?? api?.getSceneElements() ?? []
+          return {
+            element: elements.find((element) => element.id === id),
+            collab: window.__collab ? {
+              user: window.__collab.collabUser?.uid,
+              isSpectator: window.__collab.isSpectator,
+              editorCount: window.__collab.editorCount,
+            } : null,
+          }
+        }, undoShape.id)))
+        console.error('Undo resurrection diagnostics (owner, guest):', JSON.stringify(diagnostics))
+        throw error
+      }
 
       console.log('   ✓ Shape deleted and restored via Undo, successfully synced to Guest in real time!')
       passedTests++

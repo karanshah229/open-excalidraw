@@ -23,6 +23,8 @@ Repacking is a maintenance action, not an operation run after each delete or edi
 
 When the abandoned collaboration room cleanup runs, it waits through a grace period, then closes RTDB admission under a token-owned fence and checks both presence and active-session registries. It checkpoints the acknowledged room deltas; only after the fence verifies no active session can join does it convert eligible full tombstones to compact ledger records. The fence reopens only if the worker still owns it. Stale session epochs cannot publish after reconnect.
 
+Firestore uploads use the same close-and-reopen principle. The private lease token stays in `boardScenes/{boardId}/maintenance/control`; the scene head mirrors only `maintenanceAdmission` and `maintenanceEpoch`. Chunk and page rules check those fields on the already-read scene head, avoiding another rules document lookup. Each upload binds its epoch, so closing maintenance blocks new staging and invalidates previously staged uploads even after admission reopens.
+
 The function flag `SCENE_TOMBSTONE_COMPACTION_ENABLED` defaults to `false`. Keep it disabled unless the deployment has passed its maintenance rollout gates. The tombstone Puppeteer E2E enables it only inside isolated emulators, draws and deletes through the UI, verifies undo while the editor session remains open, closes the collaborators, observes the real RTDB cleanup trigger, then verifies compacted state, preserved history, and rejection of stale collaboration replay.
 
 Undo is scoped to the open board tab. Leaving or reloading ends that undo session. Compaction does not delete historical revisions or named versions.

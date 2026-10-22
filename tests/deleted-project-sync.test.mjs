@@ -59,7 +59,12 @@ try {
     const { tombstoneProject } = await import('/tests/deleted-project-sync-fixture.ts')
     await tombstoneProject(boardId, true)
   }, boardId)
-  await page.waitForFunction(() => document.body.innerText.includes('Project deleted'), { timeout: 10000 })
+  // The shared-board header shows the read-only state as "View only"; the
+  // specific project-deletion reason remains in the sync-status model.
+  await page.waitForFunction(() => document.body.innerText.includes('View only'), { timeout: 10000 })
+  // The sync label and Excalidraw's read-only prop settle in separate React
+  // work, so wait for the actual editing gate before asserting it.
+  await page.waitForFunction(() => window.__excalidrawAPI?.getAppState().viewModeEnabled === true, { timeout: 10000 })
   assert.equal(await page.evaluate(() => window.__excalidrawAPI.getAppState().viewModeEnabled), true)
   const beforeBlockedSave = calls.length
   const pending = await page.evaluate(
@@ -85,7 +90,7 @@ try {
   assert.equal(calls.length - beforeBlockedSave, 0, 'Blocked saves must not call the image gateway')
   await page.reload({ waitUntil: 'domcontentloaded' })
   try {
-    await page.waitForFunction(() => document.body.innerText.includes('Project deleted'), { polling: 200 })
+    await page.waitForFunction(() => document.body.innerText.includes('View only'), { polling: 200 })
   } catch (error) {
     console.log(
       'DELETED REOPEN DIAGNOSTIC',
@@ -122,11 +127,24 @@ try {
       await page
         .evaluate(async (id) => {
           const { inspectDeletedProject } = await import('/tests/deleted-project-sync-fixture.ts')
+          const { workspaceApi } = await import('/src/features/workspace/workspace-api.ts')
+          const { getFirebaseAuth } = await import('/src/lib/firebase.ts')
+          const { sharingService } = await import('/src/features/sharing/sharing-service.ts')
           const state = await inspectDeletedProject(id)
+          const localDetails = await workspaceApi.loadBoardWithProject(id)
+          const sharing = await sharingService.getSharedBoard(id, getFirebaseAuth()?.currentUser?.email, getFirebaseAuth()?.currentUser?.uid).catch((error) => ({ error: error.message }))
           return {
             status: state.status,
             error: state.error,
             projectDeletedAt: state.projectDeletedAt,
+            localDocument: localDetails?.document && {
+              active: localDetails.document.active,
+              syncStatus: localDetails.document.syncStatus,
+              projectId: localDetails.document.projectId,
+            },
+            localProject: localDetails?.project,
+            auth: { uid: getFirebaseAuth()?.currentUser?.uid, email: getFirebaseAuth()?.currentUser?.email },
+            sharing: sharing && { status: sharing.status, ownerId: sharing.config?.ownerId, effectiveRole: sharing.config?.effectiveRole },
             viewMode: window.__excalidrawAPI?.getAppState().viewModeEnabled,
             text: document.body.innerText,
           }

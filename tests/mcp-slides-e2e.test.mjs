@@ -21,7 +21,14 @@ const browser = await puppeteer.launch({
 const owner = await browser.newPage()
 owner.setDefaultTimeout(30000)
 let recipient
+let viewer
 const requests = []
+// A queued scene commit can finish while access settings are being changed or
+// read. It is a completion receipt for scene data already staged in Firestore,
+// so these flows assert the complete canvas stays identical and forbid APIs
+// that directly replace or restore its contents.
+const boardContentMutations = new Set(['updateBoardContent', 'restoreBoardVersion', 'boardAsset'])
+const sharingMutations = new Set(['manageProject', 'manageBoardAccess', ...boardContentMutations])
 owner.on('console', (message) => {
   if (message.type() === 'error') console.log('Browser error:', message.text())
 })
@@ -212,6 +219,7 @@ try {
   assert.equal(localChecks.second.text, '')
   assert.equal(localChecks.second.noteRevision, 2)
   const share = await call('get_share_info')
+  const canvasBeforeBoardShare = await call('get_canvas', { detail: 'full' })
   let start = requests.length
   const shared = await call('share_board', {
     generalAccess: 'anyone_with_link',
@@ -220,13 +228,26 @@ try {
     expectedAccessRevision: share.accessRevision ?? 0,
   })
   assert.equal(shared.generalRole, 'presentation')
-  assert.deepEqual(requests.slice(start), ['manageBoardAccess'], 'One permission mutation; no publishing or note calls')
+  const shareRequests = requests.slice(start)
+  assert.equal(shareRequests.filter((endpoint) => endpoint === 'manageBoardAccess').length, 1,
+    'Sharing performs exactly one access-policy mutation')
+  const canvasAfterBoardShare = await call('get_canvas', { detail: 'full' })
+  assert.deepEqual(
+    shareRequests.filter((endpoint) => boardContentMutations.has(endpoint)),
+    [],
+    'Share UI may refresh or migrate authorized history, but must not publish current board content',
+  )
+  assert.deepEqual(canvasAfterBoardShare.scene, canvasBeforeBoardShare.scene)
   start = requests.length
   const info = await call('get_share_info')
   assert.equal(info.shareUrl, `${base}/boards/${fixture.boardId}`)
-  assert.equal(requests.length, start, 'Reading share URL performs no callable mutation')
+  assert(
+    requests.slice(start).every((endpoint) => !sharingMutations.has(endpoint)),
+    'Reading share URL performs no access-policy or board-content mutation',
+  )
   assert((await raw('share_board', { generalRole: 'viewer', expectedAccessRevision: 0 })).isError)
   const project = await call('get_share_info', { projectId: fixture.projectId })
+  const canvasBeforeProjectShare = await call('get_canvas', { detail: 'full' })
   start = requests.length
   await call('share_project', {
     projectId: fixture.projectId,
@@ -234,7 +255,18 @@ try {
     generalRole: 'presentation',
     expectedAccessRevision: project.accessRevision ?? 0,
   })
-  assert.deepEqual(requests.slice(start), ['manageProject'])
+  const projectShareRequests = requests.slice(start)
+  const canvasAfterProjectShare = await call('get_canvas', { detail: 'full' })
+  assert.equal(projectShareRequests.filter((endpoint) => endpoint === 'manageProject').length, 1)
+  // Project access refresh can also finish an already queued history import or
+  // initialize a legacy scene's chunk manifest. Those operations preserve the
+  // current canvas. Sharing itself must not invoke current-content writes.
+  assert.deepEqual(
+    projectShareRequests.filter((endpoint) => boardContentMutations.has(endpoint)),
+    [],
+    `Project sharing must not publish current board content; calls: ${projectShareRequests.join(', ')}`,
+  )
+  assert.deepEqual(canvasAfterProjectShare.scene, canvasBeforeProjectShare.scene)
   assert.equal((await call('get_share_info')).projectPolicy.generalRole, 'presentation')
   const projectAfter = await call('get_share_info', { projectId: fixture.projectId })
   assert(
@@ -306,9 +338,13 @@ try {
     inheritProjectAccess: false,
     expectedAccessRevision: current.accessRevision,
   })
-  const viewer = await context.newPage()
+  viewer = await context.newPage()
   await viewer.goto(info.shareUrl)
-  await viewer.waitForSelector('.excalidraw-container')
+  await viewer.waitForFunction(
+    () => Boolean(document.querySelector('.excalidraw-container') || document.querySelector('.access-denied-title')),
+    { timeout: 30000 },
+  )
+  assert(await viewer.$('.excalidraw-container'), `Viewer failed to load the shared board: ${await viewer.evaluate(() => document.body.innerText)}`)
   await new Promise((resolve) => setTimeout(resolve, 300))
   assert((await raw('get_slide_notes', { slideId: a })).isError, 'Viewer adapter cannot read notes')
   await noUnload(viewer)
@@ -321,6 +357,10 @@ try {
   if (recipient && !recipient.isClosed()) {
     await recipient.screenshot({ path: '.system_generated/slides/mcp-slides-error-recipient.png' })
     console.log('Recipient UI:', await recipient.evaluate(() => document.body.innerText))
+  }
+  if (viewer && !viewer.isClosed()) {
+    await viewer.screenshot({ path: '.system_generated/slides/mcp-slides-error-viewer.png' })
+    console.log('Viewer UI:', await viewer.evaluate(() => document.body.innerText))
   }
   await writeFile('.system_generated/slides/mcp-slides-error.txt', String(error))
   throw error

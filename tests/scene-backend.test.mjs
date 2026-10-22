@@ -73,6 +73,7 @@ async function stage(boardId, head, payload, suffix, sourceChunks) {
     generation: head.generation,
     sceneFormatVersion: 1,
     sceneProtocolVersion: 2,
+    expectedFence: head.restoreFence ?? 0,
     pageCount: pages.length,
     chunkCount: chunks.length,
     newChunkCount: chunks.length,
@@ -766,7 +767,10 @@ try {
   assert.equal(historicalChunks.chunks.length, historicalPage.references.length)
   assert.notEqual((await db.doc(`boardScenes/${callableReads.boardId}`).get()).data().headRevisionId, named.revisionId)
   const rootsAfterHeadAdvance = await db.collection(`boardScenes/${callableReads.boardId}/versions`).get()
-  assert.equal(rootsAfterHeadAdvance.size, 1, 'named version remains a durable root after live head advances')
+  assert(
+    rootsAfterHeadAdvance.docs.some((version) => version.id === named.versionId),
+    'named version remains a durable root after live head advances',
+  )
   const readerAuth = { uid: stranger.uid, token: { email_verified: true, email: `${stranger.uid}@example.test` } }
   const resetOperationId = `${prefix}_restore_prepare`
   const preparedReset = await prepareBoardSceneGenerationReset.run({

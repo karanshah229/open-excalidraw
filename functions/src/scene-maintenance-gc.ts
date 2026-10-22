@@ -207,6 +207,7 @@ export async function quarantineSceneOrphanChunks(boardId: string): Promise<{
       leaseUntil: Timestamp.fromMillis(Date.now() + WORKER_LEASE_MS), phase: 'census', updatedAt: Timestamp.now() }
     if (controlData) tx.update(controlRef, controlDataNext)
     else tx.create(controlRef, controlDataNext)
+    tx.update(headRef, { maintenanceAdmission: 'closed', maintenanceEpoch: nextEpoch })
     return nextEpoch
   })
   const gateClosedAt = Date.now()
@@ -215,9 +216,10 @@ export async function quarantineSceneOrphanChunks(boardId: string): Promise<{
   const finishWithoutDelete = async (status: 'blocked' | 'deferred-census-limit', detail: string) => {
     await heartbeat.stop()
     const recovered = await db.runTransaction(async (tx) => {
-      const control = validControl((await tx.get(controlRef)).data()), job = (await tx.get(jobRef)).data()
+      const control = validControl((await tx.get(controlRef)).data()), job = (await tx.get(jobRef)).data(), head = (await tx.get(headRef)).data()
       if (control.admission !== 'closed' || control.epoch !== epoch || control.jobId !== jobId || control.token !== token || !job)
         throw maintenanceFenceError()
+      if (!head) throw maintenanceFenceError()
       if (!(job.leaseUntil instanceof Timestamp) || job.leaseUntil.toMillis() <= Date.now()) {
         if (job.status !== 'lease-expired-awaiting-recovery')
           tx.update(jobRef, { status: 'lease-expired-awaiting-recovery', leaseExpiredAt: Timestamp.now() })
@@ -226,6 +228,7 @@ export async function quarantineSceneOrphanChunks(boardId: string): Promise<{
       tx.update(jobRef, { status: 'cancelled', outcome: status, detail, completedAt: Timestamp.now(), leaseUntil: null,
         gateClosedDurationMs: Date.now() - gateClosedAt })
       tx.update(controlRef, { admission: 'open', epoch, jobId: null, token: null, leaseUntil: null, phase: null, updatedAt: Timestamp.now() })
+      tx.update(headRef, { maintenanceAdmission: 'open', maintenanceEpoch: epoch })
       return true
     })
     if (!recovered) throw new Error('Scene maintenance worker lease expired; explicit recovery is required.')
@@ -286,9 +289,10 @@ export async function quarantineSceneOrphanChunks(boardId: string): Promise<{
     await writeEvidencePages(boardId, jobId, epoch, token, proposals, 'quarantinePages')
     await heartbeat.stop()
     const completed = await db.runTransaction(async (tx) => {
-      const control = validControl((await tx.get(controlRef)).data()), job = (await tx.get(jobRef)).data()
+      const control = validControl((await tx.get(controlRef)).data()), job = (await tx.get(jobRef)).data(), head = (await tx.get(headRef)).data()
       if (control.admission !== 'closed' || control.epoch !== epoch || control.jobId !== jobId || control.token !== token ||
           !job || job.epoch !== epoch || job.token !== token) throw maintenanceFenceError()
+      if (!head) throw maintenanceFenceError()
       if (job.status !== 'running' || !(job.leaseUntil instanceof Timestamp) || job.leaseUntil.toMillis() <= Date.now()) {
         if (job.status === 'running') tx.update(jobRef, { status: 'lease-expired-awaiting-recovery', leaseExpiredAt: Timestamp.now() })
         return false
@@ -299,6 +303,7 @@ export async function quarantineSceneOrphanChunks(boardId: string): Promise<{
         gateClosedDurationMs: Date.now() - gateClosedAt,
         diagnostics: plan.diagnostics.map((item) => item.code), completedAt: Timestamp.now(), leaseUntil: null })
       tx.update(controlRef, { admission: 'open', epoch, jobId: null, token: null, leaseUntil: null, phase: null, updatedAt: Timestamp.now() })
+      tx.update(headRef, { maintenanceAdmission: 'open', maintenanceEpoch: epoch })
       return true
     })
     if (!completed) throw new Error('Scene maintenance worker lease expired; explicit recovery is required.')
@@ -316,10 +321,10 @@ export async function quarantineSceneOrphanChunks(boardId: string): Promise<{
 
 /** Explicit recovery for a crashed proposal-only run. This is safe only because this module never deletes objects. */
 export async function recoverSceneMaintenanceProposal(boardId: string, jobId: string, expectedEpoch: number) {
-  const db = getFirestore(), root = `boardScenes/${boardId}`, controlRef = db.doc(`${root}/maintenance/control`)
+  const db = getFirestore(), root = `boardScenes/${boardId}`, headRef = db.doc(root), controlRef = db.doc(`${root}/maintenance/control`)
   const jobRef = db.doc(`${root}/maintenanceJobs/${jobId}`)
   return db.runTransaction(async (tx) => {
-    const control = validControl((await tx.get(controlRef)).data()), job = (await tx.get(jobRef)).data()
+    const control = validControl((await tx.get(controlRef)).data()), job = (await tx.get(jobRef)).data(), head = (await tx.get(headRef)).data()
     if (!job || job.kind === 'orphan-chunk-collection' || control.admission !== 'closed' || control.jobId !== jobId || control.epoch !== expectedEpoch ||
         job.epoch !== expectedEpoch || job.token !== control.token || !['running', 'lease-expired-awaiting-recovery'].includes(job.status))
       throw maintenanceFenceError()
@@ -329,6 +334,8 @@ export async function recoverSceneMaintenanceProposal(boardId: string, jobId: st
       recovery: 'fenced-and-reopened; quarantine proposals are non-authoritative' })
     tx.update(controlRef, { admission: 'open', epoch: expectedEpoch + 1, jobId: null, token: null,
       leaseUntil: null, phase: null, updatedAt: Timestamp.now() })
+    if (!head) throw maintenanceFenceError()
+    tx.update(headRef, { maintenanceAdmission: 'open', maintenanceEpoch: expectedEpoch + 1 })
     return { recovered: true, newEpoch: expectedEpoch + 1 }
   })
 }
@@ -371,6 +378,7 @@ export async function collectQuarantinedOrphanChunks(boardId: string, sourceJobI
       leaseUntil: Timestamp.fromMillis(Date.now() + WORKER_LEASE_MS), phase: 'fresh-census', updatedAt: Timestamp.now() }
     if (controlData) tx.update(controlRef, nextControl)
     else tx.create(controlRef, nextControl)
+    tx.update(headRef, { maintenanceAdmission: 'closed', maintenanceEpoch: nextEpoch })
     return nextEpoch
   })
   const gateClosedAt = Date.now()
@@ -379,9 +387,10 @@ export async function collectQuarantinedOrphanChunks(boardId: string, sourceJobI
   const finish = async (status: 'blocked' | 'deferred-census-limit' | 'complete-noop', detail: string) => {
     await heartbeat.stop()
     const reopened = await db.runTransaction(async (tx) => {
-      const control = validControl((await tx.get(controlRef)).data()), job = (await tx.get(jobRef)).data()
+      const control = validControl((await tx.get(controlRef)).data()), job = (await tx.get(jobRef)).data(), head = (await tx.get(headRef)).data()
       if (control.admission !== 'closed' || control.epoch !== epoch || control.jobId !== jobId || control.token !== token || !job)
         throw maintenanceFenceError()
+      if (!head) throw maintenanceFenceError()
       if (!(job.leaseUntil instanceof Timestamp) || job.leaseUntil.toMillis() <= Date.now()) {
         if (job.status !== 'lease-expired-awaiting-recovery') tx.update(jobRef, { status: 'lease-expired-awaiting-recovery', leaseExpiredAt: Timestamp.now() })
         return false
@@ -390,6 +399,7 @@ export async function collectQuarantinedOrphanChunks(boardId: string, sourceJobI
         deletedChunkCount: 0, completedAt: Timestamp.now(), leaseUntil: null,
         gateClosedDurationMs: Date.now() - gateClosedAt })
       tx.update(controlRef, { admission: 'open', epoch, jobId: null, token: null, leaseUntil: null, phase: null, updatedAt: Timestamp.now() })
+      tx.update(headRef, { maintenanceAdmission: 'open', maintenanceEpoch: epoch })
       return true
     })
     if (!reopened) throw new Error('Scene maintenance worker lease expired; explicit recovery is required.')
@@ -676,6 +686,7 @@ export async function collectQuarantinedOrphanChunks(boardId: string, sourceJobI
         maxDeleteBatchDurationMs: job.maxDeleteBatchDurationMs ?? maxDeleteBatchDurationMs,
         completedAt: Timestamp.now(), leaseUntil: null })
       tx.update(controlRef, { admission: 'open', epoch, jobId: null, token: null, leaseUntil: null, phase: null, updatedAt: Timestamp.now() })
+      tx.update(headRef, { maintenanceAdmission: 'open', maintenanceEpoch: epoch })
       return true
     })
     if (!complete) throw new Error('Scene maintenance worker lease expired; explicit recovery is required.')
@@ -710,6 +721,7 @@ export async function recoverAbandonedSceneChunkCollection(boardId: string, jobI
       recovery: 'epoch advanced; remaining chunks require a fresh quarantine and census' })
     tx.update(controlRef, { admission: 'open', epoch: nextEpoch, jobId: null, token: null,
       leaseUntil: null, phase: null, lastRecoveryAt: Timestamp.now(), updatedAt: Timestamp.now() })
+    tx.update(headRef, { maintenanceAdmission: 'open', maintenanceEpoch: nextEpoch })
     return { recovered: true, newEpoch: nextEpoch, deletedChunkCount: job.deletedChunkCount ?? 0 }
   })
 }
@@ -730,6 +742,7 @@ export async function recoverAbandonedSceneWriterJob(boardId: string, jobId: str
     tx.update(jobRef, { status: 'abandoned-protected', previousToken: job.token, token: replacementToken,
       fencedAt: Timestamp.now(), recovery: 'publication-fenced; declared roots remain protected' })
     tx.update(controlRef, { epoch: nextEpoch, lastRecoveryAt: Timestamp.now(), updatedAt: Timestamp.now() })
+    tx.update(headRef, { maintenanceAdmission: 'open', maintenanceEpoch: nextEpoch })
     return { recovered: true, newEpoch: nextEpoch, protectedRevisionIds: job.protectedRevisionIds, protectedChunkIds: job.protectedChunkIds }
   })
 }

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
+import { createHash } from 'node:crypto'
 import puppeteer from 'puppeteer-core'
 
 if (
@@ -15,6 +16,7 @@ const { getAuth } = require('firebase-admin/auth')
 const { getDatabase } = require('firebase-admin/database')
 const { getFirestore } = require('firebase-admin/firestore')
 const { loadSceneRevision } = await import('../functions/lib/board-scenes.js')
+const { manifestDigest, packScene, SCENE_PROTOCOL_VERSION } = await import('../functions/lib/scene-codec.js')
 const projectId = 'demo-regression'
 const boardId = `tombstone-compaction-${Date.now().toString(36)}`
 const baseUrl = process.env.E2E_BASE_URL || 'http://127.0.0.1:15190'
@@ -40,6 +42,54 @@ async function waitFor(check, message, timeoutMs = 120_000) {
     await new Promise((resolve) => setTimeout(resolve, 500))
   }
   throw new Error(message)
+}
+
+async function revisionPayloadBytes(head) {
+  const revision = (await adminDb.doc(`boardScenes/${boardId}/revisions/${head.headRevisionId}`).get()).data()
+  let bytes = 0
+  for (let pageIndex = 0; pageIndex < revision.pageCount; pageIndex++) {
+    const page = (
+      await adminDb
+        .doc(`boardScenes/${boardId}/revisions/${head.headRevisionId}/pages/${String(pageIndex).padStart(6, '0')}`)
+        .get()
+    ).data()
+    for (const reference of page.references) {
+      const chunk = (await adminDb.doc(`boardScenes/${boardId}/chunks/${reference.chunkId}`).get()).data()
+      bytes += Buffer.byteLength(chunk.payload)
+    }
+  }
+  return bytes
+}
+
+async function tryCreateUpload(id, head, uid, maintenanceEpoch, documentId, token) {
+  const now = new Date().toISOString()
+  const fields = {
+    uploaderUid: { stringValue: uid }, expectedHeadRevisionId: { stringValue: head.headRevisionId },
+    generation: { integerValue: String(head.generation) }, expectedFence: { integerValue: String(head.restoreFence ?? 0) },
+    maintenanceEpoch: { integerValue: String(maintenanceEpoch) }, sceneFormatVersion: { integerValue: '1' },
+    pageCount: { integerValue: '1' }, chunkCount: { integerValue: '1' }, newChunkCount: { integerValue: '0' },
+    candidateDigest: { stringValue: 'a'.repeat(64) }, createdAt: { timestampValue: now },
+    expiresAt: { timestampValue: new Date(Date.now() + 60_000).toISOString() },
+  }
+  const response = await fetch(`http://${process.env.FIRESTORE_EMULATOR_HOST}/v1/projects/demo-regression/databases/(default)/documents/boardScenes/${id}/uploads?documentId=${documentId}`, {
+    method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fields }),
+  })
+  const result = await response.json().catch(() => null)
+  return response.ok ? 'unexpected-success' : result?.error?.status ?? `http-${response.status}`
+}
+
+async function tryCreateChunk(id, commitId, chunkId, payload, digest, uid, generation, token, slot = 0) {
+  const response = await fetch(`http://${process.env.FIRESTORE_EMULATOR_HOST}/v1/projects/demo-regression/databases/(default)/documents/boardScenes/${id}/chunks?documentId=${chunkId}`, {
+    method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fields: {
+      payload: { stringValue: payload }, digest: { stringValue: digest }, uploadId: { stringValue: commitId },
+      slot: { integerValue: String(slot) }, uploaderUid: { stringValue: uid }, generation: { integerValue: String(generation) },
+      kind: { stringValue: 'records' },
+    } }),
+  })
+  const result = await response.json().catch(() => null)
+  return response.ok ? 'unexpected-success' : result?.error?.status ?? `http-${response.status}`
 }
 
 try {
@@ -169,22 +219,118 @@ try {
     if (!scene.elements.some((element) => element.id === shapeId && element.isDeleted)) return null
     return { head, scene }
   }, 'The full tombstone was not committed before disconnect.', 60_000)
+  const maintenanceEpochBeforeCompaction = historical.head.maintenanceEpoch ?? 1
+  const ownerIdToken = await page.evaluate(async () => {
+    const { getFirebaseAuth } = await import('/src/lib/firebase.ts')
+    return getFirebaseAuth().currentUser.getIdToken()
+  })
+  const stagedUploadId = `pending_before_compaction_${Date.now().toString(36)}`
+  const packedBeforeCompaction = await packScene(historical.scene)
+  const stagedChunks = packedBeforeCompaction.map((chunk, slot) => ({
+    ...chunk, chunkId: `${stagedUploadId}_${String(slot).padStart(6, '0')}`, slot,
+  }))
+  const stagedReferences = stagedChunks.map(({ chunkId, digest }) => ({ chunkId, digest }))
+  const stagedCandidateDigest = await manifestDigest(stagedReferences, historical.head.generation)
+  const candidateFields = {
+    uploaderUid: { stringValue: owner.uid }, expectedHeadRevisionId: { stringValue: historical.head.headRevisionId },
+    generation: { integerValue: String(historical.head.generation) }, expectedFence: { integerValue: String(historical.head.restoreFence ?? 0) },
+    maintenanceEpoch: { integerValue: String(maintenanceEpochBeforeCompaction) }, sceneFormatVersion: { integerValue: '1' },
+    pageCount: { integerValue: '1' }, chunkCount: { integerValue: String(stagedChunks.length) }, newChunkCount: { integerValue: String(stagedChunks.length) },
+    candidateDigest: { stringValue: stagedCandidateDigest }, createdAt: { timestampValue: new Date().toISOString() },
+    expiresAt: { timestampValue: new Date(Date.now() + 60 * 60_000).toISOString() },
+  }
+  const uploadUrl = `http://${process.env.FIRESTORE_EMULATOR_HOST}/v1/projects/demo-regression/databases/(default)/documents/boardScenes/${boardId}/uploads`
+  const stagedCandidateResponse = await fetch(`${uploadUrl}?documentId=${stagedUploadId}`, {
+    method: 'POST', headers: { Authorization: `Bearer ${ownerIdToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fields: candidateFields }),
+  })
+  assert.equal(stagedCandidateResponse.status, 200, 'a valid upload can be staged before compaction begins')
+  const stagedPageResponse = await fetch(`${uploadUrl}/${stagedUploadId}/pages?documentId=000000`, {
+    method: 'POST', headers: { Authorization: `Bearer ${ownerIdToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fields: { references: { arrayValue: { values: stagedReferences.map((reference) => ({
+      mapValue: { fields: { chunkId: { stringValue: reference.chunkId }, digest: { stringValue: reference.digest } } },
+    })) } } } }),
+  })
+  assert.equal(stagedPageResponse.status, 200, 'the pending upload manifest is staged before compaction')
+  for (const chunk of stagedChunks) {
+    const stagedChunk = await tryCreateChunk(
+      boardId, stagedUploadId, chunk.chunkId, chunk.payload, chunk.digest, owner.uid,
+      historical.head.generation, ownerIdToken, chunk.slot,
+    )
+    assert.equal(stagedChunk, 'unexpected-success', 'the complete candidate chunk is staged before compaction')
+  }
+  const bytesBeforeCompaction = await revisionPayloadBytes(historical.head)
   assert.equal((historical.scene.deletionLedger ?? []).some((entry) => entry.id === shapeId && entry.compacted), false)
   console.log('Verified the active session retains the full tombstone in the committed scene')
 
   await collaboratorPage.close()
   await page.close()
+  const gateProbe = await browser.newPage()
+  await gateProbe.goto(baseUrl, { waitUntil: 'domcontentloaded' })
+  await gateProbe.evaluate(async ({ id, token, shareConfig }) => {
+    const { getFirebaseAuth } = await import('/src/lib/firebase.ts')
+    const { signInOwnerWithToken } = await import('/tests/regression-fixture.ts')
+    await signInOwnerWithToken(getFirebaseAuth(), token)
+    localStorage.setItem('agentic-whiteboard:library:v1', '[]')
+    localStorage.setItem(`agentic-whiteboard:share:${id}`, JSON.stringify(shareConfig))
+  }, { id: boardId, token: await adminAuth.createCustomToken(owner.uid), shareConfig: owner.shareConfig })
+  const closedFence = await waitFor(async () => {
+    const [head, control] = await Promise.all([
+      adminDb.doc(`boardScenes/${boardId}`).get(),
+      adminDb.doc(`boardScenes/${boardId}/maintenance/control`).get(),
+    ])
+    const headData = head.data(), controlData = control.data()
+    if (headData?.maintenanceAdmission !== 'closed' || controlData?.admission !== 'closed') return null
+    return { head: headData, control: controlData }
+  }, 'Compaction never closed Firestore admission before pruning.', 120_000)
+  assert.equal(closedFence.head.maintenanceEpoch, closedFence.control.epoch)
+  assert.equal(closedFence.control.abandonedRoomOwner?.length > 0, true)
+  const gateProbeToken = await gateProbe.evaluate(async () => {
+    const { getFirebaseAuth } = await import('/src/lib/firebase.ts')
+    return getFirebaseAuth().currentUser.getIdToken()
+  })
+  const blockedDuringPrune = await tryCreateUpload(
+    boardId, closedFence.head, owner.uid, closedFence.head.maintenanceEpoch, 'fresh-editor-race', gateProbeToken,
+  )
+  assert.ok(['permission-denied', 'firestore/permission-denied', 'PERMISSION_DENIED'].includes(blockedDuringPrune),
+    `Firestore upload must be denied while compaction is pruning: ${blockedDuringPrune}`)
   const compacted = await waitFor(async () => {
     const head = (await adminDb.doc(`boardScenes/${boardId}`).get()).data()
     if (!head?.headRevisionId || head.headRevisionId === historical.head.headRevisionId) return null
+    const control = (await adminDb.doc(`boardScenes/${boardId}/maintenance/control`).get()).data()
     const scene = (await loadSceneRevision(boardId, head)).scene
     const deletion = scene.deletionLedger.find((entry) => entry.id === shapeId)
     if (!deletion?.compacted || scene.elements.some((element) => element.id === shapeId)) return null
     const gate = (await adminRtdb.ref(`system/sceneMaintenance/${boardId}`).get()).val()
-    if (gate?.admissionClosed) return null
-    return { head, scene }
+    if (gate?.admissionClosed || head.maintenanceAdmission !== 'open' || control?.admission !== 'open') return null
+    return { head, scene, control }
   }, 'The final-session disconnect did not produce a compacted scene head.', 150_000)
+  assert.equal(compacted.head.maintenanceEpoch, maintenanceEpochBeforeCompaction + 1,
+    'closing the shared Firestore fence advances the epoch and permanently fences in-flight uploads')
+  assert.equal(compacted.control.epoch, compacted.head.maintenanceEpoch)
+  const staleUploadAfterReopen = await tryCreateUpload(
+    boardId, compacted.head, owner.uid, maintenanceEpochBeforeCompaction, 'stale-before-compaction', gateProbeToken,
+  )
+  assert.ok(['permission-denied', 'firestore/permission-denied', 'PERMISSION_DENIED'].includes(staleUploadAfterReopen),
+    `An upload from before compaction must remain fenced after reopen: ${staleUploadAfterReopen}`)
+  await adminDb.doc(`boardScenes/${boardId}/uploads/${stagedUploadId}`).update({
+    expectedHeadRevisionId: compacted.head.headRevisionId,
+    sceneProtocolVersion: SCENE_PROTOCOL_VERSION,
+  })
+  const staleCommitResponse = await fetch('http://127.0.0.1:45001/demo-regression/us-central1/commitBoardScene', {
+    method: 'POST', headers: { Authorization: `Bearer ${gateProbeToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ data: { boardId, commitId: stagedUploadId, sceneProtocolVersion: SCENE_PROTOCOL_VERSION } }),
+  })
+  assert.equal(staleCommitResponse.ok, false, 'a pre-staged candidate cannot commit after the maintenance epoch advances')
+  const staleCommitBody = await staleCommitResponse.json().catch(() => null)
+  assert.equal(staleCommitBody?.error?.status, 'ABORTED',
+    `The complete pre-staged candidate must fail specifically at the maintenance/head fence: ${JSON.stringify(staleCommitBody)}`)
+  await gateProbe.close()
   assert.equal(compacted.scene.deletionLedger.find((entry) => entry.id === shapeId).compacted, true)
+  assert(
+    (await revisionPayloadBytes(compacted.head)) < bytesBeforeCompaction,
+    'compaction must reduce the persisted scene payload bytes',
+  )
   const historicalScene = await loadSceneRevision(boardId, historical.head)
   assert.equal(historicalScene.scene.elements.find((element) => element.id === shapeId)?.isDeleted, true)
   console.log('Verified the real abandoned-room trigger compacts the tombstone and retains the historical revision')

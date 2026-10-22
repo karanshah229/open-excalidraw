@@ -57,6 +57,7 @@ async function runTest() {
         id,
         projectId: proj.id,
         name: 'Undo Test Board',
+        active: true,
         scene: {
           elements: [],
           appState: { viewBackgroundColor: '#ffffff' },
@@ -152,7 +153,17 @@ async function runTest() {
     await page2.keyboard.down('Meta')
     await page2.keyboard.press('KeyZ')
     await page2.keyboard.up('Meta')
-    await sleep(600)
+    await page2.waitForFunction(
+      () => window.__excalidrawAPI.getSceneElements().filter((element) => !element.isDeleted).length === 0,
+      { timeout: 10000 },
+    )
+    await page1.waitForFunction(
+      () => window.__excalidrawAPI.getSceneElements().filter((element) => !element.isDeleted).length === 0,
+      { timeout: 10000 },
+    )
+    await page2.waitForFunction(() => window.__hasUnsavedChanges && !window.__hasUnsavedChanges(), {
+      timeout: 10000,
+    })
 
     const elementCountAfterUndo = await page2.evaluate(() => {
       return window.__excalidrawAPI.getSceneElements().filter((e) => !e.isDeleted).length

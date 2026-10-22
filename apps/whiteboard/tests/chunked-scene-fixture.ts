@@ -14,7 +14,7 @@ function environment() {
     throw new Error('Requires demo regression emulators.')
   return { app, db: getFirestoreDb()!, uid: getFirebaseAuth()!.currentUser?.uid ?? '' }
 }
-export async function stageScene(boardId: string, scene: any, base?: { headRevisionId: string; generation: number }) {
+export async function stageScene(boardId: string, scene: any, base?: { headRevisionId: string; generation: number; restoreFence?: number }) {
   await getFirebaseAuth()!.authStateReady()
   const { db, uid } = environment()
   const head = base ?? (await getDocFromServer(doc(db, 'boardScenes', boardId))).data()!
@@ -37,6 +37,7 @@ export async function stageScene(boardId: string, scene: any, base?: { headRevis
       chunkCount: refs.length,
       newChunkCount: refs.length,
       candidateDigest: await manifestDigest(refs, head.generation),
+      expectedFence: head.restoreFence ?? 0,
     })
   } catch (error) {
     const current = (await getDocFromServer(doc(db, 'boardScenes', boardId))).data()

@@ -7,6 +7,7 @@ import {
   onChildChanged,
   onDisconnect,
   remove,
+  runTransaction,
   goOnline,
   goOffline,
   type Database,
@@ -16,6 +17,21 @@ import { mintSceneConnectionEpoch } from './connection-epoch-service'
 import type { CollaboratorPresence, CollabUser, ElementDeltaRecord } from './types'
 
 export const MAX_ELEMENT_PAYLOAD_BYTES = 262144 // 256KB
+
+/** RTDB must retain the same deterministic LWW winner as scene reconciliation. */
+export function shouldReplaceElementRecord(current: any, candidate: any): boolean {
+  if (!current) return true
+  const currentVersion = Number(current.version ?? 0)
+  const candidateVersion = Number(candidate.version ?? 0)
+  if (candidateVersion !== currentVersion) return candidateVersion > currentVersion
+  return Number(candidate.versionNonce ?? 0) < Number(current.versionNonce ?? 0)
+}
+
+/** RTDB websocket frames slice JS strings; ASCII escapes keep surrogate pairs intact. */
+export function serializeCanonicalElement(element: Record<string, unknown>): string {
+  return JSON.stringify(element).replace(/[\u0080-\uffff]/g, (unit) =>
+    `\\u${unit.charCodeAt(0).toString(16).padStart(4, '0')}`)
+}
 
 export function cleanPayload<T extends Record<string, any>>(obj: T): T {
   const clean: any = {}
@@ -42,6 +58,31 @@ export class CollaborationService {
   private isConnected: boolean = false
   private activeBoardId: string | null = null
   private connectionEpoch: string | null = null
+
+  private boardContexts = new Map<string, { generation?: number; fence: number; blocked: boolean }>()
+
+  /** Legacy callers retain their room until the server advertises the history protocol. */
+  setBoardContext(boardId: string, generation: number | undefined, fence = 0, blocked = false) {
+    this.boardContexts.set(boardId, { generation, fence, blocked })
+  }
+
+  presencePath(boardId: string, sessionId?: string) {
+    const generation = this.boardContexts.get(boardId)?.generation
+    const root = generation === undefined ? `presence/${boardId}` : `presence/${boardId}/generations/${generation}`
+    return sessionId ? `${root}/${sessionId}` : root
+  }
+
+  private elementsPath(boardId: string) {
+    const generation = this.boardContexts.get(boardId)?.generation
+    return generation === undefined
+      ? `boards/${boardId}/elements`
+      : `boards/${boardId}/generations/${generation}/elements`
+  }
+
+  private contextFields(boardId: string) {
+    const context = this.boardContexts.get(boardId)
+    return context?.generation === undefined ? {} : { generation: context.generation, restoreFence: context.fence }
+  }
 
   constructor(rtdb?: Database, storage?: FirebaseStorage) {
     this.rtdb = rtdb
@@ -98,14 +139,14 @@ export class CollaborationService {
     this.activeBoardId = boardId
     this.connectionEpoch = null
     this.isConnected = false
-    const presenceRef = ref(this.rtdb, `presence/${boardId}/${user.sessionId}`)
+    const presenceRef = ref(this.rtdb, this.presencePath(boardId, user.sessionId))
     const epochTokenRef = ref(this.rtdb, `system/sceneConnectionEpochs/${boardId}/${user.sessionId}/token`)
     const connectedRef = ref(this.rtdb, '.info/connected')
     let connectionAttempt = 0
     let disposed = false
 
     const publishPresence = async (attempt: number, refreshScene = true) => {
-      if (!this.rtdb || !this.activeSessionId) return
+      if (!this.rtdb || !this.activeSessionId || this.boardContexts.get(boardId)?.blocked) return
       try {
         // Pause all deltas until this connection's fresh epoch is authorized.
         this.connectionEpoch = null
@@ -123,6 +164,7 @@ export class CollaborationService {
 
         // 2. Set full presence state (clean payload to prevent RTDB undefined errors)
         const presencePayload = cleanPayload({
+          ...this.contextFields(boardId),
           userId: user.uid,
           sessionId: user.sessionId,
           connectionEpoch,
@@ -260,15 +302,17 @@ export class CollaborationService {
   ): Promise<void> {
     const validCursor =
       cursor && Number.isFinite(cursor.x) && Number.isFinite(cursor.y) ? { x: cursor.x, y: cursor.y } : null
+    if (this.boardContexts.get(boardId)?.blocked) return
     this.currentCursor = validCursor
     this.currentSelectedElementIds = selectedElementIds
     if (!this.rtdb) return
     try {
       if (!this.connectionEpoch || this.activeBoardId !== boardId || this.activeSessionId !== sessionId) return
-      const presenceRef = ref(this.rtdb, `presence/${boardId}/${sessionId}`)
+      const presenceRef = ref(this.rtdb, this.presencePath(boardId, sessionId))
       await update(
         presenceRef,
         cleanPayload({
+          ...this.contextFields(boardId),
           cursor: validCursor,
           selectedElementIds,
           lastSeen: Date.now(),
@@ -284,8 +328,8 @@ export class CollaborationService {
    */
   async injectPresence(boardId: string, presence: CollaboratorPresence): Promise<void> {
     if (!this.rtdb) return
-    const presenceRef = ref(this.rtdb, `presence/${boardId}/${presence.sessionId}`)
-    await set(presenceRef, cleanPayload(presence))
+    const presenceRef = ref(this.rtdb, this.presencePath(boardId, presence.sessionId))
+    await set(presenceRef, cleanPayload({ ...presence, ...this.contextFields(boardId) }))
   }
 
   /**
@@ -293,7 +337,7 @@ export class CollaborationService {
    */
   async removePresence(boardId: string, sessionId: string): Promise<void> {
     if (!this.rtdb) return
-    const presenceRef = ref(this.rtdb, `presence/${boardId}/${sessionId}`)
+    const presenceRef = ref(this.rtdb, this.presencePath(boardId, sessionId))
     await remove(presenceRef)
   }
 
@@ -307,7 +351,7 @@ export class CollaborationService {
     callback: (activeCollaborators: CollaboratorPresence[]) => void,
   ): () => void {
     if (!this.rtdb) return () => {}
-    const roomPresenceRef = ref(this.rtdb, `presence/${boardId}`)
+    const roomPresenceRef = ref(this.rtdb, this.presencePath(boardId))
 
     let latestRawPresence: Record<string, CollaboratorPresence> = {}
 
@@ -369,7 +413,14 @@ export class CollaborationService {
     authorUid: string,
     previousElementsMap?: Map<string, any>,
   ): Promise<void> {
-    if (!this.rtdb || elements.length === 0 || !this.connectionEpoch || this.activeBoardId !== boardId || !this.activeSessionId) return
+    if (
+      !this.rtdb ||
+      elements.length === 0 ||
+      !this.connectionEpoch ||
+      this.activeBoardId !== boardId ||
+      !this.activeSessionId ||
+      this.boardContexts.get(boardId)?.blocked
+    ) return
 
     const now = Date.now()
     const updates: Record<string, ElementDeltaRecord> = {}
@@ -378,14 +429,16 @@ export class CollaborationService {
       if (!elem || !elem.id) continue
 
       const canonicalElement = cleanPayload({ ...elem, lastModifiedBy: authorUid })
-      const serialized = JSON.stringify(canonicalElement)
+      const serialized = serializeCanonicalElement(canonicalElement)
 
-      if (serialized.length > MAX_ELEMENT_PAYLOAD_BYTES) {
+      // ASCII length equals UTF-8 bytes; rules require strictly less than 256KiB.
+      if (serialized.length >= MAX_ELEMENT_PAYLOAD_BYTES) {
         console.warn(`[Collab] Element ${elem.id} exceeds 256KB payload limit. Skipping broadcast.`)
         continue
       }
 
-      updates[`boards/${boardId}/elements/${elem.id}`] = {
+      updates[`${this.elementsPath(boardId)}/${elem.id}`] = {
+        ...this.contextFields(boardId),
         id: elem.id,
         version: Number(elem.version ?? 1),
         versionNonce: Number(elem.versionNonce ?? 0),
@@ -397,14 +450,16 @@ export class CollaborationService {
       }
     }
 
-    if (Object.keys(updates).length > 0) {
+    await Promise.all(Object.entries(updates).map(async ([path, candidate]) => {
       try {
-        const rootRef = ref(this.rtdb)
-        await update(rootRef, updates)
+        await runTransaction(ref(this.rtdb!, path), (current) =>
+          shouldReplaceElementRecord(current, candidate) ? candidate : undefined,
+          { applyLocally: false },
+        )
       } catch (err: any) {
         console.warn('[Collab] Element delta broadcast deferred or offline:', err?.message)
       }
-    }
+    }))
   }
 
   /**
@@ -412,9 +467,15 @@ export class CollaborationService {
    */
   subscribeToElements(boardId: string, onDeltaReceived: (element: any, meta: ElementDeltaRecord) => void): () => void {
     if (!this.rtdb) return () => {}
-    const elementsRef = ref(this.rtdb, `boards/${boardId}/elements`)
+    const elementsRef = ref(this.rtdb, this.elementsPath(boardId))
 
+    const subscribedGeneration = this.boardContexts.get(boardId)?.generation
     const handleSnapshot = (snap: any) => {
+      if (
+        this.boardContexts.get(boardId)?.blocked ||
+        this.boardContexts.get(boardId)?.generation !== subscribedGeneration
+      )
+        return
       const val = snap.val() as ElementDeltaRecord | null
       if (!val || !val.data) return
       try {
@@ -448,7 +509,7 @@ export class CollaborationService {
   async clearBoardElements(boardId: string): Promise<void> {
     if (!this.rtdb) return
     try {
-      const elementsRef = ref(this.rtdb, `boards/${boardId}/elements`)
+      const elementsRef = ref(this.rtdb, this.elementsPath(boardId))
       await remove(elementsRef)
     } catch {
       // ignore
@@ -467,7 +528,8 @@ export class CollaborationService {
    * Prunes deleted tombstones and uploads full scene snapshot to Firebase Storage.
    */
   async saveSceneSnapshot(boardId: string, elements: any[], appState: Record<string, unknown>): Promise<void> {
-    if (!this.storage) return
+    // Canonical chunk publication owns snapshots once history is enabled.
+    if (!this.storage || this.boardContexts.get(boardId)?.generation !== undefined) return
 
     // Prune deleted elements older than 5 minutes
     const cleanElements = elements.filter((e) => !e.isDeleted)

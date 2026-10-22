@@ -10,6 +10,7 @@ const { getAuth, connectAuthEmulator, signInAnonymously, signOut } = require('fi
 const { getDatabase, connectDatabaseEmulator, ref, set, remove, onDisconnect, goOffline, goOnline, onValue } = require('firebase/database')
 const { initializeApp: initializeAdminApp, deleteApp: deleteAdminApp } = createRequire(new URL('../functions/package.json', import.meta.url))('firebase-admin/app')
 const { getDatabase: getAdminDatabase } = createRequire(new URL('../functions/package.json', import.meta.url))('firebase-admin/database')
+const { getFirestore: getAdminFirestore, Timestamp } = createRequire(new URL('../functions/package.json', import.meta.url))('firebase-admin/firestore')
 const { runWithAbandonedRoomFence } = await import('../functions/lib/scene-collaboration-fence.js')
 const { pruneCheckpointedRecords } = await import('../functions/lib/scene-compaction-cleanup.js')
 const { mintSceneConnectionEpochForSession } = await import('../functions/lib/scene-connection-epoch.js')
@@ -18,6 +19,7 @@ const projectId = 'demo-regression'
 const boardId = `maintenance-fence-${Date.now()}`
 const adminApp = initializeAdminApp({ projectId, databaseURL: `https://${projectId}-default-rtdb.firebaseio.com` }, `fence-admin-${Date.now()}`)
 const adminDb = getAdminDatabase(adminApp)
+const adminFirestore = getAdminFirestore(adminApp)
 const clientApp = initializeApp({ apiKey: 'demo-key', authDomain: `${projectId}.firebaseapp.com`, projectId, databaseURL: `https://${projectId}-default-rtdb.firebaseio.com` }, `fence-client-${Date.now()}`)
 const auth = getAuth(clientApp)
 connectAuthEmulator(auth, 'http://127.0.0.1:49099', { disableWarnings: true })
@@ -58,6 +60,111 @@ try {
   await denied(set(ref(db, `${presencePath}/${uid}`), presenceRecord(firstEpoch.connectionEpoch)), 'reconnect must reject a queued old presence replay')
   await set(ref(db, `${presencePath}/${uid}`), presenceRecord(currentEpoch))
   await set(ref(db, `${boardPath}/element-1`), deltaRecord(currentEpoch, 2))
+
+  // A pre-fence session may have an epoch token but no admissionEpoch field.
+  // It remains valid only until the first maintenance fence advances the board epoch.
+  const admissionBoard = `${boardId}-admission-epoch`
+  const admissionSession = 'legacy-session'
+  await adminDb.ref(`boardAccess/${admissionBoard}`).set({
+    ownerId: uid, ownerActive: true, projectId: `project-${admissionBoard}`, blocked: false,
+  })
+  await adminDb.ref(`boards/${admissionBoard}`).update({ generation: 1, restoreFence: 0 })
+  const legacyEpoch = await mintSceneConnectionEpochForSession({ uid }, admissionBoard, admissionSession, 1, adminDb)
+  const legacyEpochRef = adminDb.ref(`system/sceneConnectionEpochs/${admissionBoard}/${admissionSession}`)
+  await legacyEpochRef.child('admissionEpoch').remove()
+  const admissionPresenceRef = ref(db, `presence/${admissionBoard}/${admissionSession}`)
+  const generationPresenceRef = ref(db, `presence/${admissionBoard}/generations/1/${admissionSession}`)
+  const admissionDeltaRef = ref(db, `boards/${admissionBoard}/elements/legacy-element`)
+  const legacyPresence = (lastSeen = Date.now()) => ({
+    ...presenceRecord(legacyEpoch.connectionEpoch), sessionId: admissionSession, lastSeen,
+  })
+  const legacyDelta = (version = 1) => ({
+    ...deltaRecord(legacyEpoch.connectionEpoch, version), id: 'legacy-element', sessionId: admissionSession,
+  })
+  const generationPresence = (connectionEpoch, lastSeen = Date.now()) => ({
+    ...legacyPresence(lastSeen), connectionEpoch, generation: 1, restoreFence: 0,
+  })
+  await set(admissionPresenceRef, legacyPresence())
+  await set(generationPresenceRef, generationPresence(legacyEpoch.connectionEpoch))
+  // The pre-fence compatibility case is an existing presence/epoch record;
+  // scene deltas use the strict current write contract.
+  await remove(admissionPresenceRef)
+  await remove(generationPresenceRef)
+
+  let closedAdmissionEpoch
+  const firstAdmissionFence = await runWithAbandonedRoomFence({
+    rtdb: adminDb,
+    boardId: admissionBoard,
+    lockToken: `epoch-fence-${boardId}`,
+    lockDurationMs: 120_000,
+    work: async () => {
+      const gate = (await adminDb.ref(`system/sceneMaintenance/${admissionBoard}`).get()).val()
+      closedAdmissionEpoch = gate.admissionEpoch
+      assert.equal(gate.admissionClosed, true)
+      assert.equal(closedAdmissionEpoch, 1, 'the first fence advances the admission epoch from its implicit zero')
+      await adminDb.ref(`presence/${admissionBoard}/${admissionSession}`).set(legacyPresence())
+      await adminDb.ref(`presence/${admissionBoard}/generations/1/${admissionSession}`).set(generationPresence(legacyEpoch.connectionEpoch))
+      await denied(set(admissionPresenceRef, legacyPresence(Date.now() + 1)), 'old token must be denied while admission is closed')
+      await denied(set(generationPresenceRef, generationPresence(legacyEpoch.connectionEpoch, Date.now() + 1)), 'old token must not recreate generation-scoped presence while admission is closed')
+      await denied(set(admissionDeltaRef, legacyDelta(2)), 'old token delta must be denied while admission is closed')
+      await assert.rejects(
+        mintSceneConnectionEpochForSession({ uid }, admissionBoard, admissionSession, 1, adminDb),
+        (error) => error?.code === 'unavailable',
+        'minting a connection while admission is closed must fail',
+      )
+      await adminDb.ref(`presence/${admissionBoard}/${admissionSession}`).remove()
+      await adminDb.ref(`presence/${admissionBoard}/generations/1/${admissionSession}`).remove()
+      return 'old-token-rejected-while-closed'
+    },
+  })
+  assert.deepEqual(firstAdmissionFence, { status: 'completed', value: 'old-token-rejected-while-closed' })
+  const reopenedGate = (await adminDb.ref(`system/sceneMaintenance/${admissionBoard}`).get()).val()
+  assert.equal(reopenedGate.admissionClosed, false)
+  assert.equal(reopenedGate.admissionEpoch, closedAdmissionEpoch, 'reopening must preserve the advanced epoch')
+  await adminDb.ref(`presence/${admissionBoard}/${admissionSession}`).set(legacyPresence())
+  await adminDb.ref(`presence/${admissionBoard}/generations/1/${admissionSession}`).set(generationPresence(legacyEpoch.connectionEpoch))
+  await denied(set(admissionPresenceRef, legacyPresence(Date.now() + 1)), 'pre-fence token must remain denied after reopening')
+  await denied(set(generationPresenceRef, generationPresence(legacyEpoch.connectionEpoch, Date.now() + 1)), 'old token must not recreate generation-scoped presence after reopening')
+  await denied(set(admissionDeltaRef, legacyDelta(2)), 'pre-fence delta must remain denied after reopening')
+  const postFenceEpoch = await mintSceneConnectionEpochForSession({ uid }, admissionBoard, admissionSession, 1, adminDb)
+  assert.equal((await legacyEpochRef.get()).val().admissionEpoch, closedAdmissionEpoch)
+  await set(admissionPresenceRef, {
+    ...legacyPresence(), connectionEpoch: postFenceEpoch.connectionEpoch,
+  })
+  await set(generationPresenceRef, generationPresence(postFenceEpoch.connectionEpoch))
+  await set(admissionDeltaRef, {
+    ...legacyDelta(2), connectionEpoch: postFenceEpoch.connectionEpoch,
+  })
+
+  // Model the generation-reset admission transition: the same monotonic epoch
+  // advances before the room generation changes, fencing the prior session.
+  await adminDb.ref(`system/sceneMaintenance/${admissionBoard}`).update({
+    admissionClosed: true,
+    admissionEpoch: closedAdmissionEpoch + 1,
+  })
+  await adminDb.ref(`boards/${admissionBoard}/generation`).set(2)
+  await denied(set(admissionPresenceRef, {
+    ...legacyPresence(Date.now() + 2), connectionEpoch: postFenceEpoch.connectionEpoch,
+  }), 'pre-reset token must be denied during the generation reset gate')
+  await denied(set(admissionDeltaRef, {
+    ...legacyDelta(3), connectionEpoch: postFenceEpoch.connectionEpoch,
+  }), 'pre-reset delta must be denied during the generation reset gate')
+  await assert.rejects(
+    mintSceneConnectionEpochForSession({ uid }, admissionBoard, admissionSession, 2, adminDb),
+    (error) => error?.code === 'unavailable',
+    'generation reset must not mint a token while its gate is closed',
+  )
+  await adminDb.ref(`system/sceneMaintenance/${admissionBoard}`).update({ admissionClosed: false })
+  const postResetEpoch = await mintSceneConnectionEpochForSession({ uid }, admissionBoard, admissionSession, 2, adminDb)
+  assert.equal((await legacyEpochRef.get()).val().admissionEpoch, closedAdmissionEpoch + 1)
+  assert.equal((await adminDb.ref(`system/sceneMaintenance/${admissionBoard}/admissionEpoch`).get()).val(), closedAdmissionEpoch + 1)
+  await set(admissionPresenceRef, {
+    ...legacyPresence(), sceneGeneration: 2, connectionEpoch: postResetEpoch.connectionEpoch,
+  })
+  await set(admissionDeltaRef, {
+    ...legacyDelta(3), connectionEpoch: postResetEpoch.connectionEpoch, generation: 2,
+  })
+  console.log('PASS monotonic admission epochs fence legacy, closed-gate, and pre-reset sessions')
 
   const generationBoard = `${boardId}-session-generation`
   await adminDb.ref(`boardAccess/${generationBoard}`).set({ ownerId: uid, ownerActive: true, projectId: `project-${generationBoard}`, blocked: false })
@@ -181,6 +288,38 @@ try {
   assert.equal(resetProtectedWorkRan, false, 'compactor cannot replace a durable reset gate')
   assert.equal((await adminDb.ref(`system/sceneMaintenance/${resetOwnedBoard}`).get()).child('admissionOwner').val(), 'reset-token')
 
+  const crashedBoard = `${boardId}-crashed-compaction`
+  const expiredOwner = `expired-${boardId}`
+  await adminDb.ref(`system/compactionLocks/${crashedBoard}`).set({ startedAt: Date.now() - 180_001, token: expiredOwner })
+  await adminDb.ref(`system/sceneMaintenance/${crashedBoard}`).set({ admissionClosed: true, admissionOwner: expiredOwner, admissionEpoch: 4 })
+  await adminFirestore.doc(`boardScenes/${crashedBoard}`).set({ maintenanceAdmission: 'closed', maintenanceEpoch: 7 })
+  await adminFirestore.doc(`boardScenes/${crashedBoard}/maintenance/control`).set({
+    admission: 'closed', epoch: 7, token: expiredOwner, abandonedRoomOwner: expiredOwner,
+    leaseUntil: Timestamp.fromMillis(Date.now() - 1),
+  })
+  const recoveryResult = await runWithAbandonedRoomFence({
+    rtdb: adminDb, firestore: adminFirestore, boardId: crashedBoard,
+    lockToken: `recovery-${boardId}`, lockDurationMs: 180_000,
+    work: async () => {
+      const [head, control, gate] = await Promise.all([
+        adminFirestore.doc(`boardScenes/${crashedBoard}`).get(),
+        adminFirestore.doc(`boardScenes/${crashedBoard}/maintenance/control`).get(),
+        adminDb.ref(`system/sceneMaintenance/${crashedBoard}`).get(),
+      ])
+      assert.equal(head.data().maintenanceAdmission, 'open')
+      assert.equal(head.data().maintenanceEpoch, 8)
+      assert.equal(control.data().admission, 'open')
+      assert.equal(control.data().epoch, 8)
+      assert.equal(gate.child('admissionClosed').val(), true, 'replacement closes RTDB before resuming work')
+      assert.equal(gate.child('admissionOwner').val(), `recovery-${boardId}`)
+      assert.equal(gate.child('admissionEpoch').val(), 5, 'recovery advances the RTDB epoch before reopening Firestore')
+      return 'recovered-expired-firestore-fence'
+    },
+  })
+  assert.deepEqual(recoveryResult, { status: 'completed', value: 'recovered-expired-firestore-fence' })
+  assert.equal((await adminFirestore.doc(`boardScenes/${crashedBoard}`).get()).data().maintenanceAdmission, 'open')
+  assert.equal((await adminDb.ref(`system/sceneMaintenance/${crashedBoard}/admissionClosed`).get()).val(), false)
+
   const epochRecordRef = `system/sceneConnectionEpochs/${boardId}/${uid}`
   await adminDb.ref(gatePath).set(false)
   await onDisconnect(ref(db, `${epochRecordRef}/token`)).remove()
@@ -243,9 +382,11 @@ try {
     'abandoned-room worker refuses to replace a generation-reset-owned RTDB gate',
     'onDisconnect removes only the active token, preserves generation, and fences stale writes after reconnect',
     'old-generation sessions cannot mint a new epoch or write after room generation advances',
+    'expired Firestore fence recovery replaces the RTDB owner and advances both admission epochs',
   ] }, null, 2))
 } finally {
   await adminDb.ref(`system/sceneMaintenance/${boardId}`).remove()
+  await adminFirestore.recursiveDelete(adminFirestore.doc(`boardScenes/${boardId}-crashed-compaction`))
   await adminDb.ref(`boardAccess/${boardId}`).remove()
   await adminDb.ref(`boards/${boardId}`).remove()
   await adminDb.ref(`presence/${boardId}`).remove()

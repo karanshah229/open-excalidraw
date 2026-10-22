@@ -6,7 +6,8 @@ import { restoreSceneAssets, storeSceneAssets } from '../assets/scene-assets'
 import { workspaceStore, workspaceValue } from '../workspace/workspace-api'
 import type { BoardScene } from '@agentic-whiteboard/storage'
 import type { ActiveSessionRecord } from '../collaboration/types'
-import { sceneService } from '../scenes/scene-service'
+import { sceneService, type LoadedScene, type SceneHead } from '../scenes/scene-service'
+import { readCurrentHistoryContext } from '../history/history-service'
 
 export type ShareAccessLevel = 'restricted' | 'anyone_with_link'
 export type ShareRole = 'viewer' | 'editor' | 'presentation'
@@ -34,6 +35,8 @@ export interface BoardShareConfig {
   scene?: BoardScene
   sceneRevisionId?: string
   sceneGeneration?: number
+  historyReadContextId?: string
+  historyNotesPageCount?: number
   createdAt: string
   updatedAt: string
   accessRevision?: number
@@ -41,9 +44,38 @@ export interface BoardShareConfig {
   projectRole?: 'owner' | ShareRole | null
 }
 type SharedBoardResult = { status: 'allowed' | 'restricted' | 'not-found'; config?: BoardShareConfig }
-type KnownCanonicalScene = { scene: BoardScene; revisionId: string; generation: number }
+type KnownCanonicalScene = Pick<LoadedScene, 'scene' | 'revisionId' | 'generation' | 'readContextId' | 'notesPageCount'>
 type KnownCanonicalSceneInput = KnownCanonicalScene | undefined | Promise<KnownCanonicalScene | undefined>
 const sharedBoardReadsInFlight = new Map<string, Promise<SharedBoardResult>>()
+
+async function loadSharedCanonicalScene(boardId: string): Promise<KnownCanonicalScene | null> {
+  let loaded = await sceneService.load(boardId)
+  for (let attempt = 0; loaded && attempt < 2; attempt++) {
+    if (loaded.historyProtocolVersion !== 1) {
+      return {
+        scene: loaded.scene,
+        revisionId: loaded.revisionId,
+        generation: loaded.generation,
+      }
+    }
+    const context = await readCurrentHistoryContext(boardId)
+    if (context && context.revisionId === loaded.revisionId && context.generation === loaded.generation) {
+      return {
+        scene: loaded.scene,
+        revisionId: loaded.revisionId,
+        generation: loaded.generation,
+        readContextId: context.contextId,
+        notesPageCount: context.notesPageCount,
+      }
+    }
+    // The head moved between the scene pin and history-context acquisition.
+    // Retry once from a fresh scene pin; never combine context and bytes from
+    // different revisions.
+    if (attempt === 0) loaded = await sceneService.loadUnshared(boardId)
+  }
+  if (loaded) throw new Error('The board changed while opening it. Retry loading the board.')
+  return null
+}
 
 /** Matches the strongest grant used when opening a shared board. */
 export function policyRole(
@@ -225,6 +257,7 @@ export const sharingService = {
     onError?: (error: any) => void,
     getKnownFiles?: () => BoardScene['files'],
     initialConfig?: BoardShareConfig,
+    getKnownScene?: () => Pick<LoadedScene, 'scene' | 'revisionId' | 'generation'> | undefined,
   ): () => void {
     const db = getFirestoreDb()
     if (!db) return () => {}
@@ -306,7 +339,7 @@ export const sharingService = {
         },
       )
     }
-    const refresh = () => {
+    const refresh = (head?: SceneHead) => {
       if (disposed) return
       const current = ++generation
       const user = getFirebaseAuth()?.currentUser
@@ -314,10 +347,19 @@ export const sharingService = {
         .catch(() => {})
         .then(async () => {
           if (disposed || current !== generation) return
-          const result = await sharingService.getSharedBoard(boardId, user?.email, user?.uid, {
-            ...knownFiles,
-            ...getKnownFiles?.(),
-          })
+          const knownScene = getKnownScene?.()
+          // Reuse the revision already hydrated by the route for policy/head
+          // snapshots. Fetch scene bytes again only after a newer head arrives.
+          const reusableScene = knownScene && (!head || head.headRevisionId === knownScene.revisionId)
+            ? knownScene : undefined
+          const result = await sharingService.getSharedBoard(
+            boardId,
+            user?.email,
+            user?.uid,
+            { ...knownFiles, ...getKnownFiles?.() },
+            true,
+            reusableScene,
+          )
           // Retain the first transfer for queued snapshots of immutable image bytes.
           knownFiles = { ...knownFiles, ...result.config?.scene?.files }
 
@@ -340,7 +382,7 @@ export const sharingService = {
           ) {
             parentUnsubscribe?.()
             parentId = result.config.projectId
-            parentUnsubscribe = onSnapshot(doc(db, 'projectShares', parentId), refresh, () => {
+            parentUnsubscribe = onSnapshot(doc(db, 'projectShares', parentId), () => refresh(), () => {
               parentUnsubscribe = undefined
               // A direct board grant can survive loss of project membership.
               // Reauthorize the board rather than treating the parent as its ACL.
@@ -360,7 +402,7 @@ export const sharingService = {
     // skip a redundant scene read; still subscribe to inherited project policy.
     if (initialConfig?.projectId && initialConfig.projectRole) {
       parentId = initialConfig.projectId
-      parentUnsubscribe = onSnapshot(doc(db, 'projectShares', parentId), refresh, () => {
+      parentUnsubscribe = onSnapshot(doc(db, 'projectShares', parentId), () => refresh(), () => {
         parentUnsubscribe = undefined
         scheduleRetry()
       })
@@ -447,13 +489,7 @@ export const sharingService = {
       Promise.resolve(knownCanonical).then(async (known) => {
         if (known) return { ok: true, scene: known }
         try {
-          const loaded = await sceneService.load(boardId)
-          return {
-            ok: true,
-            scene: loaded
-              ? { scene: loaded.scene, revisionId: loaded.revisionId, generation: loaded.generation }
-              : null,
-          }
+          return { ok: true, scene: await loadSharedCanonicalScene(boardId) }
         } catch (error) {
           return { ok: false, error }
         }
@@ -468,15 +504,14 @@ export const sharingService = {
         let canonical = initialRead.scene
         if (!canonical) {
           await sceneService.ensure(boardId, remoteData!.projectId)
-          const loaded = await sceneService.load(boardId)
-          canonical = loaded
-            ? { scene: loaded.scene, revisionId: loaded.revisionId, generation: loaded.generation }
-            : null
+          canonical = await loadSharedCanonicalScene(boardId)
         }
         if (canonical) {
-          remoteData!.scene = await restoreSceneAssets(canonical.scene, knownFiles)
+          remoteData!.scene = await restoreSceneAssets(canonical.scene, knownFiles, canonical.readContextId)
           remoteData!.sceneRevisionId = canonical.revisionId
           remoteData!.sceneGeneration = canonical.generation
+          remoteData!.historyReadContextId = canonical.readContextId
+          remoteData!.historyNotesPageCount = canonical.notesPageCount
         } else if (remoteData!.scene) remoteData!.scene = await restoreSceneAssets(remoteData!.scene, knownFiles)
       } catch (error: any) {
         if (error?.code === 'functions/permission-denied' || error?.code === 'permission-denied') {

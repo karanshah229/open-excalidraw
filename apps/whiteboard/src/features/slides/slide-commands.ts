@@ -62,6 +62,35 @@ export function commitSlideCommand(api: ExcalidrawImperativeAPI, command: SlideC
   })
 }
 
+/** Convert selected native frames in place, preserving membership and one undo step. */
+export function convertSelectedFramesToSlides(api: ExcalidrawImperativeAPI): string[] {
+  const elements = api.getSceneElementsIncludingDeleted()
+  const selectedIds = api.getAppState().selectedElementIds
+  const frames = elements.filter(
+    (element) =>
+      selectedIds[element.id] &&
+      element.type === 'frame' &&
+      !element.isDeleted &&
+      [element.x, element.y, element.width, element.height].every(Number.isFinite) &&
+      element.width > 0 &&
+      element.height > 0,
+  )
+  const updates = new Map<string, ExcalidrawElement>()
+  let key = newSlideData(elements).agenticWhiteboard.slide.orderKey
+  for (const frame of frames) {
+    if (slideMetadata(frame)) continue
+    updates.set(frame.id, newElementWith(frame, { customData: slideCustomData(frame, key) }))
+    key = orderBetween(key)
+  }
+  if (updates.size) {
+    api.updateScene({
+      elements: elements.map((element) => updates.get(element.id) ?? element),
+      captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+    })
+  }
+  return frames.map((frame) => frame.id)
+}
+
 /** Invoked by native duplication before its scene transaction is committed. */
 export function normalizeDuplicatedSlides(next: readonly ExcalidrawElement[], previous: readonly ExcalidrawElement[]) {
   const known = new Set(previous.map((element) => element.id))

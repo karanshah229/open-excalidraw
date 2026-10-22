@@ -11,6 +11,8 @@ import { checkpointScene, ensureScene } from './board-scenes.js';
 import { collectQuarantinedOrphanChunks, quarantineSceneOrphanChunks } from './scene-maintenance-gc.js';
 import { mintSceneConnectionEpochForSession } from './scene-connection-epoch.js';
 export { ensureBoardScene, commitBoardScene, beginBoardSceneUpload, stageBoardSceneChunk, stageBoardScenePage, acquireBoardSceneReadPin, createNamedBoardSceneVersion, prepareBoardSceneGenerationReset, listNamedBoardSceneVersions, acquireNamedBoardSceneVersionReadPin, readBoardScenePage, readBoardSceneChunks, renewBoardSceneReadPin, releaseBoardSceneReadPin, repackBoardScene, } from './board-scenes.js';
+export { boardHistory, updateBoardContent, restoreBoardVersion, importBoardVersion } from './board-history.js';
+export { cleanupExpiredBoardHistory, recoverBoardRestores } from './board-history-cleanup.js';
 import { mirrorCurrentPolicy } from './project-access.js';
 export { manageProject, manageBoardAccess, listSharedProjects, createProjectBoard, mirrorProjectAccess, publishProjectBoard, } from './project-access.js';
 initializeApp();
@@ -73,6 +75,8 @@ function mergeDeltas(baseElements, records) {
 export const compactAbandonedCollaborationRoom = onValueDeleted({ ref: '/presence/{boardId}/{sessionId}', region: rtdbFunctionRegion, timeoutSeconds: 120 }, async (event) => {
     const boardId = event.params.boardId;
     const rtdb = getDatabase();
+    if ((await rtdb.ref(`boards/${boardId}/historyProtocolVersion`).get()).val() === 1)
+        return;
     const firestore = getFirestore();
     const presenceRef = rtdb.ref(`presence/${boardId}`);
     if ((await presenceRef.get()).exists())
@@ -84,6 +88,7 @@ export const compactAbandonedCollaborationRoom = onValueDeleted({ ref: '/presenc
     const elementsRef = rtdb.ref(`boards/${boardId}/elements`);
     await runWithAbandonedRoomFence({
         rtdb,
+        firestore,
         boardId,
         lockToken,
         lockDurationMs: COMPACTION_LOCK_MS,
@@ -103,7 +108,7 @@ export const compactAbandonedCollaborationRoom = onValueDeleted({ ref: '/presenc
                 if ((room == null && head.generation !== 1) || (room != null && room !== head.generation))
                     return false;
                 try {
-                    await checkpointScene(boardId, (scene) => ({ ...scene, elements: mergeDeltas(scene.elements, records) }), head, actor, { compactTombstones: tombstoneCompactionEnabled.value() });
+                    await checkpointScene(boardId, (scene) => ({ ...scene, elements: mergeDeltas(scene.elements, records) }), head, actor, { compactTombstones: tombstoneCompactionEnabled.value(), closeAdmissionOwner: lockToken });
                     compacted = true;
                     break;
                 }
@@ -117,6 +122,84 @@ export const compactAbandonedCollaborationRoom = onValueDeleted({ ref: '/presenc
                 await pruneCheckpointedRecords(elementsRef, presenceRef, deltaSnapshot.val());
             }
             return compacted;
+        },
+    });
+});
+/** History rooms have an immutable generation path; abandoned old rooms cannot checkpoint the new universe. */
+export const compactAbandonedGenerationRoom = onValueDeleted({ ref: '/presence/{boardId}/generations/{generation}/{sessionId}', region: rtdbFunctionRegion, timeoutSeconds: 120 }, async (event) => {
+    const boardId = event.params.boardId, generation = Number(event.params.generation);
+    if (!Number.isSafeInteger(generation) || generation < 1)
+        return;
+    const rtdb = getDatabase(), firestore = getFirestore();
+    const presenceRef = rtdb.ref(`presence/${boardId}/generations/${generation}`);
+    if ((await presenceRef.get()).exists())
+        return;
+    await new Promise((resolve) => setTimeout(resolve, GRACE_PERIOD_MS));
+    if ((await presenceRef.get()).exists())
+        return;
+    const lockToken = `${event.id}-${Date.now()}`;
+    const elementsRef = rtdb.ref(`boards/${boardId}/generations/${generation}/elements`);
+    await runWithAbandonedRoomFence({
+        rtdb,
+        firestore,
+        boardId,
+        lockToken,
+        lockDurationMs: COMPACTION_LOCK_MS,
+        work: async () => {
+            const deltas = await elementsRef.get();
+            if (!deltas.exists())
+                return false;
+            const roomRef = rtdb.ref(`boards/${boardId}`), room = (await roomRef.get()).val(), headRef = firestore.doc(`boardScenes/${boardId}`), head = (await headRef.get()).data();
+            if (!head ||
+                head.historyProtocolVersion !== 1 ||
+                head.generation !== generation ||
+                head.restoreOperationId ||
+                room?.historyProtocolVersion !== 1 ||
+                room?.generation !== generation ||
+                room?.restoreOperationId)
+                return false;
+            const share = (await firestore.doc(`boardShares/${boardId}`).get()).data();
+            if (!share || share.deletedAt || share.pending)
+                return false;
+            const actor = { uid: share.ownerId, trusted: true }, records = Object.values((deltas.val() ?? {}));
+            let checkpointed = false;
+            for (let attempt = 0; attempt < 4; attempt++) {
+                const latest = (await headRef.get()).data();
+                if (!latest || latest.generation !== generation || latest.restoreOperationId)
+                    return false;
+                try {
+                    await checkpointScene(boardId, (scene) => ({ ...scene, elements: mergeDeltas(scene.elements, records) }), latest, actor, { compactTombstones: tombstoneCompactionEnabled.value(), closeAdmissionOwner: lockToken });
+                    checkpointed = true;
+                    break;
+                }
+                catch (error) {
+                    if (error.code !== 'aborted')
+                        throw error;
+                }
+            }
+            if (!checkpointed)
+                return false;
+            // The regression harness uses this emulator-only hold to exercise a
+            // fresh editor attempting a load/write between checkpoint and RTDB prune.
+            const testHoldMs = Number(process.env.SCENE_COMPACTION_TEST_HOLD_MS ?? 0);
+            if (process.env.GCLOUD_PROJECT === 'demo-regression' && Number.isFinite(testHoldMs) && testHoldMs > 0)
+                await new Promise((resolve) => setTimeout(resolve, Math.min(testHoldMs, 10_000)));
+            // The shared gate remains closed through this check and conditional pruning.
+            // Never prune an old room after a concurrent restore/reset has switched heads.
+            const [latest, latestRoom, currentPresence] = await Promise.all([
+                headRef.get(),
+                roomRef.get(),
+                presenceRef.get(),
+            ]);
+            const latestHead = latest.data(), latestRoomData = latestRoom.val();
+            if (latestHead?.generation !== generation ||
+                latestHead.restoreOperationId ||
+                latestRoomData?.generation !== generation ||
+                latestRoomData?.restoreOperationId ||
+                currentPresence.exists())
+                return false;
+            await pruneCheckpointedRecords(elementsRef, presenceRef, deltas.val());
+            return true;
         },
     });
 });

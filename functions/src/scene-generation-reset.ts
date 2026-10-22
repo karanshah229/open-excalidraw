@@ -109,6 +109,7 @@ export const fenceBoardSceneGenerationReset = onCall({ region, enforceAppCheck: 
         phase: 'generation-reset', leaseUntil, updatedAt: now }
       if (control) tx.update(controlRef, nextControl)
       else tx.create(controlRef, nextControl)
+      tx.update(headRef, { maintenanceAdmission: 'closed', maintenanceEpoch: nextEpoch })
       return { alreadyFenced: false, epoch: nextEpoch, token }
     })
     epoch = claim.epoch
@@ -123,7 +124,14 @@ export const fenceBoardSceneGenerationReset = onCall({ region, enforceAppCheck: 
     const gateResult = await gateRef.transaction((current) => {
       if (current?.admissionClosed === true && current?.admissionOwner !== token && current?.resetOperationId !== operationId)
         return
-      return { ...(current ?? {}), admissionClosed: true, admissionOwner: token, resetOperationId: operationId }
+      // Advance the same monotonic admission fence used by abandoned-room
+      // maintenance. A mint request that read the open gate before this
+      // transaction may finish writing its token afterward; rules reject that
+      // token by epoch even once this reset eventually reopens admission.
+      const admissionEpoch = Number.isSafeInteger(current?.admissionEpoch) && current.admissionEpoch >= 0
+        ? current.admissionEpoch + 1
+        : 1
+      return { ...(current ?? {}), admissionClosed: true, admissionOwner: token, resetOperationId: operationId, admissionEpoch }
     })
     if (!gateResult.committed || gateResult.snapshot.child('admissionOwner').val() !== token)
       throw new Error('Could not claim the RTDB admission gate for generation reset.')
@@ -153,12 +161,13 @@ export const fenceBoardSceneGenerationReset = onCall({ region, enforceAppCheck: 
       if (gateReopened.child('admissionClosed').val() === true || gateReopened.child('admissionOwner').val() === token)
         throw new Error('Could not reopen the RTDB gate after deferring the generation reset.')
       const reopenedFirestore = await db.runTransaction(async (tx) => {
-        const control = (await tx.get(controlRef)).data(), job = (await tx.get(jobRef)).data()
+        const control = (await tx.get(controlRef)).data(), job = (await tx.get(jobRef)).data(), currentHead = (await tx.get(headRef)).data()
         if (control?.admission !== 'closed' || control?.token !== token || control?.epoch !== epoch ||
-            job?.token !== token || job?.phase !== 'closing-admission') return false
+            job?.token !== token || job?.phase !== 'closing-admission' || !currentHead) return false
         const now = Timestamp.now()
         tx.update(controlRef, { admission: 'open', epoch: epoch + 1, jobId: null, token: null,
           leaseUntil: null, phase: null, updatedAt: now })
+        tx.update(headRef, { maintenanceAdmission: 'open', maintenanceEpoch: epoch + 1 })
         tx.update(jobRef, { status: 'generation-reset-prepared', phase: 'prepared', token: null,
           epoch: null, leaseUntil: null, lastDeferredReason: deferredReason, lastDeferredAt: now })
         return true
@@ -468,6 +477,7 @@ export const activateBoardSceneGenerationReset = onCall({ region, enforceAppChec
         const now = Timestamp.now()
         tx.update(controlRef, { admission: 'open', epoch: currentControl.epoch + 1, jobId: null,
           token: null, leaseUntil: null, phase: null, updatedAt: now })
+        tx.update(headRef, { maintenanceAdmission: 'open', maintenanceEpoch: currentControl.epoch + 1 })
       } else if (currentControl?.admission !== 'open' || currentControl.jobId != null || currentControl.token != null) {
         throw new HttpsError('aborted', 'Firestore reset gate ownership changed; retry to finish reopening.')
       }

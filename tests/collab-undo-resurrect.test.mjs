@@ -50,6 +50,7 @@ async function runTest() {
         id,
         projectId: proj.id,
         name: 'Undo Test Board',
+        active: true,
         scene: {
           elements: [
             {

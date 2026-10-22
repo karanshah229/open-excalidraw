@@ -5,7 +5,6 @@ import {
   AlertTriangle,
   Calendar,
   Check,
-  ChevronDown,
   Clock,
   Cloud,
   Copy,
@@ -20,6 +19,7 @@ import {
 } from 'lucide-react'
 import { useUser } from '../lib/user-context'
 import { useAuth } from '../lib/auth-context'
+import { useHistorySyncStatus } from './use-history-sync-status'
 
 export type EditorStatus =
   | 'Loading board'
@@ -33,6 +33,8 @@ export type EditorStatus =
 
 export interface SyncStatusDropdownProps {
   state: EditorStatus
+  boardId?: string
+  cloudHistoryEnabled?: boolean
   onKeepLocalConflict?: () => void
   onSaveConflictAsNewBoard?: () => void
   onDownloadConflictDraft?: () => void
@@ -56,6 +58,13 @@ interface StatusConfig {
 
 function getStatusConfig(state: EditorStatus, cloudSyncEnabled: boolean): StatusConfig {
   switch (state) {
+    case 'Loading board':
+      return {
+        title: 'Loading board',
+        description: 'Loading saved board content.',
+        icon: Loader2,
+        colorTheme: 'saving',
+      }
     case 'Synced':
       return {
         title: 'All changes saved',
@@ -158,6 +167,8 @@ function formatTimestamp(isoString?: string | null): { formatted: string; relati
 
 export function SyncStatusDropdown({
   state,
+  boardId,
+  cloudHistoryEnabled = false,
   onKeepLocalConflict,
   onSaveConflictAsNewBoard,
   onDownloadConflictDraft,
@@ -176,7 +187,37 @@ export function SyncStatusDropdown({
   const { fullName, user } = useUser()
   const { user: authUser, isConfigured } = useAuth()
 
-  const config = getStatusConfig(state, Boolean(isConfigured && authUser && !authUser.isAnonymous))
+  const cloudSyncEnabled = Boolean(cloudHistoryEnabled && isConfigured)
+  const history = useHistorySyncStatus(boardId, cloudSyncEnabled, isOpen)
+  const baseConfig = getStatusConfig(state, cloudSyncEnabled)
+  const historyDetail = history.failed
+    ? `${history.failed} historical ${history.failed === 1 ? 'version could' : 'versions could'} not upload. ${history.pending} ${history.pending === 1 ? 'version remains' : 'versions remain'} on this device awaiting cloud history.`
+    : `${history.pending} historical ${history.pending === 1 ? 'version is' : 'versions are'} saved on this device and awaiting cloud history.`
+  const config: StatusConfig =
+    state === 'Synced' && (history.pending || history.error || history.checking)
+      ? history.failed
+        ? {
+            title: 'Board synced; history upload failed',
+            description: historyDetail,
+            icon: AlertCircle,
+            colorTheme: 'error',
+          }
+        : history.error
+          ? {
+              title: 'Board synced; history status unavailable',
+              description: 'Current board content is synced. History upload status could not be checked.',
+              icon: AlertCircle,
+              colorTheme: 'error',
+            }
+          : {
+              title: history.checking ? 'Board synced; checking history' : 'Board synced; history pending',
+              description: history.checking
+                ? 'Current board content is synced. Checking saved historical versions.'
+                : historyDetail,
+              icon: Clock,
+              colorTheme: 'local',
+            }
+      : baseConfig
   const StatusIcon = config.icon
 
   // Compute live scene size and element count when popover is open
@@ -215,54 +256,43 @@ export function SyncStatusDropdown({
     }
   }
 
-  const pillType =
-    state === 'Synced'
-      ? 'saved'
-      : state === 'Synced locally'
-        ? 'local'
-        : state === 'Sync failed' ||
-            state === 'Local save failed' ||
-            state === 'Conflict' ||
-            state === 'Project deleted'
-          ? 'error'
-          : 'saving'
-
   return (
     <Popover.Root open={isOpen} onOpenChange={setIsOpen}>
       <Popover.Trigger asChild>
         <button
           type="button"
-          className={`sync-status-pill sync-status-pill--${pillType}`}
-          title="Click to view sync status and board details"
+          className="header-info-trigger"
+          data-testid="board-info-open"
+          data-sync-status={state}
+          data-history-pending={history.pending}
+          data-history-failed={history.failed}
+          title="Sync status and board details"
           aria-label="Sync status and board details"
         >
-          {state === 'Synced' ? (
-            <Check size={13} className="sync-status-icon sync-status-icon--saved" />
-          ) : state === 'Synced locally' ? (
-            <HardDrive size={13} className="sync-status-icon sync-status-icon--local" />
-          ) : state === 'Sync failed' ||
-            state === 'Local save failed' ||
-            state === 'Conflict' ||
-            state === 'Project deleted' ? (
-            <AlertCircle size={13} className="sync-status-icon sync-status-icon--error" />
-          ) : (
-            <Loader2 size={13} className="sync-status-icon sync-status-icon--saving animate-spin" />
-          )}
-          <span>{state}</span>
-          <span className="sync-status-pill-separator" aria-hidden="true" />
-          <Info size={12} className="sync-status-pill-info" />
-          <ChevronDown size={11} className="sync-status-chevron" />
+          <Info size={19} />
         </button>
       </Popover.Trigger>
 
       <Popover.Portal>
-        <Popover.Content className="sync-status-popover animate-fade-in" align="end" sideOffset={8}>
+        <Popover.Content
+          className="sync-status-popover animate-fade-in"
+          side="bottom"
+          align="end"
+          sideOffset={8}
+          collisionPadding={12}
+        >
           {/* 1. Sync Status Section */}
           <div className="sync-simple-row">
             <div className={`sync-simple-icon-wrap sync-simple-icon-wrap--${config.colorTheme}`}>
               <StatusIcon size={15} className={`sync-simple-icon ${state === 'Saving' ? 'animate-spin' : ''}`} />
             </div>
-            <div className="sync-simple-text">
+            <div
+              className="sync-simple-text"
+              data-testid={
+                state === 'Synced' && (history.pending || history.error) ? 'history-upload-status' : undefined
+              }
+              role="status"
+            >
               <span className="sync-simple-title">{config.title}</span>
               <span className="sync-simple-desc">{config.description}</span>
             </div>
@@ -308,6 +338,18 @@ export function SyncStatusDropdown({
             <div className="sync-error-banner">
               <AlertCircle size={12} className="sync-error-banner-icon" />
               <span>{lastSyncError}</span>
+            </div>
+          )}
+
+          {state !== 'Synced' && history.pending > 0 && (
+            <div data-testid="history-upload-status" role="status" className="sync-simple-desc">
+              {historyDetail}
+            </div>
+          )}
+          {history.error && (
+            <div className="sync-error-banner">
+              <AlertCircle size={12} className="sync-error-banner-icon" />
+              <span data-testid="history-upload-error">{history.error}</span>
             </div>
           )}
 
