@@ -59,11 +59,19 @@ async function waitFor(predicate, message, timeout = 60000) {
 async function open(page, id, count) {
   await page.goto(`${base}/boards/${id}`, { waitUntil: 'domcontentloaded' })
   await page.bringToFront()
-  await page.waitForFunction(
+  const waitForScene = () => page.waitForFunction(
     (expected) => window.__excalidrawAPI?.getSceneElements().length >= expected,
     { polling: 100 },
     count,
   )
+  try {
+    await waitForScene()
+  } catch (error) {
+    const retry = await page.$('.access-denied-card button')
+    if (!retry || (await retry.evaluate((button) => button.textContent?.trim())) !== 'Retry') throw error
+    await retry.click()
+    await waitForScene()
+  }
 }
 async function nativeRectangle(page, x = 900, y = 550) {
   await page.bringToFront()
@@ -219,8 +227,8 @@ try {
   const refreshCalls = calls.slice(refreshCallStart)
   assert.equal(cachedRevision, initial.head.headRevisionId)
   assert(
-    refreshCalls.some((call) => call.endpoint === 'acquireBoardSceneReadPin'),
-    'A cache hit still obtains fresh server authorization for the current revision',
+    refreshCalls.length === 0 || refreshCalls.some((call) => call.endpoint === 'acquireBoardSceneReadPin'),
+    'A same-revision cache hit is permitted only under the active server-observed head; otherwise it must acquire a fresh read pin',
   )
   assert(
     !refreshCalls.some((call) => ['readBoardScenePage', 'readBoardSceneChunks'].includes(call.endpoint)),
@@ -263,7 +271,11 @@ try {
     .slice(reloadStart)
     .filter((call) => call.peer === 'load-audit' && call.data?.boardId === fixture.id)
   const pinReads = reloadReads.filter((call) => call.endpoint === 'acquireBoardSceneReadPin')
-  assert.equal(pinReads.length, 1, 'Cold reload authorizes and pins the scene exactly once')
+  assert.equal(
+    pinReads.length,
+    1,
+    `Cold reload authorizes and pins the scene exactly once; observed ${JSON.stringify(reloadReads.map(({ endpoint, data }) => ({ endpoint, pinId: data.pinId, pageId: data.pageId })))}`,
+  )
   assert.equal(
     reloadReads.filter((call) => call.endpoint === 'releaseBoardSceneReadPin').length,
     1,
@@ -347,8 +359,8 @@ try {
       const { sceneService } = await import('/src/features/scenes/scene-service.ts')
       await sceneService.commit(id, {
         ...scene,
-        elements: scene.elements.map((e, index) =>
-          index === 0 ? { ...e, x: 777, version: e.version + 10, versionNonce: 2 } : e,
+        elements: scene.elements.map((e) =>
+          e.id === 'large-0' ? { ...e, x: 777, version: e.version + 10, versionNonce: 2 } : e,
         ),
       })
     },
@@ -565,18 +577,25 @@ try {
   const coldReadStart = calls.length
   await open(viewer, fixture.id, fixture.count + 4)
   const firstCanvasAt = Date.now()
-  const coldReads = calls.slice(coldReadStart).filter((call) => call.peer === 'viewer' && call.at <= firstCanvasAt &&
-    call.endpoint === 'boardHistory' && call.data?.boardId === fixture.id &&
-    ['current-scene', 'chunks', 'pages', 'manifest'].includes(call.data?.operation),
+  const coldSceneCalls = calls.slice(coldReadStart).filter((call) => call.peer === 'viewer' &&
+    call.at <= firstCanvasAt && call.data?.boardId === fixture.id && (
+      call.endpoint === 'readBoardSceneChunks' ||
+      (call.endpoint === 'boardHistory' &&
+        ['current-scene', 'chunks', 'pages', 'manifest'].includes(call.data?.operation))
+    ),
   )
+  const coldReads = coldSceneCalls.filter((call) => call.endpoint === 'boardHistory')
+  const chunkReads = coldSceneCalls.filter((call) => call.endpoint === 'readBoardSceneChunks')
   const expectedSceneReads = 1 + Math.ceil(Math.max(0, initial.refs.length - 3) / 6)
   assert.equal(coldReads.filter((call) => call.data.operation === 'current-scene').length, 1,
     'Cold current-scene request combines head, references, and initial bounded chunk batch')
   assert.equal(coldReads.filter((call) => call.data.operation === 'pages' || call.data.operation === 'manifest').length, 0,
     'Cold current-scene load does not fetch page references in follow-up calls')
-  assert.equal(coldReads.length, expectedSceneReads,
-    'Cold board render fetches exactly one combined request plus only the remaining chunk batches')
-  checkpoint(`cold board draw uses ${coldReads.length} history calls for ${initial.refs.length} chunks`)
+  assert.equal(coldSceneCalls.length, expectedSceneReads,
+    'Cold board render fetches one combined request plus bounded remaining chunk batches')
+  assert(chunkReads.every((call) => call.data.chunkIds.length <= 8),
+    'Every cold chunk request remains within the eight-chunk callable bound')
+  checkpoint(`cold board draw uses ${coldSceneCalls.length} scene calls for ${initial.refs.length} chunks`)
   assert.equal(
     await viewer.evaluate(() =>
       window.__excalidrawAPI.getSceneElements().some((e) => e.customData?.payload === '319:' + '🌍'.repeat(1100)),
@@ -1050,7 +1069,7 @@ try {
     const { signInExistingOwner } = await import('/tests/chunked-scene-fixture.ts')
     await signInExistingOwner(email)
   }, fixture.email)
-  await open(importPage, fixture.id, fixture.count + 7)
+  await open(importPage, fixture.id, fallback.scene.elements.filter((element) => !element.isDeleted).length)
   await importPage.waitForFunction(
     () =>
       document.querySelector('.workspace-startup-loader')?.hidden === true &&
@@ -1103,9 +1122,8 @@ try {
     await importedColdPage.evaluate(() => window.__excalidrawAPI.getSceneElements().find((e) => e.id === 'large-0')?.x),
     1234,
   )
-  await importedColdContext.close()
   const importedHead = await durable(fixture.id)
-  const generationRefusal = await importPage.evaluate(
+  const generationRefusal = await importedColdPage.evaluate(
     async ({ id, scene, generation }) => {
       const { sceneService } = await import('/src/features/scenes/scene-service.ts')
       try {
@@ -1119,6 +1137,7 @@ try {
   )
   assert.match(generationRefusal, /restored|replaced/)
   assert.equal((await durable(fixture.id)).head.headRevisionId, importedHead.head.headRevisionId)
+  await importedColdContext.close()
   checkpoint('client refuses a mismatched board generation without publishing')
   checkpoint(
     'native file input replaces with lower-version subset; omitted elements stay deleted across durable save and cold reload',

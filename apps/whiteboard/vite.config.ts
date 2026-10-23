@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { defineConfig, type Plugin } from 'vite'
+import { defineConfig, loadEnv, type Plugin } from 'vite'
 
 function mcpServerControlPlugin(): Plugin {
   let mcpProcess: ChildProcess | null = null
@@ -94,6 +94,20 @@ function mcpServerControlPlugin(): Plugin {
   }
 }
 
-export default defineConfig({
-  plugins: [mcpServerControlPlugin()],
+export default defineConfig(({ mode }) => {
+  const env = { ...loadEnv(mode, process.cwd(), ''), ...process.env }
+  if (mode === 'production') {
+    const required = [
+      'VITE_FIREBASE_API_KEY',
+      'VITE_FIREBASE_AUTH_DOMAIN',
+      'VITE_FIREBASE_PROJECT_ID',
+      'VITE_FIREBASE_APP_ID',
+    ]
+    const missing = required.filter((key) => !env[key]?.trim())
+    if (missing.length) {
+      throw new Error(`Production build is missing Firebase configuration: ${missing.join(', ')}`)
+    }
+  }
+
+  return { plugins: [mcpServerControlPlugin()] }
 })

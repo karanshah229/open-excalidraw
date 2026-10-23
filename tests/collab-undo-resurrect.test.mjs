@@ -82,6 +82,9 @@ async function runTest() {
 
     await page1.goto(boardUrl, { waitUntil: 'domcontentloaded' })
     await page1.waitForFunction(() => Boolean(window.__excalidrawAPI))
+    await page1.waitForFunction(() =>
+      window.__excalidrawAPI.getSceneElementsIncludingDeleted().some((element) => element.id === 'test_rect_1'),
+    )
     console.log('   ✓ Window 1 loaded board successfully')
 
     // Share board as anyone_with_link + editor
@@ -101,6 +104,9 @@ async function runTest() {
     // API fixture publication precedes the editor's shared-board bootstrap.
     await reloadAllowingPendingChanges(page1, { waitUntil: 'domcontentloaded' })
     await page1.waitForFunction(() => Boolean(window.__excalidrawAPI))
+    await page1.waitForFunction(() =>
+      window.__excalidrawAPI.getSceneElementsIncludingDeleted().some((element) => element.id === 'test_rect_1'),
+    )
 
     // Step 2: Open in Incognito context (Window 2)
     console.log('\n▶ Step 2: Opening board in Incognito context (Window 2)...')
@@ -112,6 +118,9 @@ async function runTest() {
 
     await page2.goto(boardUrl, { waitUntil: 'domcontentloaded' })
     await page2.waitForFunction(() => Boolean(window.__excalidrawAPI))
+    await page2.waitForFunction(() =>
+      window.__excalidrawAPI.getSceneElementsIncludingDeleted().some((element) => element.id === 'test_rect_1'),
+    )
     console.log('   ✓ Window 2 loaded in Incognito')
 
     // Wait for live collab to establish
@@ -135,12 +144,23 @@ async function runTest() {
     // Step 3: Delete element in Window 1
     console.log('\n▶ Step 3: Deleting element in Window 1...')
     await page1.bringToFront()
-    await page1.keyboard.down('Meta')
-    await page1.keyboard.press('KeyA')
-    await page1.keyboard.up('Meta')
-    await sleep(200)
-    await page1.keyboard.press('Backspace')
-    await sleep(1500)
+    // Deliver a real Excalidraw deletion update with an undo capture; keyboard focus is not under test here.
+    await page1.evaluate(() => {
+      const api = window.__excalidrawAPI
+      const [element] = api.getSceneElements()
+      window.__setUserInteracted?.()
+      api.updateScene({
+        elements: [{
+          ...element,
+          isDeleted: true,
+          version: Number(element.version ?? 0) + 1,
+          versionNonce: Number(element.versionNonce ?? 0) + 1,
+        }],
+        captureUpdate: 'IMMEDIATELY',
+      })
+    })
+    await page1.waitForFunction(() => window.__excalidrawAPI.getSceneElements().filter((e) => !e.isDeleted).length === 0)
+    await page2.waitForFunction(() => window.__excalidrawAPI.getSceneElements().filter((e) => !e.isDeleted).length === 0)
 
     page1.on('console', (msg) => {
       console.log(`[P1 Log] ${msg.text()}`)

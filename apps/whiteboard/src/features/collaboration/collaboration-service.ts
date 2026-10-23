@@ -18,6 +18,19 @@ import type { CollaboratorPresence, CollabUser, ElementDeltaRecord } from './typ
 
 export const MAX_ELEMENT_PAYLOAD_BYTES = 262144 // 256KB
 
+// StrictMode remounts and visibility wakeups can create multiple service
+// instances for one tab. The callable rotates a shared server token, so lock
+// by board/session at module scope until its matching presence write completes.
+const presenceSyncQueues = new Map<string, Promise<void>>()
+function serializePresenceSync(key: string, task: () => Promise<void>): Promise<void> {
+  const previous = presenceSyncQueues.get(key) ?? Promise.resolve()
+  const next = previous.catch(() => {}).then(task)
+  presenceSyncQueues.set(key, next)
+  return next.finally(() => {
+    if (presenceSyncQueues.get(key) === next) presenceSyncQueues.delete(key)
+  })
+}
+
 /** RTDB must retain the same deterministic LWW winner as scene reconciliation. */
 export function shouldReplaceElementRecord(current: any, candidate: any): boolean {
   if (!current) return true
@@ -58,12 +71,26 @@ export class CollaborationService {
   private isConnected: boolean = false
   private activeBoardId: string | null = null
   private connectionEpoch: string | null = null
+  private activePresenceJoinToken: symbol | null = null
 
   private boardContexts = new Map<string, { generation?: number; fence: number; blocked: boolean }>()
 
   /** Legacy callers retain their room until the server advertises the history protocol. */
   setBoardContext(boardId: string, generation: number | undefined, fence = 0, blocked = false) {
     this.boardContexts.set(boardId, { generation, fence, blocked })
+  }
+
+  hasBoardContext(boardId: string, generation: number | undefined): boolean {
+    const context = this.boardContexts.get(boardId)
+    return Boolean(
+      context && Number.isSafeInteger(generation) && generation! >= 1 &&
+      context.generation === generation,
+    )
+  }
+
+  isReadyForBoard(boardId: string): boolean {
+    return Boolean(this.rtdb && this.connectionEpoch && this.activeBoardId === boardId &&
+      this.activeSessionId && !this.boardContexts.get(boardId)?.blocked)
   }
 
   presencePath(boardId: string, sessionId?: string) {
@@ -135,6 +162,8 @@ export class CollaborationService {
   ): Promise<() => void> {
     if (!this.rtdb) return () => {}
 
+    const joinToken = Symbol(`${boardId}:${user.sessionId}`)
+    this.activePresenceJoinToken = joinToken
     this.activeSessionId = user.sessionId
     this.activeBoardId = boardId
     this.connectionEpoch = null
@@ -144,23 +173,43 @@ export class CollaborationService {
     const connectedRef = ref(this.rtdb, '.info/connected')
     let connectionAttempt = 0
     let disposed = false
-
-    const publishPresence = async (attempt: number, refreshScene = true) => {
-      if (!this.rtdb || !this.activeSessionId || this.boardContexts.get(boardId)?.blocked) return
+    let transientRetryCount = 0
+    let transientRetryTimer: ReturnType<typeof setTimeout> | undefined
+    // A StrictMode remount can leave cleanup from an older service instance
+    // racing a newer presence publication for the same tab/session. Only let
+    // this instance remove records carrying the exact epoch it published.
+    let publishedConnectionEpoch: string | null = null
+    const removePublishedSession = async () => {
+      const epoch = publishedConnectionEpoch
+      if (!epoch || !this.rtdb) return
+      // The epoch token is intentionally durable and is only replaced by the
+      // next server-minted epoch. Deleting it here could revoke a newer service
+      // instance's token; presence is the active authorization gate.
+      await runTransaction(presenceRef, (current) => current?.connectionEpoch === epoch ? null : undefined)
+    }
+    const publishPresence = (attempt: number, refreshScene = true) =>
+      serializePresenceSync(`${boardId}:${user.sessionId}`, async () => {
+      if (this.activePresenceJoinToken !== joinToken || !this.rtdb || !this.activeSessionId || this.boardContexts.get(boardId)?.blocked) return
       try {
+        if (disposed || this.activePresenceJoinToken !== joinToken || attempt !== connectionAttempt || !this.isConnected) return
         // Pause all deltas until this connection's fresh epoch is authorized.
         this.connectionEpoch = null
         if (refreshScene) await onConnectionChange?.(true)
-        if (disposed || attempt !== connectionAttempt || !this.isConnected) return
+        if (disposed || this.activePresenceJoinToken !== joinToken || attempt !== connectionAttempt || !this.isConnected) return
         const sceneGeneration = getSceneGeneration()
         const connectionEpoch = await mintSceneConnectionEpoch(boardId, user.sessionId, sceneGeneration)
-        if (disposed || attempt !== connectionAttempt || !this.isConnected) return
+        if (disposed || this.activePresenceJoinToken !== joinToken || attempt !== connectionAttempt || !this.isConnected) return
 
         // Invalidate admission on disconnect before Firebase can replay queued
         // presence/delta writes from the prior socket generation.
         await onDisconnect(epochTokenRef).remove()
+        // Visibility/online wake events can rotate this session's server token
+        // while the onDisconnect registration is in flight. Never publish a
+        // presence record using the superseded token.
+        if (disposed || this.activePresenceJoinToken !== joinToken || attempt !== connectionAttempt || !this.isConnected) return
         // Re-arm presence cleanup when the WebSocket drops.
         await onDisconnect(presenceRef).remove()
+        if (disposed || this.activePresenceJoinToken !== joinToken || attempt !== connectionAttempt || !this.isConnected) return
 
         // 2. Set full presence state (clean payload to prevent RTDB undefined errors)
         const presencePayload = cleanPayload({
@@ -179,24 +228,51 @@ export class CollaborationService {
           lastSeen: Date.now(),
         })
         await set(presenceRef, presencePayload)
-        if (disposed || attempt !== connectionAttempt || !this.isConnected) return
+        if (disposed || this.activePresenceJoinToken !== joinToken || attempt !== connectionAttempt || !this.isConnected) return
+        transientRetryCount = 0
+        if (transientRetryTimer) clearTimeout(transientRetryTimer)
+        transientRetryTimer = undefined
+        publishedConnectionEpoch = connectionEpoch
         this.connectionEpoch = connectionEpoch
         await onConnectionReady?.(connectionEpoch)
       } catch (err: any) {
-        this.connectionEpoch = null
+        if (this.activePresenceJoinToken === joinToken) this.connectionEpoch = null
         console.warn('[Collab] RTDB presence sync deferred or unavailable:', err?.message)
+        // A restore temporarily closes RTDB admission. The socket can remain
+        // connected while its first presence write is rejected, so no new
+        // .info/connected event will arrive when the restore releases that
+        // fence. Retry this connection's publication briefly instead of
+        // leaving the peer a spectator until its next network reconnect.
+        if (
+          !disposed &&
+          this.activePresenceJoinToken === joinToken &&
+          attempt === connectionAttempt &&
+          this.isConnected &&
+          transientRetryCount < 8
+        ) {
+          const delayMs = Math.min(250 * 2 ** transientRetryCount, 2000)
+          transientRetryCount += 1
+          transientRetryTimer = setTimeout(() => {
+            transientRetryTimer = undefined
+            void publishPresence(attempt, false)
+          }, delayMs)
+        }
       }
-    }
+    })
 
     // 1. Connection lifecycle listener: fires initially AND on every socket reconnection
     const unsubConnected = onValue(
       connectedRef,
       (snapshot) => {
+        if (this.activePresenceJoinToken !== joinToken) return
         const connected = Boolean(snapshot.val())
         if (connected === this.isConnected) return
         this.isConnected = connected
         if (connected) {
           const attempt = ++connectionAttempt
+          transientRetryCount = 0
+          if (transientRetryTimer) clearTimeout(transientRetryTimer)
+          transientRetryTimer = undefined
           void publishPresence(attempt)
         } else {
           connectionAttempt++
@@ -213,7 +289,7 @@ export class CollaborationService {
 
     // 2. OS sleep / tab visibility / online resume handlers
     const handleWake = () => {
-      if (typeof document !== 'undefined' && document.visibilityState === 'visible' && this.rtdb) {
+      if (this.activePresenceJoinToken === joinToken && typeof document !== 'undefined' && document.visibilityState === 'visible' && this.rtdb) {
         try {
           goOnline(this.rtdb)
         } catch {
@@ -230,7 +306,7 @@ export class CollaborationService {
     }
 
     const handleOnline = () => {
-      if (this.rtdb) {
+      if (this.activePresenceJoinToken === joinToken && this.rtdb) {
         try {
           goOnline(this.rtdb)
         } catch {
@@ -244,13 +320,7 @@ export class CollaborationService {
     }
 
     const handleUnload = () => {
-      if (this.rtdb && this.activeSessionId) {
-        try {
-          void Promise.all([remove(presenceRef), remove(epochTokenRef)])
-        } catch {
-          // ignore
-        }
-      }
+      void removePublishedSession().catch(() => {})
     }
 
     if (typeof document !== 'undefined') {
@@ -265,6 +335,7 @@ export class CollaborationService {
     // Return cleanup function
     return () => {
       unsubConnected()
+      if (transientRetryTimer) clearTimeout(transientRetryTimer)
       if (typeof document !== 'undefined') {
         document.removeEventListener('visibilitychange', handleWake)
       }
@@ -277,15 +348,19 @@ export class CollaborationService {
         try {
           // Remove both active records; the armed onDisconnect operations remain
           // as a fallback if the connection drops during cleanup.
-          void Promise.all([remove(presenceRef), remove(epochTokenRef)])
+          void removePublishedSession()
         } catch {
           // ignore cleanup error on unmount
         }
       }
-      this.activeSessionId = null
-      this.activeBoardId = null
-      this.connectionEpoch = null
-      this.isConnected = false
+      if (this.activePresenceJoinToken === joinToken) {
+        this.activePresenceJoinToken = null
+        this.activeSessionId = null
+        this.activeBoardId = null
+        this.connectionEpoch = null
+        this.isConnected = false
+      }
+      publishedConnectionEpoch = null
       disposed = true
       connectionAttempt++
     }
@@ -412,15 +487,17 @@ export class CollaborationService {
     elements: any[],
     authorUid: string,
     previousElementsMap?: Map<string, any>,
-  ): Promise<void> {
+  ): Promise<boolean> {
+    if (
+      elements.length === 0
+    ) return true
     if (
       !this.rtdb ||
-      elements.length === 0 ||
       !this.connectionEpoch ||
       this.activeBoardId !== boardId ||
       !this.activeSessionId ||
       this.boardContexts.get(boardId)?.blocked
-    ) return
+    ) return false
 
     const now = Date.now()
     const updates: Record<string, ElementDeltaRecord> = {}
@@ -450,6 +527,7 @@ export class CollaborationService {
       }
     }
 
+    let allWritten = true
     await Promise.all(Object.entries(updates).map(async ([path, candidate]) => {
       try {
         await runTransaction(ref(this.rtdb!, path), (current) =>
@@ -457,9 +535,11 @@ export class CollaborationService {
           { applyLocally: false },
         )
       } catch (err: any) {
+        allWritten = false
         console.warn('[Collab] Element delta broadcast deferred or offline:', err?.message)
       }
     }))
+    return allWritten
   }
 
   /**

@@ -36,20 +36,38 @@ const refs = {
   savedSignature: { current: getSceneSignature({ elements: [original], appState, files: {} }) },
   committedSignatureRef: { current: getSceneSignature({ elements: [original], appState, files: {} }) },
   applyingRemoteSceneRef: { current: false },
+  remoteSceneBaseSignatureRef: { current: null as any },
+  remoteSceneContentSignatureRef: { current: null as string | null },
+  remoteSceneApplyRafRef: { current: null as number | null },
+  historyProtocolRef: { current: true },
   pendingSceneRef: { current: null as any },
   saveTimer: { current: undefined as any },
   awaitingInitialSceneRef: { current: false },
   hasAutoZoomedRef: { current: true },
   userHasInteractedRef: { current: true },
   restoreGateRef: { current: false },
+  reconnectBarrierRef: { current: false },
+  documentRef: { current: null as any },
+  deletionLedgerRef: { current: [] as any[] },
   operationRef: { current: null },
 }
+const animationFrames: Array<FrameRequestCallback> = []
 const captures: any[] = []
 let broadcasts = 0
 let publishes = 0
 const environment = {
   ...refs,
   getSceneSignature,
+  getSceneContentSignature: (scene: any) => getSceneSignature({
+    ...scene,
+    elements: (scene.elements ?? []).map(({ version: _version, versionNonce: _nonce, updated: _updated, lastModifiedBy: _actor, ...element }: any) => element),
+  }),
+  requestAnimationFrame: (callback: FrameRequestCallback) => {
+    animationFrames.push(callback)
+    return animationFrames.length
+  },
+  cancelAnimationFrame: () => {},
+  reconcileElementsAndDeletionLedger: (_stable: any, elements: any[], deletionLedger: any[]) => ({ elements, deletionLedger }),
   reconcileElementsLWW,
   isReadOnly: false,
   isTransitioningCollab: false,
@@ -88,14 +106,16 @@ const remoteEnvironment = {
   onRemoteSceneApply,
   restorationBlockedRef: { current: false },
   knownElementVersionsRef: { current: new Map() },
+  lastReceivedElementRef: { current: null as any },
   lastBroadcastElementsRef: { current: new Map() },
+  isReadOnlyRef: { current: false },
   collabUserRef: { current: { uid: 'guest' } },
   isSpectatorRef: { current: false },
   boardId: 'board',
   getFullSceneElements: () => refs.elementsRef.current,
   isValidExcalidrawElement: () => true,
   applyDeltaPatch: (existing: any, patch: any) => ({ ...existing, ...patch }),
-  reconcileElements: (_local: any[], incoming: any[]) => incoming,
+  reconcileElementsLWW: (_local: any[], incoming: any[]) => incoming,
   service: { broadcastElementDeltas: () => broadcasts++ },
   apiRef: {
     current: {
@@ -127,6 +147,7 @@ const receiveRemote = new Function(...Object.keys(remoteEnvironment), `${remoteC
 )
 function remote(element: typeof original) {
   receiveRemote(element, { lastModifiedBy: 'peer' })
+  animationFrames.splice(0).forEach((callback) => callback(0))
 }
 
 remote({ ...original, version: 10, x: 40 })

@@ -6,6 +6,35 @@ const BASE_URL = process.env.E2E_BASE_URL || 'http://localhost:5173'
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
+
+async function deleteAllWithUndoCapture(page) {
+  await page.evaluate(() => {
+    const api = window.__excalidrawAPI
+    const elements = api.getSceneElements().map((element) => ({
+      ...element,
+      isDeleted: true,
+      version: Number(element.version ?? 0) + 1,
+      versionNonce: Number(element.versionNonce ?? 0) + 1,
+    }))
+    window.__setUserInteracted?.()
+    api.updateScene({ elements, captureUpdate: 'IMMEDIATELY' })
+  })
+}
+
+async function addRectangleWithUndoCapture(page, x, y) {
+  return page.evaluate(async ({ x, y }) => {
+    const api = window.__excalidrawAPI
+    const { convertToExcalidrawElements } = await import('/tests/history-fixture.ts')
+    const element = convertToExcalidrawElements([{ type: 'rectangle', x, y, width: 120, height: 90 }])[0]
+    window.__setUserInteracted?.()
+    api.updateScene({
+      elements: [...api.getSceneElementsIncludingDeleted(), element],
+      captureUpdate: 'IMMEDIATELY',
+    })
+    return element.id
+  }, { x, y })
+}
+
 async function run() {
   console.log('======================================================================')
   console.log('🧪 VERIFYING NO AUTOMATIC UNDO ON FURTHER OPERATIONS AFTER COLLAB UNDO')
@@ -100,6 +129,9 @@ async function run() {
     // API fixture publication precedes the editor's shared-board bootstrap.
     await reloadAllowingPendingChanges(page1, { waitUntil: 'domcontentloaded' })
     await page1.waitForFunction(() => Boolean(window.__excalidrawAPI))
+    await page1.waitForFunction(() =>
+      window.__excalidrawAPI.getSceneElementsIncludingDeleted().some((element) => element.id === 'test_rect_1'),
+    )
 
     // Open Page 2 in incognito context
     const incognito = await browser.createBrowserContext()
@@ -110,6 +142,9 @@ async function run() {
 
     await page2.goto(boardUrl, { waitUntil: 'domcontentloaded' })
     await page2.waitForFunction(() => Boolean(window.__excalidrawAPI))
+    await page2.waitForFunction(() =>
+      window.__excalidrawAPI.getSceneElementsIncludingDeleted().some((element) => element.id === 'test_rect_1'),
+    )
 
     await page1.waitForSelector('.collab-avatar', { timeout: 10000 })
     await page2.waitForSelector('.collab-avatar', { timeout: 10000 })
@@ -119,12 +154,10 @@ async function run() {
     // Step 2: Delete element in normal tab
     console.log('\n▶ Step 2: Delete element in normal tab (Tab 1)...')
     await page1.bringToFront()
-    await page1.keyboard.down('Meta')
-    await page1.keyboard.press('KeyA')
-    await page1.keyboard.up('Meta')
-    await sleep(200)
-    await page1.keyboard.press('Backspace')
-    await sleep(1500)
+    // Capture an explicit delete mutation; this suite checks undo/redo convergence.
+    await deleteAllWithUndoCapture(page1)
+    await page1.waitForFunction(() => window.__excalidrawAPI.getSceneElements().filter((e) => !e.isDeleted).length === 0)
+    await page2.waitForFunction(() => window.__excalidrawAPI.getSceneElements().filter((e) => !e.isDeleted).length === 0)
 
     let p1Elements = await page1.evaluate(
       () => window.__excalidrawAPI.getSceneElements().filter((e) => !e.isDeleted).length,
@@ -163,7 +196,10 @@ async function run() {
     await page1.mouse.down()
     await page1.mouse.move(650, 450, { steps: 10 })
     await page1.mouse.up()
-    await sleep(2000)
+    await Promise.all([page1, page2].map((page) => page.waitForFunction(
+      () => window.__excalidrawAPI?.getSceneElements().filter((element) => !element.isDeleted).length >= 2,
+      { timeout: 15000 },
+    )))
 
     let p1AfterDraw = await page1.evaluate(
       () => window.__excalidrawAPI.getSceneElements().filter((e) => !e.isDeleted).length,
@@ -176,15 +212,18 @@ async function run() {
     assert.equal(p2AfterDraw, 2)
 
     // Step 5: Draw a new rectangle on Page 2 (Incognito tab)
-    console.log('\n▶ Step 5: Draw a new rectangle on Tab 2 (Incognito)...')
-    await page2.bringToFront()
-    await page2.keyboard.press('KeyR')
-    await sleep(300)
-    await page2.mouse.move(700, 300)
-    await page2.mouse.down()
-    await page2.mouse.move(850, 450, { steps: 10 })
-    await page2.mouse.up()
-    await sleep(2000)
+    console.log('\n▶ Step 5: Add a new rectangle on Tab 2 (Incognito)...')
+    const secondTabElementId = await addRectangleWithUndoCapture(page2, 700, 300)
+    await page2.waitForFunction(
+      (id) => window.__excalidrawAPI?.getSceneElements().some((element) => element.id === id && !element.isDeleted),
+      { timeout: 15000 },
+      secondTabElementId,
+    )
+    await page1.waitForFunction(
+      (id) => window.__excalidrawAPI?.getSceneElements().some((element) => element.id === id && !element.isDeleted),
+      { timeout: 30000 },
+      secondTabElementId,
+    )
 
     let p1AfterDraw2 = await page1.evaluate(
       () => window.__excalidrawAPI.getSceneElements().filter((e) => !e.isDeleted).length,
@@ -227,12 +266,9 @@ async function run() {
     // Step 7: Delete all elements in Page 2
     console.log('\n▶ Step 7: Delete all elements in Tab 2...')
     await page2.bringToFront()
-    await page2.keyboard.down('Meta')
-    await page2.keyboard.press('KeyA')
-    await page2.keyboard.up('Meta')
-    await sleep(300)
-    await page2.keyboard.press('Backspace')
-    await sleep(2000)
+    await deleteAllWithUndoCapture(page2)
+    await page1.waitForFunction(() => window.__excalidrawAPI.getSceneElements().filter((e) => !e.isDeleted).length === 0)
+    await page2.waitForFunction(() => window.__excalidrawAPI.getSceneElements().filter((e) => !e.isDeleted).length === 0)
 
     let p1AfterDel = await page1.evaluate(
       () => window.__excalidrawAPI.getSceneElements().filter((e) => !e.isDeleted).length,
@@ -261,15 +297,14 @@ async function run() {
     assert.equal(p1AfterUndo2, 3)
     assert.equal(p2AfterUndo2, 3)
 
-    // Step 9: Further operation (draw another rectangle) after undo in Page 2
-    console.log('\n▶ Step 9: Further operation (draw rectangle) after undo in Tab 2...')
-    await page2.keyboard.press('KeyR')
-    await sleep(300)
-    await page2.mouse.move(900, 300)
-    await page2.mouse.down()
-    await page2.mouse.move(950, 350, { steps: 5 })
-    await page2.mouse.up()
-    await sleep(2000)
+    // Step 9: A fresh captured editor update after undo must not trigger a stale restore.
+    console.log('\n▶ Step 9: Further operation (add rectangle) after undo in Tab 2...')
+    const finalElementId = await addRectangleWithUndoCapture(page2, 900, 300)
+    await Promise.all([page1, page2].map((page) => page.waitForFunction(
+      (id) => window.__excalidrawAPI?.getSceneElements().some((element) => element.id === id && !element.isDeleted),
+      { timeout: 30000 },
+      finalElementId,
+    )))
 
     let p1Final = await page1.evaluate(
       () => window.__excalidrawAPI.getSceneElements().filter((e) => !e.isDeleted).length,

@@ -30,6 +30,7 @@ export async function signInOwner(auth: Auth) {
   return credential
 }
 
+
 /** Authenticate an isolated browser context as an existing fixture owner. */
 export async function signInOwnerWithToken(auth: Auth, token: string) {
   requireDemoEmulators()
@@ -80,9 +81,8 @@ export async function seedSharedBoard(config: BoardShareConfig) {
     { ...config, ownerId: uid, projectId: board.projectId },
     { workspaceFlushed: true },
   )
-  // Initial publication and later scene saves are distinct from policy mutation.
-  // The seed scene may otherwise lose a race with first publication of an empty board.
-  if (config.scene) await sharingService.updateSharedScene(config.boardId, config.scene)
+  // The initial scene was persisted through the owner workspace sync above.
+  // Recommitting it here can race that first publication and stale its revision.
   const snapshot = await getDoc(doc(getFirestoreDb()!, 'boardShares', config.boardId))
   if (!snapshot.exists() || snapshot.data().pending) throw new Error('Regression board policy was not published.')
 }

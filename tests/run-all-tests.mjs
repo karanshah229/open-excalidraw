@@ -11,14 +11,14 @@ const results = []
 const imageCloud = process.argv.includes('--image-cloud')
 const selectedStages = process.env.E2E_TEST_STAGES?.split(',')
 
-async function run(name, command, args) {
+async function run(name, command, args, env = process.env) {
   if (selectedStages && !selectedStages.includes(name)) return true
   const start = Date.now()
   const logPath = resolve(output, `${name}.log`)
   const log = createWriteStream(logPath)
   console.log(`START ${name} (log: ${logPath})`)
   const exitCode = await new Promise((done) => {
-    const child = spawn(command, args, { cwd: root, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(command, args, { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] })
     child.stdout.pipe(log, { end: false })
     child.stderr.pipe(log, { end: false })
     child.on('error', (error) => {
@@ -49,7 +49,18 @@ if (imageCloud) {
   console.log(
     'Running automated local/emulator tests. Live-account checks and historical security exploit probes are separate.',
   )
-  if (!(await run('build', 'pnpm', ['build']))) process.exit(1)
+  // The production build needs Firebase's Vite settings, while browser tests
+  // deliberately assert Firebase-free bundles. Scope development settings to
+  // the build child instead of leaking them into every later test process.
+  const buildEnv = { ...process.env }
+  const developmentEnv = await readFile(resolve(root, 'apps/whiteboard/.env.development'), 'utf8')
+  for (const line of developmentEnv.split(/\r?\n/)) {
+    const match = line.match(/^\s*(VITE_FIREBASE_[A-Z0-9_]+)\s*=\s*(.*)\s*$/)
+    if (!match) continue
+    const value = match[2].replace(/^(['"])(.*)\1$/, '$2')
+    if (!buildEnv[match[1]]) buildEnv[match[1]] = value
+  }
+  if (!(await run('build', 'pnpm', ['build'], buildEnv))) process.exit(1)
   await run('typecheck', 'pnpm', ['check'])
   await run('lint', 'pnpm', ['lint'])
   const tsx = 'packages/mcp/node_modules/tsx/dist/cli.mjs'
@@ -63,7 +74,9 @@ if (imageCloud) {
   await run('history-local', process.execPath, ['tests/board-history-local.test.mjs'])
   await run('board-loading', process.execPath, [tsx, 'tests/board-loading.test.ts'])
   await run('slides-browser', process.execPath, ['tests/run-slides-tests.mjs'])
-  await run('slides-production', process.execPath, ['tests/slides-production.test.mjs'])
+  // This fixture asserts a Firebase-free local production build. Build it in
+  // e2e mode here instead of reusing the configured production bundle above.
+  await run('slides-production', 'pnpm', ['test:slides:prod'])
   await run('mcp-tools', process.execPath, [tsx, 'tests/mcp-tools-suite.test.ts'])
   await run('image-access-policy', process.execPath, ['tests/image-access-policy.test.mjs'])
 

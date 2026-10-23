@@ -30,7 +30,7 @@ export interface UseCollaborationOptions {
   appStateRef: React.MutableRefObject<Record<string, unknown>>
   onConnectionChange?: (connected: boolean) => void | Promise<void>
   getSceneGeneration?: () => number
-  onRemoteSceneApply?: (elements: readonly any[], phase: 'before' | 'after') => void
+  onRemoteSceneApply?: (elements: readonly any[], phase: 'before' | 'after', persistRemote: boolean) => void
 }
 
 export function getFullSceneElements(
@@ -105,6 +105,9 @@ export function useCollaboration({
 
   // Keep track of known element versions to only broadcast actual deltas
   const knownElementVersionsRef = useRef<Map<string, { version: number; versionNonce: number }>>(new Map())
+  const lastReceivedElementRef = useRef<{ id: string; version: number; localVersion: number; outcome: string } | null>(null)
+  const pendingCanonicalSceneRef = useRef<any[] | null>(null)
+  const lastCanonicalBroadcastRef = useRef<Record<string, unknown> | null>(null)
 
   // Task 2 & 3: Dragging pixel storm suppression & delta patch baselines
   const isDraggingRef = useRef<boolean>(false)
@@ -148,7 +151,6 @@ export function useCollaboration({
   const idlePointerTimerRef = useRef<number | null>(null)
 
   const [isAuthReady, setIsAuthReady] = useState(false)
-
   // Initialize the collaboration service. The shared RTDB client must remain
   // online in solo mode so the connection-owned active-session lobby can
   // discover a second participant.
@@ -175,19 +177,27 @@ export function useCollaboration({
   // shared RTDB connection still detects socket loss. Surface those transitions
   // so the board can refresh its canonical scene before reconnect admission.
   useEffect(() => {
-    if (enabled || !onConnectionChange) return
+    // Collaboration is also temporarily disabled while a shared scene restores.
+    // That transition is not solo mode; restore hydration owns the canonical
+    // refresh and a second reconnect read can strand the editor behind its gate.
+    if (enabled || restorationBlocked || !onConnectionChange) return
     const rtdb = getFirebaseRtdb()
     if (!rtdb) return
     let previous: boolean | null = null
     return onValue(ref(rtdb, '.info/connected'), (snapshot) => {
       const connected = Boolean(snapshot.val())
       if (previous === connected) return
+      const wasConnected = previous
       previous = connected
+      // The first `true` snapshot is initial availability, not a reconnect.
+      // Route hydration already loaded the current board and must not trigger a
+      // second full canonical read in parallel.
+      if (connected && wasConnected !== false) return
       void Promise.resolve(onConnectionChange(connected)).catch((error) => {
         console.warn('[Collab] Connection callback failed:', (error as any)?.message)
       })
     })
-  }, [enabled, onConnectionChange])
+  }, [enabled, restorationBlocked, onConnectionChange])
 
   // 1. Maintain authenticated user identity (Google or Anonymous fallback)
   useEffect(() => {
@@ -278,38 +288,40 @@ export function useCollaboration({
 
   // 3. Subscribe to remote element deltas and reconcile
   useEffect(() => {
-    if (!enabled || !boardId || !isAuthReady || restorationBlocked) return
+    // View-only peers can subscribe without a writer epoch. Wait until the
+    // loaded board generation is installed so a reload cannot capture an
+    // undefined context and reject every replayed RTDB element indefinitely.
+    if (!enabled || !boardId || !isAuthReady || !collabServiceRef.current.hasBoardContext(boardId, generation) || restorationBlocked) return
 
     const service = collabServiceRef.current
     const unsubElements = service.subscribeToElements(boardId, (remotePatch, meta) => {
       if (restorationBlockedRef.current || !remotePatch || !remotePatch.id) return
 
-      // Don't reconcile if we already have this exact version or newer
-      const known = knownElementVersionsRef.current.get(remotePatch.id)
-      if (known) {
-        if (remotePatch.version < known.version) return
-        // Align with Excalidraw engine standard: lowest versionNonce wins deterministic tie-break
-        if (remotePatch.version === known.version && remotePatch.versionNonce >= known.versionNonce) {
-          if (known.versionNonce < remotePatch.versionNonce) {
-            const localList = getFullSceneElements(apiRef.current, elementsRef.current)
-            const localEl = localList.find((e: any) => e.id === remotePatch.id)
-            const cu = collabUserRef.current
-            if (localEl && cu && !isSpectatorRef.current) {
-              void service.broadcastElementDeltas(boardId, [localEl], cu.uid)
-            }
-          }
-          return
-        }
-      }
-
-      knownElementVersionsRef.current.set(remotePatch.id, {
-        version: remotePatch.version,
-        versionNonce: remotePatch.versionNonce,
-      })
-
-      // Task 3: Merge incoming patch over existing local element (including tombstones)
+      // Compare against the element actually present in the editor. The cached
+      // version map can advance before updateScene has rendered a received
+      // record; using it as the deduplication authority would then suppress
+      // every retry and leave that tab permanently stale.
       const local = getFullSceneElements(apiRef.current, elementsRef.current)
       const existingEl = local.find((e: any) => e.id === remotePatch.id)
+      const remoteVersion = Number(remotePatch.version ?? 0)
+      const remoteNonce = Number(remotePatch.versionNonce ?? 0)
+      const localVersion = Number(existingEl?.version ?? 0)
+      const localNonce = Number(existingEl?.versionNonce ?? 0)
+      lastReceivedElementRef.current = { id: remotePatch.id, version: remoteVersion, localVersion, outcome: 'received' }
+      if (existingEl && (remoteVersion < localVersion ||
+        (remoteVersion === localVersion && remoteNonce >= localNonce))) {
+        lastReceivedElementRef.current.outcome = 'local-wins'
+        const known = knownElementVersionsRef.current.get(remotePatch.id)
+        if (!known || localVersion > known.version ||
+          (localVersion === known.version && localNonce < known.versionNonce)) {
+          knownElementVersionsRef.current.set(remotePatch.id, { version: localVersion, versionNonce: localNonce })
+        }
+        if (remoteVersion === localVersion && remoteNonce > localNonce) {
+          const cu = collabUserRef.current
+          if (cu && !isSpectatorRef.current) void service.broadcastElementDeltas(boardId, [existingEl], cu.uid)
+        }
+        return
+      }
 
       // Guard: If element is not in local scene, reject if it's an incomplete delta patch
       if (!existingEl && !isValidExcalidrawElement(remotePatch)) {
@@ -330,6 +342,9 @@ export function useCollaboration({
       // over RTDB. Use the same version/nonce ordering as the canonical scene
       // merge, then let Excalidraw render that winning full element.
       const reconciled = reconcileElementsLWW(local, [mergedElement])
+      lastReceivedElementRef.current.outcome = reconciled.some((element: any) => element.id === remotePatch.id &&
+        Number(element.version ?? 0) === remoteVersion && Number(element.versionNonce ?? 0) === remoteNonce)
+        ? 'applied' : 'reconciled-away'
 
       elementsRef.current = reconciled
       // Establish the editor's remote baseline before updateScene can invoke
@@ -337,14 +352,21 @@ export function useCollaboration({
       // updateScene may synchronously call Excalidraw's onChange and can
       // normalize version/index metadata. Bracket it so the editor absorbs the
       // actual rendered result without mistaking normalization for a local edit.
-      onRemoteSceneApply?.(reconciled, 'before')
+      onRemoteSceneApply?.(reconciled, 'before', false)
       // Remote state is authoritative for rendering but must never become a
       // local undo/redo entry in Excalidraw's multiplayer history.
       try {
         apiRef.current?.updateScene({ elements: reconciled, captureUpdate: 'NEVER' })
       } finally {
         const rendered = getFullSceneElements(apiRef.current, reconciled)
-        onRemoteSceneApply?.(rendered, 'after')
+        const renderedElement = rendered.find((element: any) => element.id === remotePatch.id)
+        if (renderedElement) {
+          knownElementVersionsRef.current.set(remotePatch.id, {
+            version: Number(renderedElement.version ?? 1),
+            versionNonce: Number(renderedElement.versionNonce ?? 0),
+          })
+        }
+        onRemoteSceneApply?.(rendered, 'after', !isReadOnlyRef.current && !isSpectatorRef.current)
       }
     })
 
@@ -355,6 +377,8 @@ export function useCollaboration({
     enabled,
     boardId,
     isAuthReady,
+    generation,
+    expectedFence,
     elementsRef,
     appStateRef,
     apiRef,
@@ -582,10 +606,19 @@ export function useCollaboration({
         // undo/reverts at or below our known version still get a monotonic bump.
         const isResurrected = Boolean(last?.isDeleted) && !elem.isDeleted
         const hasStateChanged = Boolean(last && haveElementPropertiesChanged(last, elem))
-        const isDeleted = Boolean(last && !last.isDeleted && elem.isDeleted)
+        // A local broadcast baseline may be absent after a reconnect or while
+        // a newly joined editor is still seeding its room. A tombstone must
+        // still move past the known active version in that case; otherwise a
+        // same-version active copy with a lower nonce can resurrect it.
+        const isDeleted = Boolean(elem.isDeleted && last?.isDeleted !== true)
         const isForwardVersion = !prev || Number(elem.version ?? 1) > prev.version
 
-        if (last && (isDeleted || isResurrected || (hasStateChanged && !isForwardVersion))) {
+        // The first local delete can arrive before the per-element broadcast
+        // baseline has been seeded (for example during collaboration join).
+        // Still advance it beyond the best version this client knows; otherwise
+        // an active peer copy at the same version can win the nonce tie-break
+        // and resurrect the deleted element.
+        if (isDeleted || (last && (isResurrected || (hasStateChanged && !isForwardVersion)))) {
           const bumpedVersion = Math.max(Number(elem.version ?? 1), Number(prev?.version ?? 1)) + 1
           const bumpedNonce = Math.floor(Math.random() * 1000000)
           const bumpedElem = { ...elem, version: bumpedVersion, versionNonce: bumpedNonce }
@@ -641,13 +674,100 @@ export function useCollaboration({
     [enabled, collabUser, isReadOnly, boardId, apiRef, elementsRef],
   )
 
+  // A recovered offline head has already passed the cloud merge/CAS path. It
+  // must be allowed to seed RTDB even while the reconnect barrier still keeps
+  // normal canvas edits read-only.
+  const broadcastCanonicalScene = useCallback(async (currentElements: readonly any[]) => {
+    if (restorationBlockedRef.current || !enabled || !collabUser || isSpectatorRef.current) {
+      lastCanonicalBroadcastRef.current = { outcome: 'blocked', restorationBlocked: restorationBlockedRef.current,
+        enabled, hasUser: Boolean(collabUser), spectator: isSpectatorRef.current, count: currentElements.length }
+      return currentElements as any[]
+    }
+    const service = collabServiceRef.current
+    if (!service.isReadyForBoard(boardId)) {
+      pendingCanonicalSceneRef.current = currentElements.map((element) => ({ ...element }))
+      lastCanonicalBroadcastRef.current = { outcome: 'queued-not-ready', count: currentElements.length,
+        activeBoardId: (service as any).activeBoardId, connectionEpoch: (service as any).connectionEpoch }
+      return currentElements as any[]
+    }
+    const canonical = currentElements.map((element) => {
+      const previous = lastBroadcastElementsRef.current.get(element.id)
+      const known = knownElementVersionsRef.current.get(element.id)
+      // A canonical cloud merge can resolve a same-version gesture race in
+      // favor of a different full element. Give that resolution a monotonic
+      // version so every connected peer accepts it over a stale gesture frame.
+      if (previous && known && haveElementPropertiesChanged(previous, element) &&
+        Number(element.version ?? 1) <= known.version) {
+        return {
+          ...element,
+          version: known.version + 1,
+          versionNonce: Math.floor(Math.random() * 1000000),
+          lastModifiedBy: collabUser.uid,
+        }
+      }
+      return { ...element, lastModifiedBy: collabUser.uid }
+    })
+    const changed = canonical.some((element, index) => element.version !== currentElements[index]?.version ||
+      element.versionNonce !== currentElements[index]?.versionNonce)
+    const delivered = await service.broadcastElementDeltas(boardId, canonical, collabUser.uid)
+    if (!delivered) {
+      pendingCanonicalSceneRef.current = currentElements.map((element) => ({ ...element }))
+      lastCanonicalBroadcastRef.current = { outcome: 'queued-write-failed', count: canonical.length,
+        activeBoardId: (service as any).activeBoardId, connectionEpoch: (service as any).connectionEpoch,
+        generation: (service as any).boardContexts?.get(boardId)?.generation }
+      return currentElements as any[]
+    }
+    lastCanonicalBroadcastRef.current = { outcome: 'delivered', count: canonical.length,
+      activeBoardId: (service as any).activeBoardId, connectionEpoch: (service as any).connectionEpoch }
+    pendingCanonicalSceneRef.current = null
+    if (changed) elementsRef.current = canonical
+    for (const element of canonical) {
+      knownElementVersionsRef.current.set(element.id, {
+        version: Number(element.version ?? 1), versionNonce: Number(element.versionNonce ?? 0),
+      })
+      lastBroadcastElementsRef.current.set(element.id, { ...element })
+    }
+    return canonical
+  }, [enabled, collabUser, boardId, elementsRef])
+
+  // A canonical refresh can finish just before Firebase rotates the socket's
+  // authorized connection epoch. Keep the scene queued until that epoch is
+  // published, then seed it even when conflict UI has made this editor
+  // read-only; this is state recovery, not a user edit.
+  useEffect(() => {
+    const pending = pendingCanonicalSceneRef.current
+    if (!enabled || !connectionEpoch || !pending) return
+    pendingCanonicalSceneRef.current = null
+    void broadcastCanonicalScene(pending).then((elements) => {
+      if (!apiRef.current || !elements.length) return
+      elementsRef.current = elements
+        onRemoteSceneApply?.(elements, 'before', false)
+      try {
+        apiRef.current.updateScene({ elements, captureUpdate: 'NEVER' })
+      } finally {
+        onRemoteSceneApply?.(getFullSceneElements(apiRef.current, elements), 'after', !isReadOnlyRef.current && !isSpectatorRef.current)
+      }
+    }).catch((error) => {
+      console.warn('[Collab] Deferred canonical scene broadcast failed:', error)
+    })
+  }, [enabled, connectionEpoch, broadcastCanonicalScene, apiRef, elementsRef, onRemoteSceneApply])
+
   if (import.meta.env.DEV && typeof window !== 'undefined') {
     ;(window as any).__collab = {
       collabUser,
       activeCollaborators,
       excalidrawCollaborators,
       service: collabServiceRef.current,
+      debugTransport: {
+        activeBoardId: (collabServiceRef.current as any).activeBoardId,
+        activeSessionId: (collabServiceRef.current as any).activeSessionId,
+        connectionEpoch: (collabServiceRef.current as any).connectionEpoch,
+        boardContext: (collabServiceRef.current as any).boardContexts?.get(boardId),
+        listenerGeneration: generation,
+        lastReceived: lastReceivedElementRef,
+      },
       broadcastChanges,
+      lastReceivedElementRef,
       isEditor,
       isSpectator,
       editorCount,
@@ -656,6 +776,11 @@ export function useCollaboration({
       isDraggingRef,
       pendingDragElementsRef,
       lastBroadcastElementsRef,
+      // Development-only state makes RTDB reconciliation failures inspectable
+      // without exposing the maps to production consumers.
+      knownElementVersionsRef,
+      restorationBlockedRef,
+      lastCanonicalBroadcastRef,
       simulateSleepWipe: async (bid: string) => {
         const rtdb = getFirebaseRtdb()
         const sid = collabUserRef.current?.sessionId
@@ -673,6 +798,7 @@ export function useCollaboration({
     excalidrawCollaborators,
     onPointerUpdate,
     broadcastChanges,
+    broadcastCanonicalScene,
     isEditor,
     isSpectator,
     editorCount,

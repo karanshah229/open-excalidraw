@@ -32,7 +32,7 @@ function parseArgs(argv) {
 }
 
 const safePathSegment = (value) => typeof value === 'string' && value.length > 0 &&
-  value.length <= 256 && !/[\/\u0000-\u001f]/.test(value)
+  value.length <= 256 && ![...value].some((character) => character === '/' || character.charCodeAt(0) <= 0x1f)
 const safeProjectSegment = (value) => typeof value === 'string' && /^[A-Za-z0-9_-]{1,160}$/.test(value)
 
 async function main() {

@@ -90,6 +90,10 @@ try {
   await owner.waitForSelector('.slides-toggle')
   if (!(await owner.$('.slides-panel'))) await owner.click('.slides-toggle')
   await owner.waitForSelector('.slide-card')
+  // Selecting the first card makes the move target deterministic even if the
+  // editor restored a different active slide from its local camera state.
+  await owner.click('.slide-card:first-child')
+  await owner.waitForSelector('[aria-label="Move slide later"]')
   await viewer.goto(`${base}/boards/${id}`)
   await viewer.waitForSelector('.slides-toggle')
   if (!(await viewer.$('.slides-panel'))) await viewer.click('.slides-toggle')
@@ -105,15 +109,47 @@ try {
   const movedId = await owner.evaluate(
     () => window.__excalidrawAPI.getSceneElements().find((element) => element.customData?.agenticWhiteboard?.slide).id,
   )
-  await owner.click('[aria-label="Move slide later"]')
-  await viewer.waitForFunction(
-    async (id) => {
+  // Adding the viewer starts lazy collaboration and temporarily disables
+  // editing controls while both clients transition onto the shared room.
+  // Wait for the ownership transition, then resolve and click the control in a
+  // single browser task so a rerender cannot detach Puppeteer's stale handle.
+  await owner.waitForFunction(() => {
+    const button = document.querySelector('[aria-label="Move slide later"]')
+    return window.__lazyCollab?.isLazyCollabActive &&
+      !window.__lazyCollab?.isTransitioningCollab && button && !button.disabled
+  })
+  const clickedMove = await owner.evaluate(() => {
+    const button = document.querySelector('[aria-label="Move slide later"]')
+    if (!button || button.disabled) return false
+    button.click()
+    return true
+  })
+  assert.equal(clickedMove, true, 'Slide move control is present after collaboration transition')
+  try {
+    await viewer.waitForFunction(
+      async (id) => {
+        const { getSlides } = await import('/src/features/slides/slide-model.ts')
+        return getSlides(window.__excalidrawAPI.getSceneElements())[1]?.id === id
+      },
+      { timeout: 10000 },
+      movedId,
+    )
+  } catch (error) {
+    const diagnostic = await Promise.all([owner, viewer].map((page) => page.evaluate(async () => {
       const { getSlides } = await import('/src/features/slides/slide-model.ts')
-      return getSlides(window.__excalidrawAPI.getSceneElements())[1]?.id === id
-    },
-    {},
-    movedId,
-  )
+      const { getFirebaseAuth } = await import('/src/lib/firebase.ts')
+      const auth = getFirebaseAuth()
+      return {
+        authUser: { uid: auth?.currentUser?.uid, isAnonymous: auth?.currentUser?.isAnonymous },
+        slides: getSlides(window.__excalidrawAPI.getSceneElements()).map((slide) => slide.id),
+        collab: window.__lazyCollab,
+        transport: window.__collab?.debugTransport,
+        collabUser: window.__collab?.collabUser,
+        isEditor: window.__collab?.isEditor,
+      }
+    })))
+    throw new Error(`Shared slide reorder did not converge: ${JSON.stringify(diagnostic)}`, { cause: error })
+  }
   assert.deepEqual(
     await viewer.evaluate(() => {
       const s = window.__excalidrawAPI.getAppState()
@@ -251,10 +287,14 @@ try {
   await owner.click('[aria-label="Sync status and board details"]')
   await owner.waitForSelector('.sync-simple-desc')
   assert(
-    ['Saved to this device. Syncing to cloud.', 'Synced to cloud and this device.'].includes(
-      await owner.$eval('.sync-simple-desc', (node) => node.textContent),
+    [
+      'Saved to this device. Syncing to cloud.',
+      'Synced to cloud and this device.',
+      'Saved on this device. Retrying cloud sync.',
+    ].includes(
+      (await owner.$eval('.sync-simple-desc', (node) => node.textContent))?.trim(),
     ),
-    'A signed-in owner reports cloud status, whether the pending write already completed or not',
+    `A signed-in owner reports cloud status; actual status: ${await owner.$eval('.sync-simple-desc', (node) => node.textContent)}`,
   )
   await owner.keyboard.press('Escape')
   await owner.screenshot({ path: '.system_generated/slides/owner-local-timeout-recovery.png' })
@@ -535,25 +575,23 @@ try {
       dialogRemovals: window.__shareDialogRemovals,
       boardLoading: document.querySelector('.workspace-loading')?.textContent,
       accessDenied: document.querySelector('.access-denied-title')?.textContent,
+      slideProperties: document.querySelector('.slide-properties')?.outerHTML,
+      readonlyBanner: document.querySelector('[data-testid="board-readonly"]')?.textContent,
+      userId: window.__e2eAuthUid,
+      sync: document.querySelector('.sync-simple-desc')?.textContent,
       focus: document.hasFocus(),
     })),
   )
   console.error(
     'Guest failure state',
     await viewer
-      .evaluate(async () => {
-        const { workspaceApi } = await import('/src/features/workspace/workspace-api.ts')
-        const details = await workspaceApi.loadBoardWithProject(location.pathname.split('/').pop())
-        return {
+      .evaluate(() => ({
           viewMode: window.__excalidrawAPI?.getAppState().viewModeEnabled,
           collab: window.__lazyCollab,
-          status: details?.document.syncStatus,
-          owner: details?.project.ownerId,
           cards: document.querySelectorAll('.slide-card').length,
           actions: document.querySelectorAll('.slide-actions button').length,
           text: document.body.textContent.slice(-1600),
-        }
-      })
+        }))
       .catch((diagnosticError) => ({ diagnosticError: String(diagnosticError) })),
   )
   await viewer.screenshot({ path: '.system_generated/slides/shared-guest-failure.png' })

@@ -47,6 +47,10 @@ export async function refreshHistoryFence(boardId: string, generation: number, f
       expectedFence: fence, resolvedHeadMutationId: pending.headMutationId,
     })
   }
+  // Reauthorization updates the local outbox fence, but commits also validate
+  // against the loaded scene head. Refresh that snapshot so its restoreFence
+  // matches the server before the pending current head is published.
+  await sceneService.loadUnshared(boardId)
 }
 
 async function existingStage(ref: DocumentReference) {
@@ -221,22 +225,25 @@ async function applyFieldIntents(options: SyncOptions, snapshot: CommittedBoardC
   // A later explicit rename can carry a newly observed CAS base after a user
   // resolves a conflict. Earlier captures remain history, not vetoes on that choice.
   const name = [...entries].reverse().find((entry) => !entry.headAcknowledged && entry.changedFields.name)
+  let nameRevision: number | undefined
   if (name) {
     const head = await sceneService.load(options.boardId)
     if (!head || head.generation !== name.generation) throw new SceneGenerationError()
+    nameRevision = head.nameRevision ?? 0
     if (head.boardName !== snapshot.document.name) {
       if (!Number.isInteger(name.fieldBases.nameRevision))
         throw new Error('Refresh the name conflict before applying this offline rename.')
       checkedIdentity(uid, options.boardId, epoch)
-      await projectCall('updateBoardContent', { boardId: options.boardId, mutationId: `${name.headMutationId}_name`,
+      const updated = await projectCall<{ nameRevision?: number }>('updateBoardContent', { boardId: options.boardId, mutationId: `${name.headMutationId}_name`,
         generation: name.generation, expectedFence: name.expectedFence,
         nameRevision: name.fieldBases.nameRevision, name: snapshot.document.name })
+      nameRevision = updated.nameRevision ?? nameRevision + 1
     }
   }
   const notes = new Map<string, HistoryOutboxEntry>()
   for (const entry of entries.filter((entry) => !entry.headAcknowledged))
     for (const slideId of entry.changedFields.notes ?? []) if (!notes.has(slideId)) notes.set(slideId, entry)
-  if (!notes.size) return
+  if (!notes.size) return nameRevision
   const cloud = await readHistorySnapshot(options.boardId, undefined, false)
   for (const [slideId, entry] of notes) {
     const text = snapshot.notes[slideId] ?? ''
@@ -250,6 +257,7 @@ async function applyFieldIntents(options: SyncOptions, snapshot: CommittedBoardC
       generation: entry.generation, expectedFence: entry.expectedFence })
     if (result.conflict) throw new Error(`Speaker note ${slideId} changed on another device. Resolve the note conflict.`)
   }
+  return nameRevision
 }
 
 async function run(options: SyncOptions): Promise<LoadedScene | null> {
@@ -377,7 +385,7 @@ async function run(options: SyncOptions): Promise<LoadedScene | null> {
   if (!latest) return sceneService.load(options.boardId)
   const snapshot = snapshots.get(latest.localVersionId)
   if (!snapshot) throw new Error('The pending current-content snapshot is unavailable.')
-  await applyFieldIntents(options, snapshot, entries, uid, epoch)
+  const appliedNameRevision = await applyFieldIntents(options, snapshot, entries, uid, epoch)
   checkedIdentity(uid, options.boardId, epoch)
   const scene = await storeSceneAssets(snapshot.document.scene, options.assetRoot, options.projectId,
     { expectedGeneration: latest.generation, expectedFence: latest.expectedFence })
@@ -409,7 +417,7 @@ async function run(options: SyncOptions): Promise<LoadedScene | null> {
       name: pending.some((entry) => entry.changedFields.name) ? committed.document.name : cloud.entry.name,
       cloudRevisionId: cloud.revisionId, cloudGeneration: cloud.generation,
       cloudVersionId: cloud.entry.id, cloudRestoreFence: published.restoreFence ?? latest.expectedFence,
-      cloudNameRevision: published.nameRevision,
+      cloudNameRevision: appliedNameRevision ?? published.nameRevision,
       syncStatus: ['sync-blocked', 'conflict'].includes(committed.document.syncStatus)
         ? committed.document.syncStatus : pending.length ? 'local-only' : 'synced',
       baseRevision: pending.length ? committed.document.baseRevision : committed.document.revision,

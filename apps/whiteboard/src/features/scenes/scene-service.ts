@@ -150,12 +150,22 @@ function isSceneBootstrapPending(error: unknown) {
     callableError.details?.reason === 'scene-bootstrap-pending'
   )
 }
+function callableCode(error: unknown) {
+  const code = (error as { code?: unknown })?.code
+  return typeof code === 'string' ? code.replace(/^functions\//, '') : undefined
+}
+function isRevisionConflict(error: unknown) {
+  return callableCode(error) === 'aborted' ||
+    (error instanceof Error && /Scene revision changed/.test(error.message))
+}
 async function callScene<T>(name: string, data: Record<string, unknown>): Promise<T> {
   try {
     return await projectCall<T>(name, data)
   } catch (error) {
     if (isMaintenanceBusy(error))
-      throw new Error('Board maintenance is in progress. Your local draft is retained; try syncing again shortly.')
+      throw new Error('Board maintenance is in progress. Your local draft is retained; try syncing again shortly.', {
+        cause: error,
+      })
     throw error
   }
 }
@@ -192,6 +202,11 @@ function dropRecentScene(boardId: string) {
   if (!cached) return
   recentSceneCacheBytes -= cached.bytes
   recentSceneCache.delete(boardId)
+}
+async function reloadSceneHead(boardId: string) {
+  dropRecentScene(boardId)
+  observedHeads.delete(boardId)
+  return sceneService.loadUnshared(boardId)
 }
 function cacheRecentScene(boardId: string, identity: string | undefined, value: LoadedScene) {
   dropRecentScene(boardId)
@@ -486,9 +501,29 @@ export const sceneService = {
     const observed = observedHeads.get(boardId)
     // Repeated route/share hydrators may reuse an authorized immutable scene
     // only while a server-confirmed Firestore head listener proves it current.
-    if (cached && cached.identity === identity && cached.expiresAt > Date.now() && observed &&
-      observed.revisionId === cached.value.revisionId && observed.generation === cached.value.generation)
-      return cached.value
+    if (cached && cached.identity === identity && cached.expiresAt > Date.now()) {
+      if (observed && observed.revisionId === cached.value.revisionId &&
+        observed.generation === cached.value.generation)
+        return cached.value
+      // Initial route hydration can finish just before the head listener is
+      // attached. A second initializer should verify the tiny mutable head,
+      // then reuse the immutable chunks instead of acquiring another pin and
+      // downloading the whole board again.
+      if (!observed) {
+        try {
+          const snapshot = await getDocFromServer(doc(requireDb(), 'boardScenes', boardId))
+          const head = snapshot.exists() ? snapshot.data() as SceneHead : undefined
+          if (head?.headRevisionId === cached.value.revisionId &&
+            head.generation === cached.value.generation) {
+            observedHeads.set(boardId, { revisionId: head.headRevisionId, generation: head.generation })
+            return cached.value
+          }
+        } catch {
+          // Fall through to a fresh authorized scene read if verification is
+          // unavailable; cached content alone never grants access.
+        }
+      }
+    }
     if (cached) dropRecentScene(boardId)
     const active = sceneLoadRequests.get(boardId)
     if (active) return active
@@ -498,7 +533,20 @@ export const sceneService = {
     sceneLoadRequests.set(boardId, request)
     return request
   },
-  async loadUnshared(boardId: string): Promise<LoadedScene | null> {
+  // Sync/reconnect recovery must read a newly authorized head. The normal
+  // route cache is safe for rendering, but a Firestore head listener can lag a
+  // committed outbox receipt; reusing that cached revision could roll a live
+  // editor back after RTDB has already delivered newer elements.
+  async loadFresh(boardId: string): Promise<LoadedScene | null> {
+    // Retain the immutable bytes while discarding only the observed-head hint.
+    // `load` will verify the mutable head with getDocFromServer before reusing
+    // them; if the head advanced it falls through to a new pinned read. This
+    // avoids a second chunk pin when an initial RTDB reconnect immediately
+    // follows route hydration, without trusting stale cache state.
+    observedHeads.delete(boardId)
+    return this.load(boardId)
+  },
+  async loadUnshared(boardId: string, options: { forceFresh?: boolean } = {}): Promise<LoadedScene | null> {
     requireOnline()
     // Establish a guest identity before capturing the cache identity. Creating
     // it inside the history read would look like an account switch mid-load.
@@ -508,8 +556,8 @@ export const sceneService = {
       if (!auth.currentUser && !await ensureAuthenticatedUser(auth)) throw new Error('Sign in to load this board.')
     }
     const identity = cacheIdentity()
-    const loadKey = `${identity ?? 'anonymous'}:${boardId}`
-    const existingLoad = sceneLoadsInFlight.get(loadKey)
+    const loadKey = `${identity ?? 'anonymous'}:${boardId}${options.forceFresh ? `:fresh:${crypto.randomUUID()}` : ''}`
+    const existingLoad = options.forceFresh ? undefined : sceneLoadsInFlight.get(loadKey)
     if (existingLoad) return existingLoad
 
     const loadPromise = (async (): Promise<LoadedScene | null> => {
@@ -646,10 +694,12 @@ export const sceneService = {
             if (isMaintenanceBusy(error))
               throw new Error(
                 'Board maintenance is in progress. Your local draft is retained; try loading again shortly.',
+                { cause: error },
               )
             if (error instanceof SceneReadPinRestartError)
               throw new Error(
                 'Could not keep the board available while loading. Your local draft is retained; retry loading.',
+                { cause: error },
               )
             throw error
           } finally {
@@ -894,7 +944,7 @@ export const sceneService = {
         forgetCandidate(uid, boardId)
       }
     }
-    for (let attempt = 0; attempt < 4; attempt++) {
+    for (let attempt = 0; attempt < 8; attempt++) {
       checkedIdentity(uid)
       assertHistoryMutationAllowed(boardId, editingEpoch)
       let base = await sceneService.load(boardId)
@@ -915,6 +965,10 @@ export const sceneService = {
         ...source,
         elements: reconcileElementsLWW(source.elements, base.scene.elements),
         files: { ...base.scene.files, ...source.files },
+        // Deletion observation timestamps and compact records are server-owned.
+        // A local/outbox snapshot can predate the current ledger, so it must
+        // never replace the value read from the current cloud base.
+        deletionLedger: base.scene.deletionLedger ?? [],
       }
       const packed = await packScene(scene, base.chunks)
       const previousIds = new Set(base.chunks.map((c) => c.chunkId))
@@ -953,13 +1007,16 @@ export const sceneService = {
           candidateDigest,
         })
       } catch (error) {
-        if ((error as CallableError).code !== 'functions/aborted') throw error
-        const latest = await sceneService.load(boardId)
+        if (!isRevisionConflict(error)) throw error
+        const latest = await reloadSceneHead(boardId)
         const details = (error as CallableError).details
         const latestGeneration = latest?.generation ?? details?.generation
         if (latestGeneration !== undefined && latestGeneration !== base.generation) throw new SceneGenerationError()
         if (latest && latest.revisionId !== base.revisionId) {
-          await new Promise<void>((resolve) => setTimeout(resolve, 100 * 2 ** attempt))
+        // Concurrent editors can otherwise retry the same head CAS in
+        // lockstep. Jitter gives one publisher time to advance the head so the
+        // other can rebase against that committed revision.
+        await new Promise<void>((resolve) => setTimeout(resolve, 150 * 2 ** attempt + Math.random() * 1000))
           continue
         }
         throw error
@@ -990,12 +1047,12 @@ export const sceneService = {
         // Another writer may publish after beginUpload but before this candidate finishes
         // staging. The server fences that upload; rebase from the new head just as we do
         // when begin/publish detects a stale revision. Preserve gate/permission failures.
-        const code = (error as CallableError).code
-        if (code !== 'functions/failed-precondition' && code !== 'functions/aborted') throw error
-        const latest = await sceneService.load(boardId)
+        const code = callableCode(error)
+        if (code !== 'failed-precondition' && code !== 'aborted') throw error
+        const latest = await reloadSceneHead(boardId)
         if (latest && latest.generation !== base.generation) throw new SceneGenerationError()
         if (latest && latest.revisionId !== base.revisionId) {
-          await new Promise<void>((resolve) => setTimeout(resolve, 100 * 2 ** attempt + Math.random() * 100))
+          await new Promise<void>((resolve) => setTimeout(resolve, 150 * 2 ** attempt + Math.random() * 1000))
           continue
         }
         throw error
@@ -1032,11 +1089,13 @@ export const sceneService = {
           currentVersionId: receipt.versionId ?? base.currentVersionId,
         }
       } catch (error) {
-        if ((error as { code?: string }).code !== 'functions/aborted') throw error
+        if (!isRevisionConflict(error)) throw error
         forgetCandidate(uid, boardId)
         const generation = (error as { details?: { generation?: number } }).details?.generation
         if (generation !== undefined && generation !== base.generation) throw new SceneGenerationError()
-        await new Promise<void>((resolve) => setTimeout(resolve, 100 * 2 ** attempt + Math.random() * 100))
+        const latest = await reloadSceneHead(boardId)
+        if (latest && latest.generation !== base.generation) throw new SceneGenerationError()
+        await new Promise<void>((resolve) => setTimeout(resolve, 150 * 2 ** attempt + Math.random() * 1000))
       }
     }
     throw new Error('Board is changing rapidly. Your draft is retained and cloud sync will retry.')

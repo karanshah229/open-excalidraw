@@ -31,7 +31,6 @@ const boardPath = `boards/${boardId}/elements`
 const presencePath = `presence/${boardId}`
 const activePath = `activeSessions/${boardId}`
 const gatePath = `system/sceneMaintenance/${boardId}/admissionClosed`
-let currentEpoch = ''
 const presenceRecord = (connectionEpoch, sceneGeneration = 1) => ({ userId: uid, sessionId: uid, connectionEpoch, sceneGeneration, displayName: 'Tester', color: '#000', lastSeen: Date.now() })
 const deltaRecord = (connectionEpoch, version = 1) => ({ id: 'element-1', version, versionNonce: version, lastModifiedBy: uid, sessionId: uid, connectionEpoch, data: JSON.stringify({ version }) })
 const denied = async (promise, message) => assert.rejects(promise, (error) => error?.code === 'PERMISSION_DENIED' || error?.code === 'database/permission-denied', message)
@@ -39,7 +38,7 @@ const denied = async (promise, message) => assert.rejects(promise, (error) => er
 try {
   await adminDb.ref(`boardAccess/${boardId}`).set({ ownerId: uid, ownerActive: true, projectId: `fence-project-${boardId}`, publicRead: true, publicWrite: false, blocked: false })
   const firstEpoch = await mintSceneConnectionEpochForSession({ uid }, boardId, uid, 1, adminDb)
-  currentEpoch = firstEpoch.connectionEpoch
+  let currentEpoch = firstEpoch.connectionEpoch
   await assert.rejects(
     mintSceneConnectionEpochForSession({ uid: 'unauthorized-user' }, boardId, uid, 1, adminDb),
     (error) => error?.code === 'permission-denied',
