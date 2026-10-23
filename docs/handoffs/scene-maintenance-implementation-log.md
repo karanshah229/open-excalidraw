@@ -176,4 +176,6 @@ No automatic generation-reset worker or new production deployment is enabled by 
 
 - Fixed cloud history hydration so the canonical board name reaches local history unless a local rename remains pending. Added bounded browser/Firebase cleanup to the history chaos E2E and made the collab undo follow-up assert captured editor updates by element identity across peers.
 - Verified the three affected regressions individually, then ran repository-wide `pnpm test`: all 22/22 stages passed. `git diff --check` passed.
-- This follow-up was not included in the October 22 production rollout above; it requires a separate merge and deployment. The production compaction flag must remain false and the private development canary must remain excluded.
+- PR [#15](https://github.com/karanshah229/open-excalidraw/pull/15) merged to `main` as `27f02eeab08857ae440ad2ae94aa7f4524e05fa2`.
+- Deployed the follow-up Hosting build and the updated `fenceBoardSceneGenerationReset`, `publishBoardSceneGenerationReset`, and `activateBoardSceneGenerationReset` Functions to production (`asia-southeast1`). No rules or unrelated Functions changed. `SCENE_TOMBSTONE_COMPACTION_ENABLED=false` remains configured, and `sceneMaintenanceCanary` remains absent from production.
+- Post-deploy smoke checks passed: Hosting root HTTP 200; production-configured `workspace-api` asset HTTP 200 and byte-matched the verified local build; unauthenticated generation-reset callable returned 401. No authenticated production board was mutated.
