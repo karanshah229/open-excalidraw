@@ -96,7 +96,7 @@ function validId(value: unknown): value is string {
 
 function validPrincipal(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= 256 &&
-    !/[\/\u0000-\u001f]/.test(value)
+    ![...value].some((character) => character === '/' || character.charCodeAt(0) <= 0x1f)
 }
 
 function isInteger(value: unknown): value is number {

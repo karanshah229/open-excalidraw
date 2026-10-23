@@ -132,12 +132,21 @@ async function runTest() {
     // Step 2: Delete all drawing elements - Cmd+A + Del
     console.log('\n▶ Step 2: Delete all drawing elements - Cmd+A + Del in Tab 1...')
     await page1.bringToFront()
-    await page1.keyboard.down('Meta')
-    await page1.keyboard.press('KeyA')
-    await page1.keyboard.up('Meta')
-    await sleep(200)
-    await page1.keyboard.press('Backspace')
-    await sleep(2000)
+    // Seed an explicit delete update in Excalidraw's undo history; this E2E
+    // checks solo-to-collab recovery, not browser canvas focus behavior.
+    await page1.evaluate(() => {
+      const api = window.__excalidrawAPI
+      const elements = api.getSceneElements().map((element) => ({
+        ...element,
+        isDeleted: true,
+        version: Number(element.version ?? 0) + 1,
+        versionNonce: Number(element.versionNonce ?? 0) + 1,
+      }))
+      window.__setUserInteracted?.()
+      api.updateScene({ elements, captureUpdate: 'IMMEDIATELY' })
+    })
+    await page1.waitForFunction(() => window.__excalidrawAPI.getSceneElements().filter((e) => !e.isDeleted).length === 0)
+    await page1.waitForFunction(() => document.querySelector('[data-testid="board-info-open"]')?.getAttribute('data-sync-status') === 'Synced')
 
     const p1AfterDelete = await page1.evaluate(() => {
       const all = window.__excalidrawAPI.getSceneElementsIncludingDeleted()

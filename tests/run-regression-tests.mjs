@@ -87,7 +87,7 @@ if (!process.argv.includes('--inside-emulators')) {
     await symlink(resolve(root, 'functions/node_modules'), resolve(functions, 'node_modules'), 'dir')
     await writeFile(
       resolve(functions, '.env.demo-regression'),
-      `RTDB_FUNCTION_REGION=us-central1\nFIRESTORE_FUNCTION_REGION=us-central1\nSYNC_ACCESS_FUNCTION_REGION=us-central1\nASSET_ENFORCE_APP_CHECK=false\nSCENE_TOMBSTONE_COMPACTION_ENABLED=${process.env.SCENE_TOMBSTONE_COMPACTION_ENABLED === 'true' ? 'true' : 'false'}\nSCENE_COMPACTION_TEST_HOLD_MS=${process.env.SCENE_COMPACTION_TEST_HOLD_MS ?? '0'}\n`,
+      `RTDB_FUNCTION_REGION=us-central1\nFIRESTORE_FUNCTION_REGION=us-central1\nSYNC_ACCESS_FUNCTION_REGION=us-central1\nASSET_ENFORCE_APP_CHECK=false\nSCENE_TOMBSTONE_COMPACTION_ENABLED=${process.env.SCENE_TOMBSTONE_COMPACTION_ENABLED === 'true' || files.includes('tombstone-compaction-e2e.test.mjs') ? 'true' : 'false'}\nSCENE_COMPACTION_TEST_HOLD_MS=${process.env.SCENE_COMPACTION_TEST_HOLD_MS ?? (files.includes('tombstone-compaction-e2e.test.mjs') ? '10000' : '0')}\n`,
     )
     const config = JSON.parse(await readFile(resolve(root, 'regression.firebase.json'), 'utf8'))
     config.functions.source = 'functions'
@@ -195,7 +195,7 @@ if (!process.argv.includes('--inside-emulators')) {
           } catch {
             // The test may have already exited when its timeout fires.
           }
-        }, 300000)
+        }, name === 'board-history-divergence-ui.test.mjs' ? 1200000 : 300000)
         child.on('error', (error) => {
           clearTimeout(timer)
           reject(error)

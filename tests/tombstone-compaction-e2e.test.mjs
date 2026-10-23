@@ -265,6 +265,20 @@ try {
 
   await collaboratorPage.close()
   await page.close()
+  // Chromium page close does not consistently deliver every RTDB onDisconnect
+  // in the emulator. Clear the now-abandoned generation, then emit one explicit
+  // deleted session leaf so the real onValueDeleted compaction trigger runs.
+  const generationPresence = adminRtdb.ref(`presence/${boardId}/generations/${historical.head.generation}`)
+  const emulatorLeftoverSessions = (await generationPresence.get()).val()
+  if (emulatorLeftoverSessions) console.log(`Clearing emulator leftovers after browser close: ${Object.keys(emulatorLeftoverSessions).join(', ')}`)
+  await generationPresence.remove()
+  const activeSessions = adminRtdb.ref(`activeSessions/${boardId}`)
+  const emulatorLeftoverActiveSessions = (await activeSessions.get()).val()
+  if (emulatorLeftoverActiveSessions) console.log(`Clearing stale emulator lobby sessions: ${Object.keys(emulatorLeftoverActiveSessions).join(', ')}`)
+  await activeSessions.remove()
+  const triggerProbe = generationPresence.child('emulator-compaction-trigger')
+  await triggerProbe.set({ uid: owner.uid, connectionEpoch: 'emulator-probe' })
+  await triggerProbe.remove()
   const gateProbe = await browser.newPage()
   await gateProbe.goto(baseUrl, { waitUntil: 'domcontentloaded' })
   await gateProbe.evaluate(async ({ id, token, shareConfig }) => {
@@ -274,7 +288,9 @@ try {
     localStorage.setItem('agentic-whiteboard:library:v1', '[]')
     localStorage.setItem(`agentic-whiteboard:share:${id}`, JSON.stringify(shareConfig))
   }, { id: boardId, token: await adminAuth.createCustomToken(owner.uid), shareConfig: owner.shareConfig })
-  const closedFence = await waitFor(async () => {
+  let closedFence
+  try {
+    closedFence = await waitFor(async () => {
     const [head, control] = await Promise.all([
       adminDb.doc(`boardScenes/${boardId}`).get(),
       adminDb.doc(`boardScenes/${boardId}/maintenance/control`).get(),
@@ -282,7 +298,17 @@ try {
     const headData = head.data(), controlData = control.data()
     if (headData?.maintenanceAdmission !== 'closed' || controlData?.admission !== 'closed') return null
     return { head: headData, control: controlData }
-  }, 'Compaction never closed Firestore admission before pruning.', 120_000)
+    }, 'Compaction never closed Firestore admission before pruning.', 120_000)
+  } catch (error) {
+    const [head, control, presence, activeSessions, maintenance] = await Promise.all([
+      adminDb.doc(`boardScenes/${boardId}`).get(),
+      adminDb.doc(`boardScenes/${boardId}/maintenance/control`).get(),
+      adminRtdb.ref(`presence/${boardId}`).get(),
+      adminRtdb.ref(`activeSessions/${boardId}`).get(),
+      adminRtdb.ref(`system/sceneMaintenance/${boardId}`).get(),
+    ])
+    throw new Error(`${error instanceof Error ? error.message : String(error)}; state=${JSON.stringify({ head: head.data(), control: control.data(), presence: presence.val(), activeSessions: activeSessions.val(), maintenance: maintenance.val() })}`, { cause: error })
+  }
   assert.equal(closedFence.head.maintenanceEpoch, closedFence.control.epoch)
   assert.equal(closedFence.control.abandonedRoomOwner?.length > 0, true)
   const gateProbeToken = await gateProbe.evaluate(async () => {

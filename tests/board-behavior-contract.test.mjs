@@ -48,6 +48,7 @@ async function clickText(page, text, selector = 'button,[role="menuitem"]') {
   )
 }
 async function draw(page, x = 300, y = 300) {
+  await page.waitForSelector('[data-testid="toolbar-rectangle"]', { visible: true })
   await page.click('[data-testid="toolbar-rectangle"]')
   await page.mouse.move(x, y)
   await page.mouse.down()
@@ -87,7 +88,7 @@ async function ownerBoard(page) {
   })
 }
 async function share(page) {
-  await page.click('button[title="Share board"]')
+  await page.locator('button[title="Share board"]').click()
   await page.waitForSelector('.google-share-dialog')
 }
 async function mode(page, readOnly) {
@@ -282,9 +283,14 @@ try {
     await mode(recipient, false)
     await closeShare(owner)
     await recipient.waitForFunction(() => !window.__lazyCollab?.isTransitioningCollab)
+    await Promise.all([owner, recipient].map((page) => page.waitForFunction(
+      () => window.__lazyCollab?.isLazyCollabActive && window.__lazyCollab.activeSessions.length >= 2,
+      { timeout: 30_000 },
+    )))
     await draw(recipient, 500, 500)
     await owner.waitForFunction(
       () => window.__excalidrawAPI.getSceneElements().filter((e) => !e.isDeleted).length === 2,
+      { timeout: 30_000 },
     )
     await share(owner)
     await owner.click('[aria-label="Change permission"]')
@@ -332,9 +338,22 @@ try {
     await clickText(owner, 'Editor', '[role="menuitem"]')
     await closeShare(owner)
     await mode(rejoined, false)
+    const existingElementIds = await owner.evaluate(() =>
+      window.__excalidrawAPI.getSceneElements().filter((e) => !e.isDeleted).map((e) => e.id),
+    )
     await draw(rejoined, 750, 600)
+    const newlyDrawnIds = await rejoined.evaluate((existingIds) =>
+      window.__excalidrawAPI
+        .getSceneElements()
+        .filter((e) => !e.isDeleted && !existingIds.includes(e.id))
+        .map((e) => e.id),
+      existingElementIds,
+    )
+    assert.equal(newlyDrawnIds.length, 1, 'The rejoined editor should create one new shape')
     await owner.waitForFunction(
-      () => window.__excalidrawAPI.getSceneElements().filter((e) => !e.isDeleted).length === 3,
+      (ids) => ids.every((id) => window.__excalidrawAPI.getSceneElements().some((e) => e.id === id && !e.isDeleted)),
+      { timeout: 30_000 },
+      newlyDrawnIds,
     )
     await guestContext.close()
     await ownerContext.close()

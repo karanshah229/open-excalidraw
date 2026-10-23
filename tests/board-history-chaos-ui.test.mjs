@@ -37,6 +37,19 @@ async function interceptFetch(cdp, pattern, handle) {
     assert.deepEqual(errors, [], 'Network fault callbacks completed without protocol errors')
   }
 }
+async function closeWithin(label, operation, timeoutMs = 10_000) {
+  let timer
+  try {
+    await Promise.race([
+      operation(),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} exceeded ${timeoutMs}ms`)), timeoutMs) }),
+    ])
+  } catch (error) {
+    console.warn(`[cleanup] ${error.message}`)
+  } finally {
+    clearTimeout(timer)
+  }
+}
 async function tab(name) {
   const context = await browser.createBrowserContext()
   contexts.push(context)
@@ -81,12 +94,15 @@ async function open(page, id) {
   await page.waitForFunction(() => !!window.__excalidrawAPI)
 }
 async function draw(page, x = 750) {
-  await page.mouse.click(600, 700)
-  await page.keyboard.press('r')
+  const before = await contentIds(page)
+  await page.waitForSelector('[data-testid="toolbar-rectangle"]')
+  await page.click('[data-testid="toolbar-rectangle"]')
+  await page.waitForFunction(() => window.__excalidrawAPI.getAppState().activeTool.type === 'rectangle')
   await page.mouse.move(x, 480)
   await page.mouse.down()
   await page.mouse.move(x + 95, 560, { steps: 4 })
   await page.mouse.up()
+  await wait(async () => (await contentIds(page)).some((id) => !before.includes(id)), 'Pointer gesture did not create a rectangle')
 }
 async function contentIds(page) { return page.evaluate(() => window.__excalidrawAPI.getSceneElements().filter((element) => !element.isDeleted).map((element) => element.id).sort()) }
 async function ledger(page, id) {
@@ -98,6 +114,7 @@ async function ledger(page, id) {
   }, id)
 }
 async function beginRestore(page, target) {
+  await page.waitForSelector('[data-testid="board-history-open"]:not(:disabled)')
   await page.click('[data-testid="board-history-open"]')
   await page.waitForSelector(`[data-version-id="${target}"]`)
   await page.click(`[data-version-id="${target}"]`)
@@ -109,9 +126,30 @@ async function beginRestore(page, target) {
 }
 async function complete(page) { await page.waitForFunction(() => !document.querySelector('[data-testid="history-restoration-progress"]') && !document.querySelector('[data-testid="board-history-dialog"]')) }
 async function notes(page) {
-  if (!(await page.$('.slides-panel'))) await page.click('.slides-toggle')
-  await page.waitForSelector('.slide-properties')
-  if (!(await page.$('#slide-notes-input'))) await page.$eval('.slide-properties', (element) => [...element.querySelectorAll('button')].find((button) => button.textContent.trim() === 'Notes')?.click())
+  const panelVisible = await page.$eval('.slides-panel', (panel) => panel.getClientRects().length > 0).catch(() => false)
+  if (!panelVisible) await page.click('.slides-toggle')
+  await page.waitForFunction(() => document.querySelector('.slides-panel')?.getClientRects().length > 0)
+  await page.waitForSelector('.slide-card')
+  await page.waitForFunction(() => {
+    if (document.querySelector('.slide-properties')) return true
+    document.querySelector('.slide-card')?.click()
+    return false
+  }, { timeout: 5000 }).catch(async (error) => {
+    const state = await page.evaluate(() => ({
+      viewMode: window.__excalidrawAPI?.getAppState().viewModeEnabled,
+      collab: window.__collab && { isEditor: window.__collab.isEditor, isSpectator: window.__collab.isSpectator },
+      cards: [...document.querySelectorAll('.slide-card')].map((card) => ({ current: card.getAttribute('aria-current'), text: card.textContent })),
+      panelText: document.querySelector('.slides-panel')?.textContent,
+    }))
+    throw new Error(`Recovered editor cannot select a notes slide: ${JSON.stringify(state)}`, { cause: error })
+  })
+  await page.waitForFunction(() => {
+    if (document.querySelector('#slide-notes-input')) return true
+    const button = [...(document.querySelector('.slide-properties')?.querySelectorAll('button') ?? [])]
+      .find((candidate) => candidate.textContent.trim() === 'Notes')
+    button?.click()
+    return false
+  })
   await page.waitForSelector('#slide-notes-input:not([disabled])')
 }
 try {
@@ -273,6 +311,15 @@ try {
   }
   // A failed publication must release both transports and retain every pending local tuple.
   const failedOwner = await tab('failed-owner'), failedGuest = await tab('failed-guest')
+  // Public-link editors still need an authenticated identity to publish their
+  // local history outbox. Give this peer the same emulator identity contract
+  // used by the other history-chaos participants before it opens the board.
+  await failedGuest.evaluate(async () => {
+    const { getFirebaseAuth } = await import('/src/lib/firebase.ts')
+    const { signInOwner } = await import('/tests/regression-fixture.ts')
+    await signInOwner(getFirebaseAuth())
+    await getFirebaseAuth().currentUser.getIdToken(true)
+  })
   const failedBoard = await seed(failedOwner, 'Pre-publication failure chaos')
   console.log('Failure fixture seeded')
   const failureTarget = (await db.doc(`boardScenes/${failedBoard.id}`).get()).data().currentVersionId
@@ -333,10 +380,31 @@ try {
     assert.equal(retained.current.notes['seed-slide'], 'Draft survives failed restoration')
     assert.ok(pendingIds.every((id) => retained.outbox.some((entry) => entry.localVersionId === id)), 'Failed restore retains every pending historical capture')
     assert.ok((await contentIds(failedGuest)).length > 2, 'Pending scene is retained rather than replaced with target')
-    if (await failedOwner.$('[aria-label="Close board history"]'))
-      await failedOwner.click('[aria-label="Close board history"]')
+    await failedOwner.evaluate(() => document.querySelector('[aria-label="Close board history"]')?.click())
     const ownerDiagnostic = async () => failedOwner.evaluate(async (id) => { const { historyEditingState } = await import('/src/features/history/history-editing-gate.ts'); const api = window.__excalidrawAPI; const state = api.getAppState(); return { gate: historyEditingState(id), ids: api.getSceneElements().map((element) => element.id), viewModeEnabled: state.viewModeEnabled, zenModeEnabled: state.zenModeEnabled } }, failedBoard.id)
-    assert.equal(await failedOwner.evaluate(() => window.__excalidrawAPI.getAppState().viewModeEnabled), false, 'Initiator canvas editing gate is released')
+    // The old writes have been held until the failed restore advanced the
+    // fence. Let them receive their stale-fence replies before asserting both
+    // editors resume; each retry must then use the refreshed fence.
+    await brokenPage.ref.set(backupPage)
+    failedGuest.off('request', holdPending)
+    for (const request of pendingWrites) if (!request.isInterceptResolutionHandled()) await request.continue()
+    await failedGuest.setRequestInterception(false)
+    await wait(async () => !(await failedOwner.evaluate(() => window.__excalidrawAPI.getAppState().viewModeEnabled)), `Initiator canvas editing gate is released: ${JSON.stringify(await ownerDiagnostic())}`, 15000)
+    await wait(
+      async () => !(await failedGuest.evaluate(() => window.__excalidrawAPI.getAppState().viewModeEnabled)),
+      `Peer remains read-only after failed restore: ${JSON.stringify(await failedGuest.evaluate(async (id) => { const { historyEditingState } = await import('/src/features/history/history-editing-gate.ts'); const { getFirebaseAuth } = await import('/src/lib/firebase.ts'); const { sharingService } = await import('/src/features/sharing/sharing-service.ts'); return { gate: historyEditingState(id), viewModeEnabled: window.__excalidrawAPI.getAppState().viewModeEnabled, uid: getFirebaseAuth().currentUser?.uid, collab: window.__lazyCollab, collabEditor: window.__collab && { isEditor: window.__collab.isEditor, isSpectator: window.__collab.isSpectator }, share: await sharingService.getShareConfig(id) } }, failedBoard.id))}`,
+      15000,
+    )
+    await notes(failedGuest)
+    assert.equal(await failedGuest.$eval('#slide-notes-input', (input) => input.disabled), false)
+    console.log('Peer editor and slide notes resumed after failed restore')
+    // Let the pre-existing draft retry before creating a fresh concurrent
+    // owner edit; that edit can legitimately conflict with the peer's dirty scene.
+    await wait(async () => {
+      const head = (await db.doc(`boardScenes/${failedBoard.id}`).get()).data()
+      return JSON.stringify(await loadNoteSnapshot(failedBoard.id, head.notesRevisionId)).includes('Draft survives failed restoration')
+    }, 'Preserved notes did not reauthorize and publish after failed fence')
+    console.log('Preserved note draft published with refreshed fence')
     const editedId = await failedOwner.evaluate(async () => {
       const api = window.__excalidrawAPI
       const { convertToExcalidrawElements } = await import('/tests/history-fixture.ts')
@@ -344,19 +412,9 @@ try {
       api.updateScene({ elements: [...api.getSceneElementsIncludingDeleted(), element], captureUpdate: 'IMMEDIATELY' })
       return element.id
     })
+    console.log(`Initiator edit created after failed restore: ${editedId}`)
     await wait(async () => (await contentIds(failedOwner)).includes(editedId), `Initiator cannot edit after failed restore: ${JSON.stringify(await ownerDiagnostic())}`, 15000)
-    await notes(failedGuest)
-    assert.equal(await failedGuest.$eval('#slide-notes-input', (input) => input.disabled), false)
-    // Restore the faulted historical ancestry before testing independent draft retries.
-    await brokenPage.ref.set(backupPage)
-    // Let the old fenced replies arrive; retries must retain capture identity and use the new fence.
-    failedGuest.off('request', holdPending)
-    for (const request of pendingWrites) if (!request.isInterceptResolutionHandled()) await request.continue()
-    await failedGuest.setRequestInterception(false)
-    await wait(async () => {
-      const head = (await db.doc(`boardScenes/${failedBoard.id}`).get()).data()
-      return JSON.stringify(await loadNoteSnapshot(failedBoard.id, head.notesRevisionId)).includes('Draft survives failed restoration')
-    }, 'Preserved notes did not reauthorize and publish after failed fence')
+    console.log('Initiator edit is present on canvas')
     assert.equal((await db.doc(`boardScenes/${failedBoard.id}`).get()).data().generation, beforeHead.generation)
     assert.ok(calls.some((call) => call.peer === 'failed-guest' && call.data?.expectedFence === failedHead.restoreFence && ['commitBoardScene', 'importBoardVersion', 'slideNotes'].includes(call.endpoint)), 'Retry uses refreshed monotonic fence')
     checks.push('Actual pre-publication corruption fails safely: same generation/new fence, both locks released, dirty scene/notes/history retained, editors resume, old replies reauthorize')
@@ -364,6 +422,9 @@ try {
   } finally { await brokenPage.ref.set(backupPage) }
 } finally {
   await writeFile(`${artifacts}/board-history-chaos-ui.json`, JSON.stringify({ checks, calls, failures }, null, 2))
-  await Promise.all(contexts.map((context) => context.close().catch(() => {})))
-  await browser.close(); await db.terminate(); await deleteApp(app)
+  await Promise.all(contexts.map((context) => closeWithin('Browser context close', () => context.close())))
+  await closeWithin('Browser close', () => browser.close())
+  browser.process()?.kill('SIGKILL')
+  await closeWithin('Firestore client shutdown', () => db.terminate())
+  await closeWithin('Firebase Admin shutdown', () => deleteApp(app))
 }

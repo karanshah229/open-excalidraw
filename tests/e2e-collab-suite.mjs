@@ -187,6 +187,21 @@ async function runLiveE2ECollaborationSuite() {
       throw error
     }
 
+    // Session presence alone is not sufficient: each tab must receive its
+    // server-authorized connection epoch and complete the brief read-only
+    // transition before the collaboration service can accept element deltas.
+    await Promise.all(
+      [page1, page2].map((page) =>
+        page.waitForFunction(
+          (id) => window.__collab?.service?.activeBoardId === id &&
+            Boolean(window.__collab.service.connectionEpoch) &&
+            window.__lazyCollab?.isTransitioningCollab === false,
+          { timeout: 15_000 },
+          boardId,
+        ),
+      ),
+    )
+
     // =================================================================
     // TEST 1: Live Presence & Collaborator Bar Discovery
     // =================================================================
@@ -280,7 +295,24 @@ async function runLiveE2ECollaborationSuite() {
         }
       }
 
-      assert.ok(tab1RemotePointers.length > 0, 'Tab 1 must receive collaborator pointers')
+      if (tab1RemotePointers.length === 0) {
+        const diagnostics = await page2.evaluate(() => ({
+          board: location.pathname.split('/').pop(),
+          editor: {
+            viewModeEnabled: window.__excalidrawAPI?.getAppState()?.viewModeEnabled,
+            isEditor: window.__collab?.isEditor,
+            isSpectator: window.__collab?.isSpectator,
+          },
+          collab: {
+            isEditor: window.__collab?.isEditor,
+            isSpectator: window.__collab?.isSpectator,
+            sessionId: window.__collab?.service?.activeSessionId,
+            isConnected: window.__collab?.service?.isConnected,
+            hasConnectionEpoch: Boolean(window.__collab?.service?.connectionEpoch),
+          },
+        }))
+        throw new Error(`Guest pointer did not reach the host: ${JSON.stringify(diagnostics)}`)
+      }
       const guestPointer = tab1RemotePointers[0]
       assert.ok(guestPointer.pointer, 'Pointer coordinates must be streamed')
       console.log(
@@ -323,8 +355,25 @@ async function runLiveE2ECollaborationSuite() {
         window.__collab?.broadcastChanges?.(updated)
       }, newShapeId)
 
-      // Wait for RTDB delta broadcast and reconciliation
-      await sleep(2500)
+      // Wait for RTDB delta broadcast and reconciliation instead of assuming
+      // a fixed emulator transport delay.
+      await page2.waitForFunction(
+        (id) => window.__excalidrawAPI.getSceneElements().some((element) => element.id === id),
+        { timeout: 10_000 },
+        newShapeId,
+      ).catch(async (error) => {
+        const diagnostics = await page1.evaluate((id) => {
+          const session = window.__collab?.service
+          return {
+            apiHasElement: window.__excalidrawAPI.getSceneElements().some((element) => element.id === id),
+            deltaRefHasElement: window.__collab?.lastBroadcastElementsRef?.current?.has(id) ?? null,
+            session: { activeBoardId: session?.activeBoardId, activeSessionId: session?.activeSessionId, isConnected: session?.isConnected, hasConnectionEpoch: Boolean(session?.connectionEpoch) },
+            editor: { viewModeEnabled: window.__excalidrawAPI.getAppState().viewModeEnabled, isEditor: window.__collab?.isEditor, isSpectator: window.__collab?.isSpectator },
+            lazyCollab: window.__lazyCollab?.isLazyCollabActive,
+          }
+        }, newShapeId)
+        throw new Error(`Peer did not receive the new element: ${JSON.stringify(diagnostics)}; ${error.message}`)
+      })
 
       // Tab 2 verifies that newShapeId arrived on its canvas
       const tab2Elements = await page2.evaluate(() => {
@@ -484,6 +533,11 @@ async function runLiveE2ECollaborationSuite() {
 
       await sleep(3000)
 
+      const guestAfterWake = await page2.evaluate(() => ({
+        viewModeEnabled: window.__excalidrawAPI?.getAppState()?.viewModeEnabled,
+      }))
+      assert.equal(guestAfterWake.viewModeEnabled, false, 'Authorized guest editor must remain writable after reconnect')
+
       // Tab 1 must automatically see Tab 2 re-announced with full name/initials WITHOUT refreshing page 2!
       const hostCollabCountAfterWake = await page1.evaluate(() => {
         const avatars = Array.from(document.querySelectorAll('.collab-avatar')).map((el) => ({
@@ -543,13 +597,18 @@ async function runLiveE2ECollaborationSuite() {
         {},
         [...idsBefore],
       )
-      const guestShapeId = await page2.evaluate(
+      const shapeId = await page2.evaluate(
         (knownIds) => {
           return window.__excalidrawAPI.getSceneElements().find((e) => !knownIds.includes(e.id))?.id || null
         },
         [...idsBefore],
       )
-      assert.ok(guestShapeId, 'Native draw must create one new element')
+      assert.ok(shapeId, 'Native draw must create one new element')
+      await page1.waitForFunction(
+        (id) => window.__excalidrawAPI.getSceneElements().some((element) => element.id === id && !element.isDeleted),
+        {},
+        shapeId,
+      )
 
       // The browser shortcut must remain native; no application interception.
       await page2.keyboard.down('Meta')
@@ -559,11 +618,11 @@ async function runLiveE2ECollaborationSuite() {
       await page1.waitForFunction(
         (id) => !window.__excalidrawAPI.getSceneElements().some((e) => e.id === id && !e.isDeleted),
         {},
-        guestShapeId,
+        shapeId,
       )
       const guestUndone = await page2.evaluate(
         (id) => !window.__excalidrawAPI.getSceneElements().some((e) => e.id === id && !e.isDeleted),
-        guestShapeId,
+        shapeId,
       )
       assert.equal(guestUndone, true, 'Native undo must remove the locally drawn shape')
       console.log('   ✓ Excalidraw native undo propagated to the peer without custom history interception')

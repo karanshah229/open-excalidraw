@@ -50,7 +50,7 @@ export const fenceBoardSceneGenerationReset = onCall({ region, enforceAppCheck: 
   if (request.auth.uid !== share.ownerId)
     throw new HttpsError('permission-denied', 'Only the board owner can restore a board version.')
 
-  let jobSnapshot = await jobRef.get(), existingJob = jobSnapshot.data()
+  const jobSnapshot = await jobRef.get(), existingJob = jobSnapshot.data()
   if (!existingJob || existingJob.kind !== 'generation-reset' || existingJob.ownerId !== actor.uid)
     throw new HttpsError('not-found', 'Prepared generation reset does not exist.')
   if (existingJob.phase === 'fenced' && existingJob.status === 'running') {

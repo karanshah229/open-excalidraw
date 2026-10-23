@@ -28,26 +28,26 @@ export function nextGenerationResetAction(record, observation) {
             if (observation.headGeneration === record.targetGeneration &&
                 observation.headRevisionId === record.targetHeadRevisionId)
                 return 'activate-target';
-            invalid('Firestore head does not match source or prepared target');
+            return invalid('Firestore head does not match source or prepared target');
         case 'published':
             if (observation.headGeneration !== record.targetGeneration ||
                 !record.targetHeadRevisionId || observation.headRevisionId !== record.targetHeadRevisionId)
-                invalid('published target does not match Firestore head');
+                return invalid('published target does not match Firestore head');
             if (!observation.admissionClosed || observation.admissionOwner !== record.token)
-                invalid('published operation no longer owns the closed RTDB gate');
+                return invalid('published operation no longer owns the closed RTDB gate');
             return observation.roomGeneration === record.targetGeneration ? 'reopen-admission' : 'activate-target';
         case 'activated':
             if (observation.headGeneration !== record.targetGeneration ||
                 observation.headRevisionId !== record.targetHeadRevisionId ||
                 observation.roomGeneration !== record.targetGeneration)
-                invalid('activated generation is inconsistent across stores');
+                return invalid('activated generation is inconsistent across stores');
             return observation.admissionClosed && observation.admissionOwner === record.token
                 ? 'reopen-admission'
                 : 'complete';
         case 'cancelled':
             if (observation.headGeneration !== record.sourceGeneration ||
                 observation.headRevisionId !== record.sourceHeadRevisionId)
-                invalid('cancelled operation cannot follow a published head');
+                return invalid('cancelled operation cannot follow a published head');
             return observation.admissionClosed && observation.admissionOwner === record.token
                 ? 'reopen-admission'
                 : 'complete';

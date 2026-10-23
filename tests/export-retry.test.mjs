@@ -40,8 +40,16 @@ try {
     }
     await workspaceStore.saveBoard({ ...board, scene })
     await workspaceApi.flushCloud()
-    const committed = await sceneService.load(board.id)
-    const storagePath = committed.scene.files.missing.storagePath
+    // The export retry test needs a durable cloud asset receipt. Workspace
+    // replication may still be draining local history after flushCloud, so
+    // publish the fixture asset explicitly before asserting that receipt.
+    const uid = getFirebaseAuth().currentUser.uid
+    const { storeSceneAssets } = await import('/src/features/assets/scene-assets.ts')
+    await sceneService.ensure(board.id, project.id)
+    const assetScene = await storeSceneAssets(scene, `users/${uid}/boards/${board.id}/assets`, project.id)
+    await sceneService.commit(board.id, assetScene)
+    const committed = await sceneService.loadFresh(board.id)
+    const storagePath = committed?.scene.files?.missing?.storagePath
     if (!storagePath) throw new Error('Image upload did not produce a cloud asset reference.')
     pauseCloudReplication()
     const localBoard = await workspaceStore.loadBoard(board.id)

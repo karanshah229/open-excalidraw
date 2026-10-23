@@ -66,7 +66,7 @@ try {
   })
   await page.goto('about:blank')
   await server.close()
-  const production = await preview({ root, preview: { host: '127.0.0.1', port, strictPort: true } })
+  const production = await preview({ root, mode: 'e2e', preview: { host: '127.0.0.1', port, strictPort: true } })
   server = { close: () => new Promise((resolve) => production.httpServer.close(resolve)) }
   // A stale deployment chunk must reload once and recover the persisted board.
   await page.setRequestInterception(true)

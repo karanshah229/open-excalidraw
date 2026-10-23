@@ -103,12 +103,18 @@ try {
   const chunkReads = calls.slice(loadStart).filter(
     (call) => call.endpoint === 'readBoardSceneChunks' && call.data.boardId === fixture.boardId,
   )
-  assert(pageReads.length > 0, 'Scene pages are read through the callable API.')
-  assert(chunkReads.length > 0, 'Scene chunks are read through the callable API.')
-  for (const call of [...pageReads, ...chunkReads]) {
+  const pinReads = calls.slice(loadStart).filter(
+    (call) => call.endpoint === 'acquireBoardSceneReadPin' && call.data.boardId === fixture.boardId,
+  )
+  assert(pinReads.length > 0, 'Scene payload bootstrap is authorized through the callable API.')
+  assert.equal(pageReads.length, 0, 'The first manifest page is included in the authorized pin response.')
+  assert.equal(chunkReads.length, 0, 'This small fixture fits in the authorized pin response payload batch.')
+  for (const call of [...pinReads, ...pageReads, ...chunkReads]) {
     assert.equal(call.data.sceneProtocolVersion, 2, `${call.endpoint} declares the scene protocol.`)
-    assert.equal(typeof call.data.pinId, 'string', `${call.endpoint} names the active reader pin.`)
-    assert.equal(call.data.revisionId, loaded.revisionId, `${call.endpoint} reads the pinned revision.`)
+    if (call.endpoint !== 'acquireBoardSceneReadPin') {
+      assert.equal(typeof call.data.pinId, 'string', `${call.endpoint} names the active reader pin.`)
+      assert.equal(call.data.revisionId, loaded.revisionId, `${call.endpoint} reads the pinned revision.`)
+    }
   }
   for (const call of chunkReads) {
     assert.equal(typeof call.data.pageId, 'string', 'Chunk calls are bounded to one manifest page.')

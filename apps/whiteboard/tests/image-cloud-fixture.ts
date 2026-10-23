@@ -29,6 +29,21 @@ export async function persistedScene(boardId: string, legacy?: any): Promise<Boa
   return (await readHistorySnapshot(boardId, undefined, false, false)).scene
 }
 
+async function waitForStableSceneHead(boardId: string) {
+  let previousRevision: string | undefined
+  let stableReads = 0
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const head = (await getDoc(doc(getFirestoreDb()!, 'boardScenes', boardId))).data()
+    const revision = head?.headRevisionId
+    if (revision && revision === previousRevision) stableReads++
+    else stableReads = 0
+    if (stableReads >= 3) return
+    previousRevision = revision
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+  throw new Error('Board history did not settle after initial cloud sync.')
+}
+
 export async function exerciseCloudAssets(dataURL: string, live?: string) {
   // Auth initializes first: this also verifies later Storage and Firestore emulator connections.
   const auth = getFirebaseAuth()!
@@ -81,6 +96,7 @@ export async function exerciseCloudAssets(dataURL: string, live?: string) {
     updatedAt: '',
     scene: { elements: [], appState: {} },
   })
+  await waitForStableSceneHead(sharedId)
   // Sharing an already-synced private board may receive metadata-only files.
   await sharingService.updateSharedScene(sharedId, privateScene)
   const sharedSnapshot = { scene: await persistedScene(sharedId) }

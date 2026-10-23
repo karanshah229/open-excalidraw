@@ -2,10 +2,22 @@ import puppeteer from 'puppeteer-core'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
+import { createRequire } from 'node:module'
 
 const ARTIFACT_DIR = process.env.E2E_ARTIFACT_DIR || '.system_generated/regression-screenshots'
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 const BASE_URL = process.env.E2E_BASE_URL || 'http://localhost:5173'
+const require = createRequire(new URL('../functions/package.json', import.meta.url))
+const { initializeApp } = require('firebase-admin/app')
+const { getDatabase } = require('firebase-admin/database')
+const databaseHost = process.env.FIREBASE_DATABASE_EMULATOR_HOST
+if (!databaseHost || process.env.GCLOUD_PROJECT !== 'demo-regression')
+  throw new Error('Visual E2E fixture seeding requires the isolated RTDB emulator.')
+const adminApp = initializeApp({
+  projectId: 'demo-regression',
+  databaseURL: `http://${databaseHost}?ns=demo-regression`,
+}, 'visual-screenshot-admin')
+const adminRtdb = getDatabase(adminApp)
 
 async function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -541,27 +553,33 @@ async function runVisualE2ESuite() {
         localStorage.setItem(`agentic-whiteboard:share:${cfg.boardId}`, JSON.stringify(cfg))
       }, shareConfig)
 
-      // Model ten editor sessions from the authenticated test user. RTDB rules
-      // intentionally require every session record's userId to match auth.uid;
-      // fabricated identities are not a valid integration-test shortcut.
-      await page1.evaluate(async (bid) => {
-        const collab = window.__collab
-        if (!collab?.service) return
-
-        const now = Date.now()
-        for (let i = 1; i <= 10; i++) {
-          await collab.service.injectPresence(bid, {
-            userId: collab.collabUser.uid,
-            sessionId: `sim_editor_${i}`,
-            displayName: `Engineer ${i}`,
-            color: '#3b82f6',
-            avatarUrl: null,
-            isAnonymous: true,
-            joinedAt: now - 100000 + i * 1000,
-            lastSeen: now,
-          })
-        }
-      }, boardId)
+      // Seed ten simulated editor records with Admin SDK. Client rules require
+      // a fresh server-minted connection epoch per session, so browser writes
+      // cannot faithfully represent independent sessions from one identity.
+      const sessionSeed = await page1.evaluate(() => ({
+        userId: window.__collab?.collabUser?.uid,
+        generation: window.__lazyCollab?.activeSessions?.find((session) => session.sceneGeneration)?.sceneGeneration,
+      }))
+      const presenceRoot = sessionSeed.generation
+        ? `presence/${boardId}/generations/${sessionSeed.generation}`
+        : `presence/${boardId}`
+      const now = Date.now()
+      for (let i = 1; i <= 10; i++) {
+        await adminRtdb.ref(`${presenceRoot}/sim_editor_${i}`).set({
+          userId: sessionSeed.userId,
+          sessionId: `sim_editor_${i}`,
+          sceneGeneration: sessionSeed.generation ?? 1,
+          ...(sessionSeed.generation ? { generation: sessionSeed.generation } : {}),
+          restoreFence: 0,
+          connectionEpoch: `admin-fixture-${i}`,
+          displayName: `Engineer ${i}`,
+          color: '#3b82f6',
+          avatarUrl: null,
+          isAnonymous: true,
+          joinedAt: now - 100000 + i * 1000,
+          lastSeen: now,
+        })
+      }
 
       // Open Tab 3: enters as 11th+ user -> Spectator Mode!
       await page3.goto(boardUrl, { waitUntil: 'domcontentloaded' })
@@ -583,12 +601,7 @@ async function runVisualE2ESuite() {
       console.log('\n📸 Feature 10: Spectator Auto-Promotion on Editor Slot Vacancy')
 
       // Remove 2 simulated editors so Tab 3 is promoted
-      await page1.evaluate(async (bid) => {
-        const collab = window.__collab
-        if (!collab?.service) return
-        await collab.service.removePresence(bid, 'sim_editor_1')
-        await collab.service.removePresence(bid, 'sim_editor_2')
-      }, boardId)
+      await Promise.all([1, 2].map((index) => adminRtdb.ref(`${presenceRoot}/sim_editor_${index}`).remove()))
 
       await sleep(3000)
 
@@ -599,13 +612,9 @@ async function runVisualE2ESuite() {
       console.log(`   ✓ Captured Promoted Editor Canvas: ${file10}`)
 
       // Clean up simulated editors and close spectator context
-      await page1.evaluate(async (bid) => {
-        const collab = window.__collab
-        if (!collab?.service) return
-        for (let i = 3; i <= 10; i++) {
-          await collab.service.removePresence(bid, `sim_editor_${i}`)
-        }
-      }, boardId)
+      await Promise.all(Array.from({ length: 8 }, (_, index) =>
+        adminRtdb.ref(`${presenceRoot}/sim_editor_${index + 3}`).remove(),
+      ))
 
       await spectatorContext.close()
     }
@@ -632,6 +641,7 @@ async function runVisualE2ESuite() {
     console.log('======================================================================\n')
   } finally {
     await browser.close()
+    adminRtdb.goOffline()
   }
 }
 

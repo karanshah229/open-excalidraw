@@ -659,6 +659,8 @@ try {
     )
     const config = (await db.doc(`projectShares/${project.id}`).get()).data()
     assert.deepEqual(config.invitedEmails.sort(), [identities.editor.email, identities.viewer.email].sort())
+    assert.equal(config.collaborators?.[identities.editor.email]?.role, 'editor', 'Editor invitation role must persist')
+    assert.equal(config.collaborators?.[identities.viewer.email]?.role, 'viewer', 'Viewer invitation role must persist')
     editor = await page('editor')
     viewer = await page('viewer')
     outsider = await page('outsider')
@@ -741,6 +743,11 @@ try {
       async () => (await db.doc(`boardShares/${createdByEditor}`).get()).data().boardName === 'Renamed by editor',
       'editor rename persisted',
     )
+    assert.equal(
+      await editor.evaluate(() => window.__hasUserInteracted()),
+      false,
+      'Changing board metadata must not mark the canvas as locally edited',
+    )
     await viewer.waitForSelector(`[data-board-id="${boardId}"] .board-preview-svg`)
   })
   await record('Inherited editors publish live canvas changes; viewers cannot write RTDB deltas', async () => {
@@ -751,7 +758,34 @@ try {
       'two collaborating sessions registered',
     )
     collabGeneration = (await db.doc(`boardScenes/${createdByEditor}`).get()).data().generation
-    await editor.waitForFunction(() => Boolean(window.__excalidrawAPI))
+    await editor.waitForFunction(
+      async (id, generation) => {
+        const collab = window.__collab
+        if (
+          !window.__excalidrawAPI ||
+          collab?.service?.activeBoardId !== id ||
+          !collab?.service?.connectionEpoch ||
+          !collab?.activeCollaborators?.length ||
+          window.__excalidrawAPI.getAppState().viewModeEnabled
+        )
+          return false
+        const { database, firebase } = window.__projectsTest
+        const sessionId = collab.collabUser?.sessionId
+        if (!sessionId) return false
+        const snapshot = await database.get(
+          database.ref(firebase.getFirebaseRtdb(), `presence/${id}/generations/${generation}/${sessionId}`),
+        )
+        const presence = snapshot.val()
+        return Boolean(
+          presence?.userId === collab.collabUser.uid &&
+          presence?.sceneGeneration === generation &&
+          presence?.connectionEpoch === collab.service.connectionEpoch,
+        )
+      },
+      { timeout: 30000 },
+      createdByEditor,
+      collabGeneration,
+    )
     await editor.evaluate(() => {
       window.__setUserInteracted()
       window.__excalidrawAPI.updateScene({
@@ -1871,7 +1905,11 @@ try {
     requests.some((request) => request.url.includes('/boardAsset') && request.operation === 'upload' && request.status === 200),
     'Must exercise authorized board asset uploads through the Functions gateway',
   )
-  assert.deepEqual(failures, [], 'No uncaught browser errors')
+  assert.deepEqual(
+    failures.filter(({ error }) => !/PERMISSION_DENIED: Permission denied/.test(error)),
+    [],
+    'No unexpected uncaught browser errors (explicitly denied RTDB access is expected in security checks)',
+  )
   console.log(`PASS: ${results.length} browser/network scenarios; Firebase rules and Functions exercised`)
 } catch (error) {
   console.error('Original project test failure:', error.stack)

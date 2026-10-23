@@ -417,7 +417,11 @@ function clearSharedHistoryRetry(boardId: string) {
 function scheduleSharedHistoryRetry(boardId: string) {
   if (sharedHistoryRetry.has(boardId)) return
   const attempt = sharedHistoryRetryAttempts.get(boardId) ?? 0
-  const delay = Math.min(15_000 * 2 ** attempt, 5 * 60_000)
+  // Keep transient history/CAS conflicts moving without leaving an active
+  // editor's outbox idle for minutes. Retryable uploads are idempotent and
+  // server-fenced, so a shorter cap is safe across overlapping publishers.
+  const exponential = Math.min(15_000 * 2 ** attempt, 30_000)
+  const delay = Math.min(exponential * (0.75 + Math.random() * 0.5), 30_000)
   sharedHistoryRetryAttempts.set(boardId, Math.min(attempt + 1, 5))
   sharedHistoryRetry.set(boardId, window.setTimeout(() => {
     sharedHistoryRetry.delete(boardId)

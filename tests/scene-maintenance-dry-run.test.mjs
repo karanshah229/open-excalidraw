@@ -54,7 +54,7 @@ test('dry-run CLI emits a persisted valid-board report without authorizing delet
   assert.equal(report.censusComplete, true)
   assert.equal(report.payloadBytes.stored, Buffer.byteLength(payload, 'utf8'))
   assert.equal(report.payloadBytes.reachable, Buffer.byteLength(payload, 'utf8'))
-  assert.equal(report.counts.writerProtocolVersions.v1, 1)
+  assert.equal(report.counts.writerProtocolVersions[`v${SCENE_PROTOCOL_VERSION}`], 1)
   assert.equal(report.plan.safeToCollect, true)
   assert.deepEqual(report.plan.candidateOrphans, [])
 })

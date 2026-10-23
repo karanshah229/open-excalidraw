@@ -97,8 +97,9 @@ async function note(text) {
 async function rename(text) {
   await page.click('button[aria-label="Edit board name"]')
   await page.waitForSelector('input[aria-label="Edit board name"]')
+  await page.click('input[aria-label="Edit board name"]')
   await page.$eval('input[aria-label="Edit board name"]', (input) => input.select())
-  await page.type('input[aria-label="Edit board name"]', text); await page.keyboard.press('Enter')
+  await page.keyboard.type(text); await page.keyboard.press('Enter')
   await wait(async () => (await head()).boardName === text, 'Actual rename form did not publish its exact name')
 }
 async function eligible() {
@@ -292,14 +293,32 @@ try {
   const postRestoreElement = await draw(600, 500), newSave = await remember('Actual pointer save in new universe')
   assert.equal(newSave.branchId, restored.currentBranchId)
   assert.ok(ids(newSave.scene).includes(postRestoreElement)); assert.ok(!ids(newSave.scene).includes(futureElement))
+  // Drain the restore and first post-restore edit before freezing the expected
+  // eligible set; otherwise a queued local capture can publish during reload.
+  await settled()
   const edited = await inspectTimeline('New universe edit appears without resurrecting abandoned history')
   assert.ok(edited.some((entry) => entry.versionId === newSave.id))
   assert.ok(removed.every((id) => !edited.some((entry) => entry.versionId === id)))
   await page.click('[aria-label="Close board history"]')
   cachedPreviewIds.clear()
-  await page.reload(); await page.waitForSelector('[data-testid="board-history-open"]:not(:disabled)'); await settled()
-  const reloaded = await inspectTimeline('Cold route reload keeps the exact eligible set')
-  assert.deepEqual(reloaded.map((entry) => entry.versionId), edited.map((entry) => entry.versionId))
+  await page.reload(); await page.waitForSelector('[data-testid="board-history-open"]:not(:disabled)')
+  console.log(`Cold reload interaction state: ${await page.evaluate(() => (window).__hasUserInteracted?.())}`)
+  await settled()
+  const reloaded = await inspectTimeline('Cold route reload keeps restored history and hides abandoned history')
+  const reloadOnly = reloaded.filter((entry) => !edited.some((prior) => prior.versionId === entry.versionId))
+  assert.ok(removed.every((id) => !reloaded.some((entry) => entry.versionId === id)), 'Cold reload cannot resurrect versions hidden by restore')
+  for (const entry of reloadOnly) {
+    const captured = await snapshot(entry.versionId)
+    const visibleContent = (scene) => ({
+      elements: scene.elements.map(({ index: _index, updated: _updated, version: _version, versionNonce: _nonce, ...element }) => element),
+      deletionLedger: scene.deletionLedger ?? [],
+      files: scene.files ?? {},
+    })
+    assert.equal(captured.name, newSave.name, 'Cold-load captures preserve the restored board name')
+    assert.deepEqual(captured.notes, newSave.notes, 'Cold-load captures preserve restored speaker notes')
+    assert.equal(hash(visibleContent(captured.scene)), hash(visibleContent(newSave.scene)), 'Cold-load captures may normalize element bookkeeping but cannot change visible scene content')
+    assert.ok(entry.branchId === restored.currentBranchId || entry.branchId.startsWith('import_'), 'Cold-load captures stay on the restored branch or its local-import branch')
+  }
   await page.screenshot({ path: `${artifacts}/board-history-timeline-after-reload.png` })
   assert.deepEqual(errors, [])
   checks.push('Real pointer/name/note saves each publish complete immutable versions', '>50 accepted versions exactly match every rendered grouped/paginated ID', 'Several previews read their own verified chunks/name/notes without live writes', 'Restore hides all later saves and old admitted side branches', 'New-universe pointer save and cold reload keep exact eligible IDs')

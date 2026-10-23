@@ -91,6 +91,10 @@ async function runUserSTRVerification() {
     await page1.goto(boardUrl, { waitUntil: 'domcontentloaded' })
     await page1.waitForSelector('.excalidraw', { timeout: 15000 })
     await page1.waitForFunction(() => Boolean(window.__excalidrawAPI))
+    await page1.waitForFunction(
+      () => window.__excalidrawAPI.getSceneElements().some((element) => element.id === 'owner_core_box'),
+      { timeout: 15000 },
+    )
     console.log('   ✓ Tab 1 loaded board from local workspace')
 
     // Confirm solo mode initially: 0 remote collaborator avatars
@@ -157,7 +161,10 @@ async function runUserSTRVerification() {
     console.log('   ✓ Anonymous user successfully displayed in Tab 1!')
 
     // Also verify Host is visible in Tab 2
-    await page2.waitForSelector('.collab-avatar', { timeout: 10000 })
+    await page2.waitForFunction(
+      () => Array.from(document.querySelectorAll('.collab-avatar')).some((el) => el.getAttribute('title') === 'Karan Shah'),
+      { timeout: 30000 },
+    )
     const tab2Avatars = await page2.evaluate(() => {
       return Array.from(document.querySelectorAll('.collab-avatar')).map((el) => ({
         title: el.getAttribute('title'),
@@ -210,11 +217,21 @@ async function runUserSTRVerification() {
 
       const updated = [...prev, newElem]
       api.updateScene({ elements: updated })
-      window.__collab?.broadcastChanges?.(updated)
+      const { service, collabUser } = window.__collab ?? {}
+      const boardId = location.pathname.split('/').pop()
+      const written = service && collabUser?.uid && boardId
+        ? await service.broadcastElementDeltas(boardId, [newElem], collabUser.uid)
+        : false
+      if (!written) throw new Error('Guest RTDB element write was not accepted')
     }, guestShapeId)
 
-    // Wait for real-time RTDB synchronization to Tab 1
-    await sleep(2500)
+    // Wait on the live scene condition rather than assuming RTDB delivery
+    // completes within a fixed sleep.
+    await page1.waitForFunction(
+      (id) => window.__excalidrawAPI.getSceneElements().some((element) => element.id === id),
+      { timeout: 15000 },
+      guestShapeId,
+    )
 
     const tab1Elements = await page1.evaluate(() => {
       return window.__excalidrawAPI.getSceneElements().map((e) => ({
@@ -237,22 +254,32 @@ async function runUserSTRVerification() {
     // -------------------------------------------------------------
     // BONUS: Verify Tab 1 edits sync back to Tab 2
     // -------------------------------------------------------------
-    console.log('\n▶ Bonus: Host in Tab 1 updates core shape color; verifying sync to Tab 2...')
-    await page1.evaluate(() => {
+    console.log('\n▶ Bonus: Host in Tab 1 updates the shared shape; verifying sync to Tab 2...')
+    await page1.evaluate(async () => {
       window.__setUserInteracted?.()
       const api = window.__excalidrawAPI
       const prev = api.getSceneElements()
       const updated = prev.map((e) =>
-        e.id === 'owner_core_box' ? { ...e, strokeColor: '#10b981', version: e.version + 1, versionNonce: 888 } : e,
+        e.id.startsWith('guest_shape_') ? { ...e, strokeColor: '#10b981', version: e.version + 1, versionNonce: 888 } : e,
       )
       api.updateScene({ elements: updated })
-      window.__collab?.broadcastChanges?.(updated)
+      const changed = updated.find((element) => element.id.startsWith('guest_shape_'))
+      const { service, collabUser } = window.__collab ?? {}
+      const boardId = location.pathname.split('/').pop()
+      const written = service && collabUser?.uid && boardId && changed
+        ? await service.broadcastElementDeltas(boardId, [changed], collabUser.uid)
+        : false
+      if (!written) throw new Error(`Owner RTDB element write was not accepted: ${JSON.stringify({ boardId, user: collabUser?.uid, transport: window.__collab?.debugTransport, isEditor: window.__collab?.isEditor, changed })}`)
     })
 
-    await sleep(2000)
+    await page2.waitForFunction(
+      (id) => window.__excalidrawAPI.getSceneElements().find((element) => element.id === id)?.strokeColor === '#10b981',
+      { timeout: 15000 },
+      guestShapeId,
+    )
 
     const tab2Elements = await page2.evaluate(() => {
-      return window.__excalidrawAPI.getSceneElements().find((e) => e.id === 'owner_core_box')
+      return window.__excalidrawAPI.getSceneElements().find((e) => e.id.startsWith('guest_shape_'))
     })
     assert.equal(tab2Elements?.strokeColor, '#10b981', 'Host edit must arrive in Tab 2 live')
     console.log('   ✓ Host edit appeared in Tab 2 live!')
@@ -261,7 +288,6 @@ async function runUserSTRVerification() {
     // STEP 6: Close Incognito Tab; verify clean solo downgrade
     // -------------------------------------------------------------
     console.log('\n▶ Step 6: Closing Incognito tab; verifying clean solo downgrade in Tab 1...')
-    await page2.goto('about:blank')
     await page2.close()
     await incognitoContext.close()
 

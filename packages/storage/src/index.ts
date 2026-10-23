@@ -625,6 +625,8 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
     const db = await database()
     const document = await (db.boards as any).findOne(boardId).exec()
     if (!document) return
+    const pendingRename = (await boardHistoryStore.listOutbox(boardId))
+      .some((entry) => !entry.headAcknowledged && entry.changedFields.name)
     await document.incrementalModify((current: BoardDocument) => {
       if (current.syncStatus === 'sync-blocked') return current
       if (current.cloudRevisionId === cloudRevisionId && !current.cloudScenePending && current.syncStatus === 'synced')
@@ -634,7 +636,7 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
           cloudVersionId: options?.cloudVersionId ?? current.cloudVersionId,
           cloudRestoreFence: options?.cloudRestoreFence ?? current.cloudRestoreFence,
           cloudNameRevision: options?.cloudNameRevision ?? current.cloudNameRevision,
-          name: options?.cloudBoardName ?? current.name,
+          name: pendingRename ? current.name : options?.cloudBoardName ?? current.name,
         }
       if (options && current.cloudRevisionId !== options.expectedCloudRevisionId) return current
       const pending = current.syncStatus !== 'synced'
@@ -657,6 +659,7 @@ export class RxDbWorkspaceStore implements WorkspaceStore {
         cloudRestoreFence: options?.cloudRestoreFence ?? current.cloudRestoreFence,
         cloudNameRevision: options?.cloudNameRevision ?? current.cloudNameRevision,
         cloudScenePending: false,
+        name: pendingRename ? current.name : options?.cloudBoardName ?? current.name,
         // Hydration advances the local optimistic token, never substitutes another device's token.
         revision: current.revision + 1,
         baseRevision: pending ? current.baseRevision : current.revision + 1,

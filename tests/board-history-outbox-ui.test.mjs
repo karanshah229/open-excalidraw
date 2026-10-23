@@ -206,13 +206,12 @@ try {
   await page.setOfflineMode(true)
   const staleRename = await capture('Stale offline rename', 180)
   await page.setOfflineMode(false)
-  await page.evaluate(async (boardId) => {
+  const concurrentHead = await head()
+  await page.evaluate(async ({ boardId, current }) => {
     const { projectCall } = await import('/src/features/sharing/project-service.ts')
-    const { sceneService } = await import('/src/features/scenes/scene-service.ts')
-    const current = await sceneService.load(boardId)
     await projectCall('updateBoardContent', { boardId, mutationId: crypto.randomUUID(), name: 'Other editor rename',
       nameRevision: current.nameRevision, generation: current.generation, expectedFence: current.restoreFence })
-  }, boardId)
+  }, { boardId, current: concurrentHead })
   const failedRename = await synchronize().then(() => false, () => true)
   assert.ok(failedRename, 'stale explicit rename CAS must conflict')
   cloud = await head()

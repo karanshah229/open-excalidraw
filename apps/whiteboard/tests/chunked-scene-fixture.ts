@@ -302,9 +302,10 @@ export async function traceSceneSubscriptions() {
     trace.push({ type: 'head-attach', boardId })
     return headSubscribe(
       boardId,
-      () => {
-        trace.push({ type: 'head-event', boardId })
-        callback()
+      (head) => {
+        trace.push({ type: 'head-event', boardId, revisionId: head?.headRevisionId,
+          generation: head?.generation })
+        callback(head)
       },
       (error) => {
         trace.push({ type: 'head-error', boardId, code: (error as any)?.code })

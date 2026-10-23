@@ -54,7 +54,7 @@ import {
   generateSessionId,
   type ActiveSessionRecord,
 } from '../features/collaboration'
-import { reconcileElementsAndDeletionLedger } from '../features/collaboration/reconcile'
+import { reconcileElementsAndDeletionLedger, reconcileElementsLWW } from '../features/collaboration/reconcile'
 import { getFirebaseAuth, getFirestoreDb, isFirebaseConfigured } from '../lib/firebase'
 import { createSceneSession } from '../features/scene/scene-session'
 import { scheduleWhiteboardFontPreload } from '../features/fonts/font-loading'
@@ -214,6 +214,15 @@ function getSceneSignature(
   )
 }
 
+function getSceneContentSignature(scene: Parameters<typeof getSceneSignature>[0]): string {
+  if (!scene) return ''
+  // Collaboration can update transport metadata while applying an already
+  // persisted remote snapshot. Those fields decide LWW ordering but do not
+  // represent a new canvas edit that needs another history publication.
+  const elements = (scene.elements ?? []).map(({ version: _version, versionNonce: _nonce, updated: _updated, lastModifiedBy: _actor, ...element }) => element)
+  return getSceneSignature({ ...scene, elements })
+}
+
 function prepareInitialElements(elements: readonly any[] = []): any[] {
   // Persisted scenes contain native elements, not generation skeletons.
   // Restore preserves frameId membership, bindings, versions and tombstones.
@@ -253,6 +262,7 @@ export function BoardEditor() {
   const socketRef = useRef<WebSocket | null>(null)
   const operationRef = useRef<string | null>(null)
   const saveTimer = useRef<number>()
+  const remoteSceneSaveTimer = useRef<number>()
   const saveChainRef = useRef<Promise<void>>(Promise.resolve())
   const draftChainRef = useRef<Promise<unknown>>(Promise.resolve())
   const [recoveredSharedScene, setRecoveredSharedScene] = useState<BoardScene | null>(null)
@@ -261,11 +271,13 @@ export function BoardEditor() {
   const applyingRemoteSceneRef = useRef(false)
   const pendingSceneRef = useRef<BoardScene | null>(null)
   const reconnectBarrierRef = useRef(false)
+  const syncRefreshRequestRef = useRef(0)
   const [isRefreshingAfterReconnect, setIsRefreshingAfterReconnect] = useState(false)
   const sceneGenerationRef = useRef<number>()
   const getSceneGeneration = useCallback(() => sceneGenerationRef.current ?? 1, [])
   const boardEpochRef = useRef(0)
   const generationConflictRef = useRef(false)
+  const generationConflictReasonRef = useRef<string | null>(null)
   const historyProtocolRef = useRef(false)
   const historyHeadRef = useRef<{
     generation: number
@@ -276,7 +288,7 @@ export function BoardEditor() {
     nameRevision?: number
   }>()
   const restoreGateRef = useRef(false)
-  const restoreGateBaseRef = useRef<{ generation?: number; restoreFence?: number }>()
+  const restoreGateBaseRef = useRef<{ generation?: number; restoreFence?: number; currentVersionId?: string }>()
   const restoreHydrateRef = useRef<() => Promise<void>>(async () => {})
   const [historyOpen, setHistoryOpen] = useState(false)
   const [historySource, setHistorySource] = useState<HistorySource>()
@@ -289,13 +301,13 @@ export function BoardEditor() {
   const baselineInFlightRef = useRef<Promise<unknown>>()
   const historyBaselineSceneRef = useRef<BoardScene>()
   const historyReadContextRef = useRef<{ contextId: string; notesPageCount: number; generation: number }>()
-  const publishedHydrationGenerationRef = useRef<number>()
   const setRestorationGate = useCallback(
     (blocked: boolean) => {
       if (blocked && !restoreGateRef.current) {
         restoreGateBaseRef.current = {
           generation: historyHeadRef.current?.generation,
           restoreFence: historyHeadRef.current?.restoreFence ?? 0,
+          currentVersionId: historyHeadRef.current?.currentVersionId,
         }
       }
       if (!blocked) restoreGateBaseRef.current = undefined
@@ -309,6 +321,8 @@ export function BoardEditor() {
       if (blocked) {
         if (saveTimer.current) window.clearTimeout(saveTimer.current)
         saveTimer.current = undefined
+        if (remoteSceneSaveTimer.current) window.clearTimeout(remoteSceneSaveTimer.current)
+        remoteSceneSaveTimer.current = undefined
         ++importRequestRef.current
       }
     },
@@ -333,10 +347,11 @@ export function BoardEditor() {
       try {
         if (awaitingInitialSceneRef.current) return
 
-        const latest = await sceneService.load(boardId)
+        const latest = await sceneService.loadFresh(boardId)
         if (!latest) throw new Error('The committed board scene is unavailable.')
         if (sceneGenerationRef.current !== undefined && latest.generation !== sceneGenerationRef.current) {
           generationConflictRef.current = true
+          generationConflictReasonRef.current = 'reconnect-generation-mismatch'
           setIsReadOnly(true)
           setState('Conflict')
           return
@@ -348,15 +363,40 @@ export function BoardEditor() {
           appState: appStateRef.current,
           deletionLedger: deletionLedgerRef.current,
         }
+        const currentSignature = getSceneSignature(currentScene)
         const hasLocalChanges = Boolean(
           pendingSceneRef.current ||
-          (committedSignatureRef.current && getSceneSignature(currentScene) !== committedSignatureRef.current),
+          (userHasInteractedRef.current &&
+            savedSignature.current &&
+            currentSignature !== savedSignature.current),
         )
 
         if (hasLocalChanges) {
+          if (historyProtocolRef.current) {
+            const db = getFirestoreDb()
+            if (db) {
+              const headSnapshot = await getDocFromServer(doc(db, 'boardScenes', boardId))
+              if (headSnapshot.exists()) historyHeadRef.current = headSnapshot.data() as any
+            }
+          }
+          const sameGenerationHistoryHead =
+            historyProtocolRef.current &&
+            latest.generation === sceneGenerationRef.current &&
+            !historyHeadRef.current?.restoreOperationId
+          if (sameGenerationHistoryHead) {
+            // A restore creates a new scene generation. Within the same
+            // generation, keep this peer's dirty records and let the normal
+            // version/fence checks reconcile them instead of stranding the
+            // editor in conflict mode after a failed restore fence.
+            generationConflictRef.current = false
+            generationConflictReasonRef.current = null
+            setIsReadOnly(ownedSyncBlockedRef.current || accessDeniedRef.current || !canEditBoardRef.current)
+            return
+          }
           // Keep the local draft visible and recoverable. Never replay it over a
           // newer canonical head automatically after an offline interval.
           generationConflictRef.current = true
+          generationConflictReasonRef.current = 'local-edits-across-reconnect'
           setIsReadOnly(true)
           setState('Conflict')
           return
@@ -410,7 +450,13 @@ export function BoardEditor() {
   }, [boardId])
 
   useEffect(() => {
-    const handleUserInteraction = () => {
+    const handleUserInteraction = (event: Event) => {
+      const target = event.target
+      if (!(target instanceof Element) || !target.closest('.excalidraw')) return
+      // History is rendered inside Excalidraw's shell. Browsing and previewing
+      // versions must not count as canvas interaction, or the next internal
+      // normalization can be mistaken for a user edit and saved as a version.
+      if (target.closest('[data-testid^="board-history"], [data-testid^="history-"]')) return
       userHasInteractedRef.current = true
     }
     window.addEventListener('pointerdown', handleUserInteraction, { capture: true })
@@ -557,24 +603,61 @@ export function BoardEditor() {
   const isLazyCollabActiveRef = useRef(isLazyCollabActive)
   isLazyCollabActiveRef.current = isLazyCollabActive
   const [isTransitioningCollab, setIsTransitioningCollab] = useState(false)
-  const onRemoteSceneApply = useCallback((elements: readonly any[], phase: 'before' | 'after') => {
+  const remoteSceneBaseSignatureRef = useRef<string | null | undefined>(undefined)
+  const remoteSceneContentSignatureRef = useRef<string | null>(null)
+  const remoteSceneApplyRafRef = useRef<number | null>(null)
+  const persistRemoteSceneRef = useRef<((scene: BoardScene) => void) | null>(null)
+  const onRemoteSceneApply = useCallback((elements: readonly any[], phase: 'before' | 'after', persistRemote: boolean) => {
     if (phase === 'before') {
+      remoteSceneBaseSignatureRef.current = savedSignature.current
       applyingRemoteSceneRef.current = true
       return
     }
     // Excalidraw may normalize an incoming element while updateScene runs.
-    // Read the post-update scene so remote normalization becomes the baseline,
-    // without turning it into a local save. Preserve any queued local snapshot,
+    // Read the post-update scene so remote normalization becomes the baseline.
+    // Preserve any queued local snapshot,
     // timer and committed signature.
     const rendered = apiRef.current?.getSceneElementsIncludingDeleted?.() ?? elements
     elementsRef.current = [...rendered]
     filesRef.current = apiRef.current?.getFiles() ?? filesRef.current
     const appState = apiRef.current?.getAppState() ?? appStateRef.current
     appStateRef.current = { ...appStateRef.current, selectedElementIds: appState.selectedElementIds }
-    savedSignature.current = getSceneSignature({ elements: rendered, appState, files: filesRef.current })
-    applyingRemoteSceneRef.current = false
+    const scene: BoardScene = {
+      elements: [...rendered],
+      files: filesRef.current,
+      appState: {
+        theme: appState.theme,
+        viewBackgroundColor: appState.viewBackgroundColor,
+        gridModeEnabled: appState.gridModeEnabled,
+        objectsSnapModeEnabled: appState.objectsSnapModeEnabled,
+      },
+      deletionLedger: deletionLedgerRef.current,
+    }
+    const signature = getSceneSignature({ ...scene, appState })
+    remoteSceneContentSignatureRef.current = getSceneContentSignature({ ...scene, appState })
+    const contentChanged = remoteSceneBaseSignatureRef.current !== signature
+    savedSignature.current = signature
+    // Excalidraw can emit onChange on the next animation frame after
+    // updateScene returns. Keep the remote-apply guard through that frame so
+    // the remote refresh is not mistaken for a new local edit and re-enqueued
+    // into history (which can otherwise create a peer-to-peer save loop).
+    if (remoteSceneApplyRafRef.current !== null) cancelAnimationFrame(remoteSceneApplyRafRef.current)
+    remoteSceneApplyRafRef.current = requestAnimationFrame(() => {
+      remoteSceneApplyRafRef.current = null
+      applyingRemoteSceneRef.current = false
+    })
+    remoteSceneBaseSignatureRef.current = null
+    // Remote LWW updates may normalize a live element after its originating
+    // editor has already committed its snapshot. Persist the settled scene
+    // through the normal debounced save path so RTDB and chunked Firestore
+    // cannot remain divergent indefinitely. Read-only/spectator peers never
+    // reach this path.
+    // History-protocol boards persist authored edits through their accepted
+    // version/outbox flow; canonical refreshes are already durable and must
+    // not recursively enqueue a second mirror commit.
+    if (persistRemote && contentChanged && !historyProtocolRef.current) persistRemoteSceneRef.current?.(scene)
   }, [])
-  const { activeCollaborators, onPointerUpdate, broadcastChanges, isSpectator } = useCollaboration({
+  const { activeCollaborators, onPointerUpdate, broadcastChanges, broadcastCanonicalScene, isSpectator } = useCollaboration({
     boardId,
     enabled: Boolean(
       isFirebaseConfigured &&
@@ -594,16 +677,143 @@ export function BoardEditor() {
     appStateRef,
     onConnectionChange: handleCollabConnectionChange,
     getSceneGeneration,
-    generation: historyGeneration,
-    expectedFence: historyFence,
+    // Shared-board metadata already carries the generation before history
+    // subscription finishes. Use it immediately so collaboration never starts
+    // on the legacy RTDB path for a generation-aware room.
+    generation: historyGeneration ?? sceneGenerationRef.current,
+    expectedFence: historyFence ?? 0,
     restorationBlocked,
     onRemoteSceneApply,
   })
+
+  // Reconnect may temporarily block an editor that has an offline draft. Once
+  // the workspace outbox has merged and acknowledged that draft, hydrate the
+  // committed result and seed it into RTDB so the other live editors converge.
+  useEffect(() => {
+    let active = true
+    const refreshAfterSync = async (event: Event) => {
+      const status = (event as CustomEvent<string>).detail
+      // A workspace metadata retry can fail after the scene head and every
+      // local history capture were already committed. In that case the board
+      // still needs to seed that acknowledged canonical head into RTDB.
+      // Pending history below remains the safety fence for uncommitted edits.
+      if (status !== 'synced' && status !== 'sync-failed') return
+      const requestId = ++syncRefreshRequestRef.current
+      const isCurrentRequest = () => active && requestId === syncRefreshRequestRef.current
+      // The sync notification can arrive while a multi-capture offline history
+      // outbox is still draining. Keep this refresh alive so its final
+      // acknowledgement is not lost; newer refreshes/unmounts cancel it.
+      const pendingDeadline = Date.now() + 5 * 60_000
+      while ((await boardHistoryStore.listOutbox(boardId)).some((entry) => entry.retryState === 'pending')) {
+        if (!isCurrentRequest() || Date.now() >= pendingDeadline) return
+        await new Promise((resolve) => window.setTimeout(resolve, 250))
+      }
+      if (!isCurrentRequest()) return
+      if (!generationConflictRef.current) {
+        const acknowledgedPendingScene = pendingSceneRef.current
+        // Shared editors can finish a cloud merge with a same-version local
+        // gesture frame still rendered. Once local writes are acknowledged,
+        // hydrate the canonical head and broadcast its resolved elements.
+        // The workspace owner can collaborate on their own board as well as
+        // guests on a shared-link route. After an acknowledged cloud merge,
+        // both kinds of active editors must seed the canonical scene into RTDB.
+        if (!isLazyCollabActiveRef.current || restoreGateRef.current) return
+        const latest = await sceneService.loadFresh(boardId)
+        if (!isCurrentRequest() || !latest || latest.generation !== sceneGenerationRef.current) return
+        const loadedScene = await restoreSceneAssets(latest.scene, filesRef.current, latest.readContextId)
+        // A live RTDB delta may land while the Firestore read is in flight.
+        // Merge it back before applying this snapshot so an older pinned head
+        // cannot erase a shape/tombstone that the editor has already received.
+        const liveElements = reconcileElementsLWW(
+          loadedScene.elements,
+          apiRef.current?.getSceneElementsIncludingDeleted() ?? elementsRef.current,
+        )
+        const scene: BoardScene = {
+          ...loadedScene,
+          elements: liveElements,
+          // The server owns observation timestamps and compact deletion
+          // records. Live RTDB element reconciliation must preserve its ledger.
+          deletionLedger: loadedScene.deletionLedger ?? [],
+        }
+        // A draft that was pending when this acknowledged sync began is now
+        // represented by the cloud head and can be cleared after applying it.
+        // A different pending scene means the user edited during our read; let
+        // that newer save finish before applying this snapshot.
+        if (!isCurrentRequest() || pendingSceneRef.current !== acknowledgedPendingScene || restoreGateRef.current) return
+        const signature = getSceneSignature(scene)
+        // An equal local signature does not prove RTDB has the canonical
+        // records: the local scene may have been updated by the outbox merge
+        // before this recovery event. Always seed the resolved head so live
+        // collaborators can converge from stale element records.
+        const elements = await broadcastCanonicalScene(scene.elements)
+        elementsRef.current = elements
+        filesRef.current = (scene.files ?? {}) as BinaryFiles
+        deletionLedgerRef.current = scene.deletionLedger ?? []
+        appStateRef.current = scene.appState ?? {}
+        onRemoteSceneApply(elements, 'before', false)
+        try {
+          apiRef.current?.updateScene({ elements: elements as any, captureUpdate: CaptureUpdateAction.NEVER })
+        } finally {
+          onRemoteSceneApply(elements, 'after', false)
+        }
+        if (pendingSceneRef.current === acknowledgedPendingScene) pendingSceneRef.current = null
+        savedSignature.current = getSceneSignature({ ...scene, elements })
+        committedSignatureRef.current = savedSignature.current
+        if (scene.files) apiRef.current?.addFiles(Object.values(scene.files) as any[])
+        setState(statusLabel('synced'))
+        return
+      }
+      const document = await workspaceStore.loadBoard(boardId).catch(() => null)
+      // The outbox settle path may already have advanced documentRef before
+      // this event runs. A matching revision therefore does not mean the
+      // editor or RTDB has been hydrated with that canonical scene.
+      if (!active || !document || !document.cloudRevisionId) return
+      const loadedScene = await restoreSceneAssets(document.scene, filesRef.current)
+      const liveElements = reconcileElementsLWW(
+        loadedScene.elements,
+        apiRef.current?.getSceneElementsIncludingDeleted() ?? elementsRef.current,
+      )
+      const scene: BoardScene = {
+        ...loadedScene,
+        elements: liveElements,
+        deletionLedger: loadedScene.deletionLedger ?? [],
+      }
+      if (!isCurrentRequest() || sceneGenerationRef.current !== document.cloudGeneration) return
+      const elements = await broadcastCanonicalScene(scene.elements)
+      elementsRef.current = elements
+      filesRef.current = (scene.files ?? {}) as BinaryFiles
+      deletionLedgerRef.current = scene.deletionLedger ?? []
+      appStateRef.current = scene.appState ?? {}
+      pendingSceneRef.current = null
+      generationConflictRef.current = false
+      generationConflictReasonRef.current = null
+      awaitingInitialSceneRef.current = false
+      onRemoteSceneApply(elements, 'before', false)
+      try {
+        apiRef.current?.updateScene({ elements: elements as any, captureUpdate: CaptureUpdateAction.NEVER })
+      } finally {
+        onRemoteSceneApply(elements, 'after', false)
+      }
+      savedSignature.current = getSceneSignature({ ...scene, elements })
+      committedSignatureRef.current = savedSignature.current
+      if (scene.files) apiRef.current?.addFiles(Object.values(scene.files) as any[])
+      setIsReadOnly(ownedSyncBlockedRef.current)
+      setState(statusLabel('synced'))
+    }
+    const eventName = `board-sync:${boardId}`
+    const listener = (event: Event) => { void refreshAfterSync(event).catch((error) => console.error('Failed to apply recovered board scene:', error)) }
+    window.addEventListener(eventName, listener)
+    return () => { active = false; window.removeEventListener(eventName, listener) }
+  }, [boardId, broadcastCanonicalScene, apiRef, onRemoteSceneApply])
 
   if (import.meta.env.DEV && typeof window !== 'undefined') {
     ;(window as any).__lazyCollab = {
       isLazyCollabActive,
       isTransitioningCollab,
+      isReadOnly,
+      restorationBlocked,
+      generationConflict: generationConflictRef.current,
+      generationConflictReason: generationConflictReasonRef.current,
       activeSessions,
       activeCollaborators,
     }
@@ -949,12 +1159,14 @@ export function BoardEditor() {
         const generationAdvanced =
           (sceneGenerationRef.current !== undefined && head.generation > sceneGenerationRef.current) ||
           (before?.document.cloudGeneration !== undefined && head.generation > before.document.cloudGeneration) ||
-          (gateBase?.generation !== undefined && head.generation > gateBase.generation) ||
-          (gateBase?.restoreFence !== undefined && (head.restoreFence ?? 0) > gateBase.restoreFence)
-        if (generationAdvanced) publishedHydrationGenerationRef.current = head.generation
-        if (publishedHydrationGenerationRef.current !== head.generation) {
+          (gateBase?.generation !== undefined && head.generation > gateBase.generation)
+        const replacementPublished = generationAdvanced || Boolean(
+          gateBase?.currentVersionId && head.currentVersionId !== gateBase.currentVersionId,
+        )
+        if (!replacementPublished) {
           // No successful replacement: a failed same-generation restore must preserve every draft.
           generationConflictRef.current = false
+          generationConflictReasonRef.current = null
           setIsReadOnly(ownedSyncBlockedRef.current || accessDeniedRef.current || !canEditBoardRef.current)
           setRestorationGate(false)
           window.dispatchEvent(
@@ -1069,7 +1281,6 @@ export function BoardEditor() {
       if (!historyIsLocal && historyHeadRef.current?.generation !== replacement.generation)
         throw new Error('A newer restoration replaced this board. Retry loading it.')
       if (!historyHeadRef.current?.restoreOperationId) {
-        publishedHydrationGenerationRef.current = undefined
         setRestorationGate(false)
         setIsReadOnly(ownedSyncBlockedRef.current || accessDeniedRef.current || !canEditBoardRef.current)
         setState(historyIsLocal ? 'Synced locally' : 'Synced')
@@ -1169,6 +1380,7 @@ export function BoardEditor() {
         } else if (restoreGateRef.current && !hydrationInFlightRef.current) {
           // A same-generation abort retains drafts. Refresh the fence before producers resume.
           generationConflictRef.current = false
+          generationConflictReasonRef.current = null
           setIsReadOnly(ownedSyncBlockedRef.current || accessDeniedRef.current || !canEditBoardRef.current)
           setRestorationGate(false)
           window.dispatchEvent(
@@ -1230,6 +1442,7 @@ export function BoardEditor() {
     hasAutoZoomedRef.current = false
     sceneGenerationRef.current = undefined
     generationConflictRef.current = false
+    generationConflictReasonRef.current = null
     setInitialData(null)
     setRecoveredSharedScene(null)
     documentRef.current = null
@@ -1596,6 +1809,7 @@ export function BoardEditor() {
         if (historyProtocolRef.current && (generationChanged || restoreGateRef.current)) return
         if (generationChanged && (pendingSceneRef.current || isLazyCollabActiveRef.current)) {
           generationConflictRef.current = true
+          generationConflictReasonRef.current = 'sharing-generation-changed-with-local-edits'
           setState('Conflict')
           setIsReadOnly(true)
           return
@@ -1720,6 +1934,7 @@ export function BoardEditor() {
         documentRef.current = document
         if (document.syncStatus === 'conflict') {
           generationConflictRef.current = true
+          generationConflictReasonRef.current = 'cloud-scene-conflict-status'
           setState('Conflict')
           setIsReadOnly(true)
           return
@@ -1731,6 +1946,7 @@ export function BoardEditor() {
         if (historyProtocolRef.current && (generationChanged || restoreGateRef.current)) return
         if (generationChanged && (pendingSceneRef.current || isLazyCollabActiveRef.current)) {
           generationConflictRef.current = true
+          generationConflictReasonRef.current = 'cloud-scene-generation-changed-with-pending-edits'
           setState('Conflict')
           setIsReadOnly(true)
           return
@@ -1785,9 +2001,18 @@ export function BoardEditor() {
       // lifecycle still blocks edits and retains pending bytes until restoration.
       if (isSharedBoard && !documentRef.current && status !== 'sync-blocked' && !ownedSyncBlockedRef.current) return
       ownedSyncBlockedRef.current = status === 'sync-blocked'
-      if (status === 'conflict') generationConflictRef.current = true
+      // A shared board's authoritative generation/fence is tracked by the
+      // scene-head listener. The workspace outbox can still report a stale
+      // metadata conflict after its scene was successfully merged and seeded
+      // into RTDB; making the live editor view-only here would strand the
+      // owner even though collaboration has already recovered the board.
+      const activeSharedScene = isSharedBoard && isLazyCollabActiveRef.current
+      if (status === 'conflict' && !activeSharedScene) {
+        generationConflictRef.current = true
+        generationConflictReasonRef.current = 'workspace-conflict-while-not-active-shared-scene'
+      }
       setState(statusLabel(status))
-      setIsReadOnly(ownedSyncBlockedRef.current || generationConflictRef.current)
+      setIsReadOnly(ownedSyncBlockedRef.current || generationConflictRef.current || !canEditBoardRef.current)
       if (ownedSyncBlockedRef.current) setAccessDenied(false)
     }
     const unsubscribe = workspaceApi.subscribeToBoardSyncStatus(boardId, applySyncStatus)
@@ -2466,6 +2691,7 @@ export function BoardEditor() {
         (error instanceof Error && error.message === 'BOARD_GENERATION_CONFLICT')
       ) {
         generationConflictRef.current = true
+        generationConflictReasonRef.current = 'scene-save-generation-conflict'
         setState('Conflict')
         if (historyProtocolRef.current) {
           setRestorationGate(true)
@@ -2618,6 +2844,50 @@ export function BoardEditor() {
     },
     [boardId, enqueueSceneSave, handleSaveFailure, isReadOnly, isTransitioningCollab],
   )
+  // Remote LWW reconciliation is canonical shared state, not a user action.
+  // Persist it to the shared scene without manufacturing another local history
+  // entry for every peer that applies the same collaboration update.
+  persistRemoteSceneRef.current = (scene) => {
+    if (isReadOnly || !isSharedBoard || restoreGateRef.current) return
+    // Let one deterministic non-owner editor mirror remote LWW convergence to
+    // Firestore. Every peer sees the same RTDB deltas; letting each write a
+    // full scene creates competing chunk uploads and rapid-change rejections.
+    const ownerId = boardMeta?.projectOwnerId
+    const peers = activeSessions
+      .filter((session) => session.sceneGeneration === (sceneGenerationRef.current ?? 1) && session.userId !== ownerId)
+      .sort((a, b) => a.joinedAt - b.joinedAt || a.sessionId.localeCompare(b.sessionId))
+    const leader = peers[0] ?? activeSessions.find((session) => session.userId === ownerId)
+    if (leader && leader.sessionId !== sessionIdRef.current) return
+    if (remoteSceneSaveTimer.current) window.clearTimeout(remoteSceneSaveTimer.current)
+    const epoch = boardEpochRef.current
+    const generation = sceneGenerationRef.current
+    const uid = getFirebaseAuth()?.currentUser?.uid
+    remoteSceneSaveTimer.current = window.setTimeout(async () => {
+      remoteSceneSaveTimer.current = undefined
+      try {
+        if (!uid || getFirebaseAuth()?.currentUser?.uid !== uid || epoch !== boardEpochRef.current) return
+        const currentDocument = documentRef.current
+        if (currentDocument?.id === boardId) {
+          const latest = await workspaceApi.loadBoard(boardId)
+          if (epoch !== boardEpochRef.current) return
+          if (latest) {
+            const saved = await workspaceApi.saveBoard({
+              ...latest,
+              scene,
+              revision: currentDocument.revision,
+              cloudGeneration: generation ?? currentDocument.cloudGeneration,
+            })
+            if (epoch === boardEpochRef.current) documentRef.current = saved
+          }
+        }
+        if (epoch !== boardEpochRef.current || restoreGateRef.current) return
+        await sharingService.updateSharedScene(boardId, scene, generation)
+        if (epoch === boardEpochRef.current) setState('Synced')
+      } catch (error) {
+        handleSaveFailure(scene, error)
+      }
+    }, 2000)
+  }
 
   useEffect(() => {
     if (!restorationBlocked && pendingSceneRef.current && !isReadOnly) scheduleSave(pendingSceneRef.current)
@@ -2646,18 +2916,37 @@ export function BoardEditor() {
       files: BinaryFiles = apiRef.current?.getFiles() ?? {},
     ) => {
       if (reconnectBarrierRef.current) return
+      const currentSceneElements = apiRef.current?.getSceneElementsIncludingDeleted?.() ?? elements
       // Slides have derived numbers, so the native Frame title editor does not apply.
       if (
         appState.editingFrame &&
-        elements.some((element) => element.id === appState.editingFrame && slideMetadata(element))
+        currentSceneElements.some((element) => element.id === appState.editingFrame && slideMetadata(element))
       ) {
         apiRef.current?.updateScene({ appState: { editingFrame: null } })
       }
       // Read-only clients and remote updates still publish current slide content.
-      sceneSession.publish(elements as any, appState as any, files)
+      sceneSession.publish(currentSceneElements as any, appState as any, files)
       if (isReadOnly || isTransitioningCollab || restoreGateRef.current) return
       const stableElementBase = documentRef.current?.scene?.elements ?? elementsRef.current
-      const reconciled = reconcileElementsAndDeletionLedger(stableElementBase, elements, deletionLedgerRef.current, [])
+      const currentIds = new Set(currentSceneElements.map((element) => element.id))
+      const removedElements = !applyingRemoteSceneRef.current && userHasInteractedRef.current
+        ? stableElementBase.filter((element) => !element.isDeleted && !currentIds.has(element.id))
+        : []
+      const incomingElements = [
+        ...currentSceneElements,
+        ...removedElements.map((element) => ({
+          ...element,
+          isDeleted: true,
+          version: Number(element.version ?? 0) + 1,
+          versionNonce: Math.floor(Math.random() * Number.MAX_SAFE_INTEGER),
+        })),
+      ]
+      const reconciled = reconcileElementsAndDeletionLedger(
+        stableElementBase,
+        incomingElements,
+        deletionLedgerRef.current,
+        [],
+      )
       deletionLedgerRef.current = reconciled.deletionLedger
       elementsRef.current = reconciled.elements
       filesRef.current = files
@@ -2675,6 +2964,14 @@ export function BoardEditor() {
         },
       }
       const signature = getSceneSignature(scene)
+      if (remoteSceneContentSignatureRef.current !== null) {
+        const isRemoteTransportOnlyChange = getSceneContentSignature(scene) === remoteSceneContentSignatureRef.current
+        if (isRemoteTransportOnlyChange) {
+          savedSignature.current = signature
+          return
+        }
+        remoteSceneContentSignatureRef.current = null
+      }
       // 1. Initial scene mount absorption & auto-zoom
       if (awaitingInitialSceneRef.current) {
         awaitingInitialSceneRef.current = false
@@ -2707,14 +3004,32 @@ export function BoardEditor() {
 
       // 3. If there are no real changes from the last saved signature, skip
       if (signature === savedSignature.current) return
-      savedSignature.current = signature
       // Excalidraw's onChange element list may omit deleted elements. RTDB
       // collaboration must still receive their tombstones so peers cannot
       // resurrect stale copies, and can apply a later undo as a newer update.
-      broadcastChanges(apiRef.current?.getSceneElementsIncludingDeleted?.() ?? elements)
+      broadcastChanges(reconciled.elements)
+
+      // Collaboration may raise a same-version edit (especially a tombstone)
+      // before it is written to RTDB. broadcastChanges updates elementsRef and
+      // Excalidraw synchronously, so capture that winning version in the local
+      // scene too. Otherwise the debounced save below can overwrite a nested
+      // onChange save with the pre-bump version and lose the deletion on cloud
+      // merge when an active copy has the same version and a lower nonce.
+      const postBroadcast = reconcileElementsAndDeletionLedger(
+        stableElementBase,
+        elementsRef.current,
+        deletionLedgerRef.current,
+        [],
+      )
+      elementsRef.current = postBroadcast.elements
+      deletionLedgerRef.current = postBroadcast.deletionLedger
+      scene.elements = postBroadcast.elements
+      scene.deletionLedger = postBroadcast.deletionLedger
+      const persistedSignature = getSceneSignature(scene)
+      savedSignature.current = persistedSignature
 
       // 4. Check if current scene is back to committed state (e.g. reverted via Cmd+Z)
-      const isBackToCommitted = signature === committedSignatureRef.current
+      const isBackToCommitted = persistedSignature === committedSignatureRef.current
       if (isBackToCommitted) {
         if (saveTimer.current) {
           window.clearTimeout(saveTimer.current)
@@ -3361,6 +3676,7 @@ export function BoardEditor() {
                 ;(window as any).__setUserInteracted = () => {
                   userHasInteractedRef.current = true
                 }
+                ;(window as any).__hasUserInteracted = () => userHasInteractedRef.current
                 ;(window as any).__hasUnsavedChanges = () => hasUnsavedChangesRef.current
                 ;(window as any).__pendingScene = () => pendingSceneRef.current
                 ;(window as any).__triggerSceneChange = (elements: any[]) => {
